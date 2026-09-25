@@ -21,6 +21,8 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -36,6 +38,7 @@ import com.klausms.vpn.ui.components.PrimaryButton
 import com.klausms.vpn.ui.components.SecondaryButton
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
+import kotlinx.coroutines.launch
 
 /** Sheet for pasting keys or a subscription link. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -43,6 +46,16 @@ import com.klausms.vpn.ui.theme.kc
 fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scope = rememberCoroutineScope()
+    // Slide the sheet away first, then leave (as a swipe down does). Once:
+    // a double tap on "Добавить" must not add the keys twice.
+    var closing by remember { mutableStateOf(false) }
+    val close: (then: () -> Unit) -> Unit = { then ->
+        if (!closing) {
+            closing = true
+            scope.launch { sheetState.hide() }.invokeOnCompletion { then() }
+        }
+    }
     // Survives a rotation; a huge paste is not kept (instance state is small).
     var text by rememberSaveable(stateSaver = CappedText) { mutableStateOf("") }
     var clipboardEmpty by rememberSaveable { mutableStateOf(false) }
@@ -70,7 +83,7 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit) {
         ) {
             Box(Modifier.fillMaxWidth().height(52.dp)) {
                 Box(Modifier.align(Alignment.CenterStart)) {
-                    GlassIconButton(R.drawable.ic_close_ios, "Закрыть", onClick = onDismiss, iconSize = 16.dp)
+                    GlassIconButton(R.drawable.ic_close_ios, "Закрыть", onClick = { close(onDismiss) }, iconSize = 16.dp)
                 }
                 Text("Добавить сервер", style = IosType.headline, color = kc.label, modifier = Modifier.align(Alignment.Center))
             }
@@ -114,7 +127,10 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit) {
                 Spacer(Modifier.height(10.dp))
                 PrimaryButton("Добавить", onClick = {}, enabled = false)
             } else {
-                PrimaryButton("Добавить", onClick = { onAdd(text) })
+                PrimaryButton("Добавить", onClick = {
+                    val keys = text
+                    close { onAdd(keys) }
+                })
                 Spacer(Modifier.height(10.dp))
                 SecondaryButton("Очистить", onClick = { text = "" })
             }

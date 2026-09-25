@@ -34,7 +34,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -110,26 +109,19 @@ class XrayVpnService : VpnService() {
 
     @Volatile
     private var resetJob: Job? = null
-    private var trafficJob: Job? = null
 
     private val callbacks = RemoteCallbackList<IVpnCallback>()
-    private var totalUp = 0L
-    private var totalDown = 0L
 
     private val binder = object : IVpnController.Stub() {
         override fun registerCallback(callback: IVpnCallback?) {
             callback ?: return
             callbacks.register(callback)
-            scope.launch {
-                sendStatus(callback, VpnStatusHolder.status.value)
-                updateTrafficTicker()
-            }
+            scope.launch { sendStatus(callback, VpnStatusHolder.status.value) }
         }
 
         override fun unregisterCallback(callback: IVpnCallback?) {
             callback ?: return
             callbacks.unregister(callback)
-            scope.launch { updateTrafficTicker() }
         }
 
         override fun testConnection(): Long {
@@ -281,8 +273,6 @@ class XrayVpnService : VpnService() {
             liveController = c
             resetOnNetworkChange = settings.resetOnNetworkChange
             connectedAtElapsed = SystemClock.elapsedRealtime()
-            totalUp = 0
-            totalDown = 0
             RuntimeState.setShouldRun(this, true)
             withContext(Dispatchers.Main) { startNetworkMonitor() }
             setStatus(VpnStatus(VpnState.CONNECTED, profile.id, profile.name, connectedSince = System.currentTimeMillis()))
@@ -451,8 +441,6 @@ class XrayVpnService : VpnService() {
         networkMonitor?.stop()
         networkMonitor = null
         lastNetwork = null
-        trafficJob?.cancel()
-        trafficJob = null
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
     }
 
@@ -536,7 +524,6 @@ class XrayVpnService : VpnService() {
             } finally {
                 callbacks.finishBroadcast()
             }
-            updateTrafficTicker()
         }
     }
 
@@ -545,43 +532,6 @@ class XrayVpnService : VpnService() {
             cb.onStatus(s.state.code, s.profileId, s.profileName, s.message, s.connectedSince)
         } catch (_: Exception) {
             // Dead callbacks are removed by RemoteCallbackList.
-        }
-    }
-
-    /** Counts traffic only while the app UI is open and the tunnel is up. */
-    private fun updateTrafficTicker() {
-        val wanted = callbacks.registeredCallbackCount > 0 && VpnStatusHolder.status.value.state == VpnState.CONNECTED
-        if (!wanted) {
-            trafficJob?.cancel()
-            trafficJob = null
-            return
-        }
-        if (trafficJob?.isActive == true) return
-        trafficJob = scope.launch {
-            var last = SystemClock.elapsedRealtime()
-            controller?.queryTraffic() // reset counters
-            while (isActive) {
-                delay(1_000)
-                val t = withContext(Dispatchers.IO) { controller?.queryTraffic() } ?: continue
-                val now = SystemClock.elapsedRealtime()
-                val seconds = ((now - last).coerceAtLeast(1)) / 1000.0
-                last = now
-                val up = t.proxyUp + t.directUp
-                val down = t.proxyDown + t.directDown
-                totalUp += up
-                totalDown += down
-                val n = callbacks.beginBroadcast()
-                try {
-                    for (i in 0 until n) {
-                        try {
-                            callbacks.getBroadcastItem(i).onTraffic((up / seconds).toLong(), (down / seconds).toLong(), totalUp, totalDown)
-                        } catch (_: Exception) {
-                        }
-                    }
-                } finally {
-                    callbacks.finishBroadcast()
-                }
-            }
         }
     }
 
