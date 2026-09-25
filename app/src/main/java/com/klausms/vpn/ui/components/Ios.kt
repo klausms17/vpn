@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
@@ -33,6 +34,7 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -56,6 +58,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
@@ -274,6 +277,22 @@ fun InsetGroup(modifier: Modifier = Modifier, content: @Composable ColumnScope.(
     )
 }
 
+/**
+ * One row of an inset group inside a lazy list: the same card as
+ * [InsetGroup], cut per row so long lists stay lazy.
+ */
+fun Modifier.groupRow(first: Boolean, last: Boolean): Modifier = this
+    .padding(horizontal = 20.dp)
+    .fillMaxWidth()
+    .clip(
+        RoundedCornerShape(
+            topStart = if (first) 26.dp else 0.dp,
+            topEnd = if (first) 26.dp else 0.dp,
+            bottomStart = if (last) 26.dp else 0.dp,
+            bottomEnd = if (last) 26.dp else 0.dp,
+        ),
+    )
+
 /** Hairline between rows, inset to where the text starts. */
 @Composable
 fun RowDivider(start: Dp = 16.dp) {
@@ -304,6 +323,10 @@ fun ListRow(
     onClick: (() -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
     minHeight: Dp = 44.dp,
+    /** Long titles wrap, as in iOS Settings, instead of being cut. */
+    titleMaxLines: Int = 2,
+    /** Small label shown after the subtitle (e.g. "белый список"). */
+    badge: (@Composable () -> Unit)? = null,
 ) {
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
@@ -332,9 +355,21 @@ fun ListRow(
             Spacer(Modifier.width(12.dp))
         }
         Column(Modifier.weight(1f)) {
-            Text(title, style = IosType.body, color = titleColor, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (subtitle != null) {
-                Text(subtitle, style = IosType.subhead, color = kc.secondary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(title, style = IosType.body, color = titleColor, maxLines = titleMaxLines, overflow = TextOverflow.Ellipsis)
+            if (subtitle != null || badge != null) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (subtitle != null) {
+                        Text(
+                            subtitle,
+                            style = IosType.subhead,
+                            color = kc.secondary,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                    }
+                    badge?.invoke()
+                }
             }
         }
         if (value != null) {
@@ -388,12 +423,14 @@ fun IosSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit, enabled: Boo
             .size(width = 51.dp, height = 31.dp)
             .clip(CircleShape)
             .background(track)
-            .clickable(
+            // toggleable, not clickable: TalkBack then says "on" or "off".
+            .toggleable(
+                value = checked,
                 interactionSource = source,
                 indication = null,
                 enabled = enabled,
                 role = Role.Switch,
-                onClick = { onCheckedChange(!checked) },
+                onValueChange = onCheckedChange,
             )
             .then(if (description != null) Modifier.semantics { contentDescription = description } else Modifier)
             .graphicsLayer { alpha = if (enabled) 1f else 0.4f },
@@ -509,8 +546,16 @@ fun GlassToast(text: String) {
     }
 }
 
-/** Unused-safe placeholder size for the floating tab bar (content padding). */
+/** Height of the floating tab bar with its margins (content padding). */
 val TabBarSpace = 98.dp
+
+/** Space to leave under content for the tab bar and the system navigation bar. */
+@Composable
+fun tabBarClearance(): Dp = TabBarSpace + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
+/** Space to leave under content for the system navigation bar. */
+@Composable
+fun navBarClearance(): Dp = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
 // ---------------------------------------------------------------- tab bar
 
@@ -548,7 +593,11 @@ fun TabBar(items: List<TabItem>, selected: String, onSelect: (String) -> Unit, m
                     .clip(RoundedCornerShape(27.dp))
                     .background(bg)
                     .tap(source, role = Role.Tab) { onSelect(item.key) }
-                    .semantics { contentDescription = item.title },
+                    .semantics {
+                        contentDescription = item.title
+                        // this.: the function's own parameter is also named "selected".
+                        this.selected = isSelected
+                    },
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
             ) {

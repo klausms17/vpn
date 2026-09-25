@@ -21,7 +21,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -43,8 +43,8 @@ import com.klausms.vpn.ui.theme.kc
 fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    // Not saved in instance state: pasted text can be large.
-    var text by remember { mutableStateOf("") }
+    // Survives a rotation; a huge paste is not kept (instance state is small).
+    var text by rememberSaveable(stateSaver = CappedText) { mutableStateOf("") }
     var clipboardEmpty by rememberSaveable { mutableStateOf(false) }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -121,3 +121,8 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit) {
         }
     }
 }
+
+private val CappedText = Saver<String, String>(
+    save = { if (it.length <= 16 * 1024) it else "" },
+    restore = { it },
+)

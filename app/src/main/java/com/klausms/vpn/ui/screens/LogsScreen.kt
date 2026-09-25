@@ -21,6 +21,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.klausms.vpn.ui.MainViewModel
+import com.klausms.vpn.ui.components.navBarClearance
 import com.klausms.vpn.ui.components.NavBar
 import com.klausms.vpn.ui.components.TextAction
 import com.klausms.vpn.ui.theme.kc
@@ -71,7 +72,7 @@ fun LogsScreen(vm: MainViewModel, onBack: () -> Unit) {
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .horizontalScroll(rememberScrollState())
-                .padding(16.dp),
+                .padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 16.dp + navBarClearance()),
         )
     }
 }

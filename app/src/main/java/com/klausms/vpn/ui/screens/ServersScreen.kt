@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -34,6 +35,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -46,7 +49,6 @@ import com.klausms.vpn.ui.PingResult
 import com.klausms.vpn.ui.components.CircleFlag
 import com.klausms.vpn.ui.components.Countries
 import com.klausms.vpn.ui.components.GlassIconButton
-import com.klausms.vpn.ui.components.InsetGroup
 import com.klausms.vpn.ui.components.IosIcon
 import com.klausms.vpn.ui.components.LargeTitle
 import com.klausms.vpn.ui.components.PrimaryButton
@@ -54,7 +56,8 @@ import com.klausms.vpn.ui.components.RowDivider
 import com.klausms.vpn.ui.components.SectionFooter
 import com.klausms.vpn.ui.components.SectionHeader
 import com.klausms.vpn.ui.components.SignalBars
-import com.klausms.vpn.ui.components.TabBarSpace
+import com.klausms.vpn.ui.components.groupRow
+import com.klausms.vpn.ui.components.tabBarClearance
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
 import com.klausms.vpn.util.formatBytes
@@ -109,7 +112,7 @@ fun ServersContent(
     val own = profiles.profiles.filter { it.subscriptionId == null || it.subscriptionId !in subIds }
 
     Box(Modifier.fillMaxSize().background(kc.page)) {
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = TabBarSpace + 16.dp)) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = tabBarClearance() + 16.dp)) {
             item {
                 LargeTitle("Серверы") {
                     if (profiles.profiles.isNotEmpty()) {
@@ -121,22 +124,21 @@ fun ServersContent(
             if (profiles.profiles.isEmpty()) {
                 item { EmptyServers(onAdd) }
             }
+            // One lazy item per server: big subscriptions stay smooth.
             if (own.isNotEmpty()) {
-                item { SectionHeader("Мои ключи") }
-                item {
-                    InsetGroup {
-                        own.forEachIndexed { i, p ->
-                            if (i > 0) RowDivider(start = 72.dp)
-                            ServerRow(
-                                profile = p,
-                                selected = p.id == profiles.selectedId,
-                                ping = pings[p.id],
-                                whitelisted = whitelist[p.address] == 1,
-                                canDelete = true,
-                                actions = actions,
-                                onRename = { renameTarget = p },
-                            )
-                        }
+                item(key = "own-header") { SectionHeader("Мои ключи") }
+                itemsIndexed(own, key = { _, p -> p.id }) { i, p ->
+                    Column(Modifier.groupRow(first = i == 0, last = i == own.lastIndex).background(kc.card)) {
+                        if (i > 0) RowDivider(start = 72.dp)
+                        ServerRow(
+                            profile = p,
+                            selected = p.id == profiles.selectedId,
+                            ping = pings[p.id],
+                            whitelisted = whitelist[p.address] == 1,
+                            canDelete = true,
+                            actions = actions,
+                            onRename = { renameTarget = p },
+                        )
                     }
                 }
             }
@@ -144,20 +146,22 @@ fun ServersContent(
                 val servers = profiles.profiles.filter { it.subscriptionId == sub.id }
                 item(key = "h-${sub.id}") { SectionHeader(sub.name) }
                 item(key = "g-${sub.id}") {
-                    InsetGroup {
+                    Column(Modifier.groupRow(first = true, last = servers.isEmpty()).background(kc.card)) {
                         SubscriptionHeader(sub, onRefresh = { actions.refreshSubscription(sub.id) }, onDelete = { actions.deleteSubscription(sub.id) })
-                        servers.forEach { p ->
-                            RowDivider(start = if (servers.first() == p) 16.dp else 72.dp)
-                            ServerRow(
-                                profile = p,
-                                selected = p.id == profiles.selectedId,
-                                ping = pings[p.id],
-                                whitelisted = whitelist[p.address] == 1,
-                                canDelete = false,
-                                actions = actions,
-                                onRename = { renameTarget = p },
-                            )
-                        }
+                    }
+                }
+                itemsIndexed(servers, key = { _, p -> "${sub.id}/${p.id}" }) { i, p ->
+                    Column(Modifier.groupRow(first = false, last = i == servers.lastIndex).background(kc.card)) {
+                        RowDivider(start = if (i == 0) 16.dp else 72.dp)
+                        ServerRow(
+                            profile = p,
+                            selected = p.id == profiles.selectedId,
+                            ping = pings[p.id],
+                            whitelisted = whitelist[p.address] == 1,
+                            canDelete = false,
+                            actions = actions,
+                            onRename = { renameTarget = p },
+                        )
                     }
                 }
                 item(key = "f-${sub.id}") {
@@ -168,10 +172,9 @@ fun ServersContent(
     }
 
     renameTarget?.let { target ->
-        RenameDialog(Countries.stripFlags(target.name), onDismiss = { renameTarget = null }) { name ->
-            // Keep the flag emoji, which carries the country.
-            val flag = Countries.codeFrom(target.name)?.let { Countries.flag(it) + " " }.orEmpty()
-            actions.rename(target.id, flag + name)
+        // The whole name, flags included: the flag sets the country and the map pin.
+        RenameDialog(target.name, onDismiss = { renameTarget = null }) { name ->
+            actions.rename(target.id, name)
             renameTarget = null
         }
     }
@@ -237,11 +240,13 @@ private fun ServerRow(
     Box {
         com.klausms.vpn.ui.components.ListRow(
             title = Countries.stripFlags(profile.name),
+            modifier = Modifier.semantics { this.selected = selected },
             subtitle = describe(profile),
+            badge = if (whitelisted) ({ WhitelistBadge() }) else null,
+            titleMaxLines = 1,
             leading = { CircleFlag(code) },
             trailing = {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (whitelisted) WhitelistBadge()
                     RowPing(ping)
                     Box(Modifier.width(22.dp), contentAlignment = Alignment.Center) {
                         if (selected) IosIcon(R.drawable.ic_checkmark_ios, kc.green, Modifier.size(width = 16.dp, height = 14.dp))

@@ -16,6 +16,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.klausms.vpn.ui.components.navBarClearance
 import com.klausms.vpn.ui.components.InsetGroup
 import com.klausms.vpn.ui.components.ListRow
 import com.klausms.vpn.ui.components.NavBar
@@ -42,7 +43,7 @@ fun LicensesScreen(onBack: () -> Unit) {
     val ofl by produceState("") { value = withContext(Dispatchers.IO) { runCatching { readOfl(context) }.getOrDefault("") } }
     Column(Modifier.fillMaxSize().background(kc.page)) {
         NavBar("Лицензии", onBack, backLabel = "Настройки")
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp + navBarClearance())) {
             item { SectionHeader("В приложении использованы") }
             item {
                 InsetGroup {

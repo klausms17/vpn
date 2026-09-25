@@ -37,7 +37,7 @@ import com.klausms.vpn.ui.components.ListRow
 import com.klausms.vpn.ui.components.RowDivider
 import com.klausms.vpn.ui.components.SectionFooter
 import com.klausms.vpn.ui.components.SectionHeader
-import com.klausms.vpn.ui.components.TabBarSpace
+import com.klausms.vpn.ui.components.tabBarClearance
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
 import com.klausms.vpn.util.AppLog
@@ -89,14 +89,14 @@ fun SettingsContent(
     }
 
     Box(Modifier.fillMaxSize().background(kc.page)) {
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = TabBarSpace + 16.dp)) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = tabBarClearance() + 16.dp)) {
             item { LargeTitle("Настройки") }
 
             item { SectionHeader("Приложения без VPN") }
             item {
                 InsetGroup {
                     ListRow(
-                        title = "Российские приложения без VPN",
+                        title = "Российские приложения",
                         leading = { IconTile(R.drawable.ic_split_ios, TileBlue) },
                         trailing = {
                             IosSwitch(
@@ -167,7 +167,7 @@ fun SettingsContent(
                     RowDivider(start = 57.dp)
                     val date = if (geoVersion > 0) "от " + SimpleDateFormat("dd.MM.yyyy", Locale.US).format(Date(geoVersion * 1000)) else null
                     ListRow(
-                        title = "Обновить списки российских сайтов",
+                        title = "Обновить списки сайтов",
                         value = date,
                         leading = { IconTile(R.drawable.ic_refresh_ios, TileBlue) },
                         onClick = { confirmGeo = true },

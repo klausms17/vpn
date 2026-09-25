@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -200,9 +202,9 @@ fun HeroBackdrop(state: HeroState, heroCenterY: Float, pin: Offset?, modifier: M
  * spinning arc while connecting. Animations run only while connecting.
  */
 @Composable
-fun ConnectDisc(state: HeroState, label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun ConnectDisc(state: HeroState, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
     val source = remember { MutableInteractionSource() }
-    val scale = pressScale(source, pressed = if (state == HeroState.NO_SERVER) 1f else 1.08f)
+    val scale = pressScale(source, pressed = 1.08f)
     val on = state == HeroState.ON
     val connecting = state == HeroState.CONNECTING
     val glyph by animateColorAsState(
@@ -234,11 +236,13 @@ fun ConnectDisc(state: HeroState, label: String, onClick: () -> Unit, modifier: 
                 }
             }
         }
-        val rim = if (connecting) {
+        // Read only while drawing (graphicsLayer below): no recomposition
+        // every frame while connecting.
+        val rim: State<Float> = if (connecting) {
             val breathe = rememberInfiniteTransition(label = "breathe")
-            breathe.animateFloat(0.3f, 0.6f, infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "rim").value
+            breathe.animateFloat(0.3f, 0.6f, infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "rim")
         } else {
-            1f
+            remember { mutableFloatStateOf(1f) }
         }
         Box(
             Modifier
@@ -262,21 +266,26 @@ fun ConnectDisc(state: HeroState, label: String, onClick: () -> Unit, modifier: 
                         0.34f to Color.Transparent,
                     ),
                 )
-                .border(
-                    1.25.dp,
-                    Brush.linearGradient(
-                        0f to Color.White.copy(alpha = 0.78f * rim),
-                        0.3f to Color.White.copy(alpha = 0.14f * rim),
-                        0.5f to Color.Transparent,
-                        0.72f to Color.White.copy(alpha = 0.06f * rim),
-                        1f to Color.White.copy(alpha = 0.30f * rim),
-                    ),
-                    CircleShape,
-                )
-                .tap(source, enabled = state != HeroState.NO_SERVER, onClick = onClick)
+                .tap(source, enabled = enabled, onClick = onClick)
                 .semantics { contentDescription = label },
             contentAlignment = Alignment.Center,
         ) {
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .graphicsLayer { alpha = rim.value }
+                    .border(
+                        1.25.dp,
+                        Brush.linearGradient(
+                            0f to Color.White.copy(alpha = 0.78f),
+                            0.3f to Color.White.copy(alpha = 0.14f),
+                            0.5f to Color.Transparent,
+                            0.72f to Color.White.copy(alpha = 0.06f),
+                            1f to Color.White.copy(alpha = 0.30f),
+                        ),
+                        CircleShape,
+                    ),
+            )
             IosIcon(R.drawable.ic_power_ios, glyph, Modifier.size(56.dp))
         }
     }

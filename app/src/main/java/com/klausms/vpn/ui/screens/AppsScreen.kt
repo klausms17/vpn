@@ -40,6 +40,7 @@ import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.klausms.vpn.R
 import com.klausms.vpn.ui.MainViewModel
+import com.klausms.vpn.ui.components.navBarClearance
 import com.klausms.vpn.ui.components.IosIcon
 import com.klausms.vpn.ui.components.IosSwitch
 import com.klausms.vpn.ui.components.ListRow
@@ -99,7 +100,7 @@ fun AppsScreen(vm: MainViewModel, includeMode: Boolean, onBack: () -> Unit) {
         val shown = list
             .filter { q.isEmpty() || it.label.lowercase().contains(q) || it.pkg.contains(q) }
             .sortedByDescending { it.pkg in sortSelected }
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp + navBarClearance())) {
             item {
                 BasicTextField(
                     value = query,

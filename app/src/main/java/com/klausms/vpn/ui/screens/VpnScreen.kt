@@ -8,6 +8,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,7 +19,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -32,11 +35,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.max
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.klausms.vpn.R
 import com.klausms.vpn.data.ProfilesState
@@ -54,7 +59,7 @@ import com.klausms.vpn.ui.components.IosIcon
 import com.klausms.vpn.ui.components.LargeTitle
 import com.klausms.vpn.ui.components.PrimaryButton
 import com.klausms.vpn.ui.components.SignalBars
-import com.klausms.vpn.ui.components.TabBarSpace
+import com.klausms.vpn.ui.components.tabBarClearance
 import com.klausms.vpn.ui.components.mapPoint
 import com.klausms.vpn.ui.components.pressScale
 import com.klausms.vpn.ui.components.rememberSecondsTicker
@@ -84,7 +89,11 @@ fun VpnScreen(
         onToggle = onToggle,
         onOpenServers = onOpenServers,
         onAddServer = onAddServer,
-        onPing = { id -> if (vm.pings.value[id] == null) vm.ping(listOf(id)) },
+        // Measure when there is no result yet or the last one failed.
+        onPing = { id ->
+            val last = vm.pings.value[id]
+            if (last == null || last is PingResult.Failed) vm.ping(listOf(id))
+        },
     )
 }
 
@@ -111,33 +120,46 @@ fun VpnContent(
         else -> HeroState.OFF
     }
 
-    // Measure the selected server once, so its card shows a real latency.
-    LaunchedEffect(server?.id) {
+    // Measure the selected server, so its card shows a real latency; again
+    // once the tunnel is up, in case the first try found no network.
+    LaunchedEffect(server?.id, state == VpnState.CONNECTED) {
         server?.id?.let(onPing)
     }
 
     var heroCenterY by remember { mutableFloatStateOf(0f) }
     val now = rememberSecondsTicker(state == VpnState.CONNECTED && status.connectedSince > 0)
 
-    Box(Modifier.fillMaxSize().background(kc.page)) {
+    val bottomSpace = tabBarClearance()
+    BoxWithConstraints(Modifier.fillMaxSize().background(kc.page)) {
         if (heroCenterY > 0f) {
             val pin = Countries.point(code)?.let { (lon, lat) -> mapPoint(lon, lat) }
             HeroBackdrop(hero, heroCenterY, pin)
         }
-        Column(Modifier.fillMaxSize()) {
+        // Fills the screen on a phone held upright; scrolls when the window
+        // is shorter than the content (landscape, split screen, big fonts).
+        val minContent = with(LocalDensity.current) { MIN_CONTENT.dp * fontScale.coerceAtLeast(1f) } + bottomSpace
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .height(max(maxHeight, minContent)),
+        ) {
             LargeTitle("VPN")
             Spacer(Modifier.weight(1f).heightIn(min = 16.dp))
 
             Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                 ConnectDisc(
                     state = hero,
-                    label = when (hero) {
-                        HeroState.NO_SERVER -> "Сначала добавьте сервер"
-                        HeroState.ON -> "Отключить VPN"
-                        HeroState.CONNECTING -> "Отменить подключение"
-                        HeroState.OFF -> "Подключить VPN"
+                    label = when {
+                        hero == HeroState.NO_SERVER -> "Добавить сервер"
+                        state == VpnState.DISCONNECTING -> "Отключение…"
+                        hero == HeroState.ON -> "Отключить VPN"
+                        hero == HeroState.CONNECTING -> "Отменить подключение"
+                        else -> "Подключить VPN"
                     },
-                    onClick = onToggle,
+                    // Without a server the big button opens "add server".
+                    onClick = if (hero == HeroState.NO_SERVER) onAddServer else onToggle,
+                    enabled = state != VpnState.DISCONNECTING,
                     modifier = Modifier.onGloballyPositioned { heroCenterY = it.boundsInRoot().center.y },
                 )
                 StatusBlock(
@@ -165,10 +187,13 @@ fun VpnContent(
                     PrimaryButton("Добавить сервер", onClick = onAddServer, icon = R.drawable.ic_plus_ios)
                 }
             }
-            Spacer(Modifier.height(TabBarSpace))
+            Spacer(Modifier.height(bottomSpace))
         }
     }
 }
+
+/** Height (dp, at font scale 1) the VPN tab needs without the tab bar. */
+private const val MIN_CONTENT = 560f
 
 @Composable
 private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, now: Long, error: String?, place: String?) {
