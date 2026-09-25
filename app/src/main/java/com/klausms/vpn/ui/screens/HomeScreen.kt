@@ -89,8 +89,6 @@ import java.util.Locale
 @Composable
 fun HomeScreen(
     vm: MainViewModel,
-    sharedText: String?,
-    onSharedTextHandled: () -> Unit,
     onToggle: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
@@ -191,17 +189,6 @@ fun HomeScreen(
     }
     renameTarget?.let { target ->
         RenameDialog(target.name, onDismiss = { renameTarget = null }, onRename = { vm.rename(target.id, it); renameTarget = null })
-    }
-    if (sharedText != null) {
-        AlertDialog(
-            onDismissRequest = onSharedTextHandled,
-            title = { Text("Добавить из «Поделиться»?") },
-            text = { Text("Приложение получило текст. Если в нём есть ключи или ссылка на подписку, они будут добавлены.") },
-            confirmButton = {
-                TextButton(onClick = { vm.import(sharedText); onSharedTextHandled() }) { Text("Добавить") }
-            },
-            dismissButton = { TextButton(onClick = onSharedTextHandled) { Text("Отмена") } },
-        )
     }
 }
 

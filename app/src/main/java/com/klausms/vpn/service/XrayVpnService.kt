@@ -102,6 +102,9 @@ class XrayVpnService : VpnService() {
     @Volatile
     private var resetOnNetworkChange = true
 
+    @Volatile
+    private var lockdownConflict = false
+
     private var networkMonitor: UnderlyingNetworkMonitor? = null
     private var lastNetwork: Network? = null
 
@@ -157,7 +160,15 @@ class XrayVpnService : VpnService() {
             }
             ACTION_RECONNECT -> {
                 enterForeground("Переподключение…", null)
-                enqueue { startTunnel(startId) }
+                enqueue {
+                    // A late "apply new settings" must not switch on a VPN
+                    // the user has turned off meanwhile.
+                    if (config == null && !RuntimeState.shouldRun(this)) {
+                        withContext(Dispatchers.Main) { stopIfLatest(startId) }
+                    } else {
+                        startTunnel(startId)
+                    }
+                }
             }
             // ACTION_CONNECT, the system's Always-on VPN (SERVICE_INTERFACE)
             // and a restart after the process was killed (null intent).
@@ -314,7 +325,11 @@ class XrayVpnService : VpnService() {
             // "Not metered" here means: inherit meteredness from Wi-Fi/mobile.
             builder.setMetered(false)
         }
-        applyPerAppRules(builder, settings)
+        val bypassing = applyPerAppRules(builder, settings)
+        // "Block connections without VPN" cuts off every app kept outside
+        // the tunnel (banks, Gosuslugi): say so instead of failing silently.
+        lockdownConflict = bypassing && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isLockdownEnabled
+        if (lockdownConflict) AppLog.w("lockdown is on while some apps bypass the VPN: they will have no network")
         (networkMonitor?.network ?: lastNetwork)?.let { builder.setUnderlyingNetworks(arrayOf(it)) }
         val pfd = builder.establish()
             ?: throw VpnStartException("Система не разрешила создать VPN. Возможно, включён другой постоянный VPN.")
@@ -322,7 +337,8 @@ class XrayVpnService : VpnService() {
         return pfd
     }
 
-    private fun applyPerAppRules(builder: Builder, settings: AppSettings) {
+    /** Returns whether some other app ends up outside the tunnel. */
+    private fun applyPerAppRules(builder: Builder, settings: AppSettings): Boolean {
         if (settings.appMode == AppMode.ONLY_SELECTED) {
             var added = 0
             for (pkg in settings.includedApps) {
@@ -334,7 +350,7 @@ class XrayVpnService : VpnService() {
                     // Uninstalled since it was chosen.
                 }
             }
-            if (added > 0) return
+            if (added > 0) return true
             // No selected app is installed: fall back to "all apps", otherwise
             // Android would route everything, including this app, into the
             // tunnel and create a loop.
@@ -345,13 +361,16 @@ class XrayVpnService : VpnService() {
             addAll(settings.excludedApps)
             if (settings.bypassRussianApps) addAll(RussianApps.installed(packageManager))
         }
+        var bypassing = false
         for (pkg in excluded) {
             if (pkg == packageName) continue
             try {
                 builder.addDisallowedApplication(pkg)
+                bypassing = true
             } catch (_: PackageManager.NameNotFoundException) {
             }
         }
+        return bypassing
     }
 
     private fun prepareLogFile(): File {
@@ -479,7 +498,12 @@ class XrayVpnService : VpnService() {
     private suspend fun publishConnected() {
         val s = VpnStatusHolder.status.value
         if (s.state != VpnState.CONNECTED) return
-        withContext(Dispatchers.Main) { enterForeground("Подключено", s.profileName) }
+        val text = if (lockdownConflict) {
+            "Включено «Блокировать соединения без VPN»: приложения без VPN (банки, Госуслуги) останутся без интернета"
+        } else {
+            s.profileName
+        }
+        withContext(Dispatchers.Main) { enterForeground("Подключено", text) }
     }
 
     private fun setStatus(status: VpnStatus) {

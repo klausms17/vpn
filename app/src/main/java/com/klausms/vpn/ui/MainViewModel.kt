@@ -19,6 +19,7 @@ import com.klausms.vpn.data.Subscription
 import com.klausms.vpn.service.VpnCommands
 import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.util.AppLog
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -39,6 +40,9 @@ sealed interface PingResult {
     data class Ok(val ms: Long) : PingResult
     data class Failed(val reason: String) : PingResult
 }
+
+private val LINK_START = Regex("""^[A-Za-z][A-Za-z0-9+.\-]*://""")
+private val LINK_ANYWHERE = Regex("""[A-Za-z][A-Za-z0-9+.\-]*://\S+""")
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = (app as App).repository
@@ -70,6 +74,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val messages = _messages.receiveAsFlow()
 
     private var reconnectJob: Job? = null
+
+    /**
+     * Saving can fail (storage full). Report it instead of crashing; the
+     * in-memory state only changes after a successful write.
+     */
+    private val saveErrors = CoroutineExceptionHandler { _, e ->
+        AppLog.e("save failed", e)
+        message("Не удалось сохранить: ${e.userMessage()}")
+    }
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
@@ -143,19 +156,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------ profiles
 
-    fun select(id: String) = viewModelScope.launch {
+    fun select(id: String) = viewModelScope.launch(saveErrors) {
         if (profiles.value.selectedId == id) return@launch
         repo.updateProfiles { it.copy(selectedId = id) }
         reconnectIfRunning()
     }
 
-    fun rename(id: String, name: String) = viewModelScope.launch {
+    fun rename(id: String, name: String) = viewModelScope.launch(saveErrors) {
         val clean = name.trim().take(80)
         if (clean.isEmpty()) return@launch
         repo.updateProfiles { s -> s.copy(profiles = s.profiles.map { if (it.id == id) it.copy(name = clean) else it }) }
     }
 
-    fun delete(id: String) = viewModelScope.launch {
+    fun delete(id: String) = viewModelScope.launch(saveErrors) {
         val wasSelected = profiles.value.selectedId == id
         val next = repo.updateProfiles { s ->
             val rest = s.profiles.filterNot { it.id == id }
@@ -168,26 +181,39 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Adds share links, a subscription URL, or a pasted subscription body. */
-    fun import(text: String) = viewModelScope.launch {
+    fun import(text: String) = viewModelScope.launch(saveErrors) {
         val input = text.trim()
         if (input.isEmpty()) return@launch
         _busy.value = "Добавление…"
         try {
-            val single = input.lines().filter { it.isNotBlank() }
-            if (single.size == 1 && (input.startsWith("https://", true) || input.startsWith("http://", true))) {
-                addSubscription(input)
-            } else {
-                addLinks(input)
+            val links = if (input.startsWith("{") || input.startsWith("[")) emptyList() else extractLinks(input)
+            when {
+                links.size == 1 && (links[0].startsWith("https://", true) || links[0].startsWith("http://", true)) ->
+                    addSubscription(links[0])
+                else -> addLinks(input, links)
             }
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             message(e.userMessage())
         } finally {
             _busy.value = null
         }
     }
 
-    private suspend fun addLinks(input: String) {
-        val lines = input.lines().map { it.trim() }.filter { it.contains("://") }
+    /**
+     * Keys and links in pasted or shared text. A line that starts with a
+     * link is taken whole (names after "#" may contain spaces); inside other
+     * text, such as a messenger message, each link is picked out.
+     */
+    private fun extractLinks(input: String): List<String> = input.lines().map { it.trim() }.flatMap { line ->
+        if (LINK_START.containsMatchIn(line)) {
+            listOf(line)
+        } else {
+            LINK_ANYWHERE.findAll(line).map { it.value.trimEnd('.', ',', ';', ')', '»', '"', '\'') }.toList()
+        }
+    }
+
+    private suspend fun addLinks(input: String, lines: List<String>) {
         val parsed = mutableListOf<ParsedProfile>()
         val errors = mutableListOf<String>()
         withContext(Dispatchers.IO) {
@@ -294,7 +320,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         message("Подписка «${sub.name}»: серверов ${stored.size}")
     }
 
-    fun refreshSubscription(id: String, quiet: Boolean = false) = viewModelScope.launch {
+    fun refreshSubscription(id: String, quiet: Boolean = false) = viewModelScope.launch(saveErrors) {
         val sub = profiles.value.subscriptions.firstOrNull { it.id == id } ?: return@launch
         if (!quiet) _busy.value = "Обновление подписки…"
         try {
@@ -318,6 +344,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             val next = repo.updateProfiles { s ->
+                // Deleted while it was downloading: do not bring it back.
+                if (s.subscriptions.none { it.id == sub.id }) return@updateProfiles s
                 val keepSelection = oldSelected?.takeIf { it.subscriptionId == sub.id }?.let { old ->
                     stored.firstOrNull { it.name == old.name && it.address == old.address && it.port == old.port }
                         ?: stored.firstOrNull { it.address == old.address && it.port == old.port }
@@ -336,18 +364,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     selectedId = selectedId,
                 )
             }
+            if (next.subscriptions.none { it.id == sub.id }) return@launch
             checkWhitelist(stored)
             if (oldSelected != null && oldSelected.subscriptionId == sub.id && next.selected?.outbounds != oldSelected.outbounds) reconnectIfRunning()
             if (!quiet) message("Подписка обновлена: серверов ${stored.size}")
         } catch (e: Exception) {
-            repo.updateProfiles { s -> s.copy(subscriptions = s.subscriptions.map { if (it.id == sub.id) it.copy(lastError = e.userMessage()) else it }) }
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            try {
+                repo.updateProfiles { s -> s.copy(subscriptions = s.subscriptions.map { if (it.id == sub.id) it.copy(lastError = e.userMessage()) else it }) }
+            } catch (w: Exception) {
+                AppLog.e("save failed", w)
+            }
             if (!quiet) message("Не удалось обновить подписку: ${e.userMessage()}")
         } finally {
             if (!quiet) _busy.value = null
         }
     }
 
-    fun deleteSubscription(id: String) = viewModelScope.launch {
+    fun deleteSubscription(id: String) = viewModelScope.launch(saveErrors) {
         val selectedWasInside = profiles.value.selected?.subscriptionId == id
         val next = repo.updateProfiles { s ->
             val rest = s.profiles.filterNot { it.subscriptionId == id }
@@ -417,7 +451,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------ settings
 
-    fun updateSettings(transform: (AppSettings) -> AppSettings) = viewModelScope.launch {
+    fun updateSettings(transform: (AppSettings) -> AppSettings) = viewModelScope.launch(saveErrors) {
         val before = settings.value
         val after = repo.updateSettings(transform)
         if (after != before) reconnectIfRunning(delayMs = 800)

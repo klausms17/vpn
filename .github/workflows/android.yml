@@ -169,8 +169,19 @@ jobs:
           - KlausVPN-${VERSION_NAME}-arm64-v8a.apk — почти все современные телефоны
           - KlausVPN-${VERSION_NAME}-armeabi-v7a.apk — старые 32-битные телефоны
           - KlausVPN-${VERSION_NAME}-universal.apk — если не знаете, какой нужен (больше размер)"
+          title="Klaus VPN ${VERSION_NAME} (${BRANCH})"
+          if [ -z "${SIGNING_KEYSTORE_PATH:-}" ]; then
+            # Without the release key every build has a different signature:
+            # installing the next one over it needs an uninstall first.
+            title="$title — временная подпись"
+            notes="$notes
+
+          ВНИМАНИЕ: сборка подписана временным ключом. Следующую сборку не получится
+          поставить поверх — придётся удалить приложение (серверы и настройки пропадут).
+          Чтобы обновления ставились поверх, добавьте ключ подписи (docs/README.ru.md, раздел 9)."
+          fi
           gh release create "$tag" dist/* \
             --target "$GITHUB_SHA" \
             --prerelease \
-            --title "Klaus VPN ${VERSION_NAME} (${BRANCH})" \
+            --title "$title" \
             --notes "$notes"

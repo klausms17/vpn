@@ -95,9 +95,12 @@ fun AppsScreen(vm: MainViewModel, includeMode: Boolean, onBack: () -> Unit) {
             return@Scaffold
         }
         val q = query.trim().lowercase()
+        // Checked apps go first, but only as they were when the screen opened
+        // (or the search changed): rows must not jump under the finger.
+        val sortSelected = remember(includeMode, q) { selected }
         val shown = list
             .filter { q.isEmpty() || it.label.lowercase().contains(q) || it.pkg.contains(q) }
-            .sortedByDescending { it.pkg in selected }
+            .sortedByDescending { it.pkg in sortSelected }
         LazyColumn(Modifier.fillMaxSize().padding(padding)) {
             item {
                 Text(

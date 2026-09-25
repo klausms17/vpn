@@ -61,7 +61,7 @@ object VpnWidget {
     private const val AMBER = 0xFFFF9F0A.toInt()
     private const val RED = 0xFFFF453A.toInt()
     private const val GREY = 0xFF8E8E93.toInt()
-    private const val BAR_OFF = 0x4DEBEBF5
+    private const val BAR_OFF = 0xFFEBEBF5.toInt()
     private const val TEXT = 0xFFFFFFFF.toInt()
     private const val TEXT_SECONDARY = 0x99EBEBF5.toInt()
 
@@ -403,7 +403,14 @@ object VpnWidget {
             Ping.Testing, Ping.Unknown -> 0 to GREY
         }
         val barIds = intArrayOf(R.id.bar1, R.id.bar2, R.id.bar3, R.id.bar4)
-        for ((i, id) in barIds.withIndex()) v.setInt(id, "setColorFilter", if (i < bars) color else BAR_OFF)
+        for ((i, id) in barIds.withIndex()) {
+            // SRC_ATOP keeps the bar's own (opaque) alpha, so dim "off" bars
+            // with the image alpha instead of a translucent tint. Both are
+            // always set: RemoteViews may be re-applied onto old views.
+            val on = i < bars
+            v.setInt(id, "setColorFilter", if (on) color else BAR_OFF)
+            v.setInt(id, "setImageAlpha", if (on) 255 else 0x4D)
+        }
 
         val text = when (ping) {
             is Ping.Ok -> String.format(Locale.ROOT, "%d мс", ping.ms)

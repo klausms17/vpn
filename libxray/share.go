@@ -872,7 +872,11 @@ func PinCertificate(profileJSON string, sha256Hex string) (string, error) {
 	if tls == nil {
 		return "", errors.New("profile has no TLS settings")
 	}
-	tls["pinnedPeerCertSha256"] = sha256Hex
+	if sha256Hex != "" {
+		tls["pinnedPeerCertSha256"] = sha256Hex
+	}
+	// "" means the certificate is valid under the system roots: plain
+	// verification applies and survives certificate renewals.
 	p.Outbounds[0] = mustJSON(ob)
 	p.NeedsCertPin = false
 	out, err := json.Marshal(p)

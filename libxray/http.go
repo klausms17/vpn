@@ -7,6 +7,7 @@ import (
 	"io"
 	gonet "net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"time"
 
@@ -121,14 +122,7 @@ func Fetch(url string, userAgent string, timeoutMs int32, proxyConfigJSON string
 	defer tr.CloseIdleConnections()
 
 	client := &http.Client{Transport: tr, Timeout: timeout}
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	if userAgent != "" {
-		req.Header.Set("User-Agent", userAgent)
-	}
-	resp, err := client.Do(req)
+	resp, err := get(client, url, userAgent)
 	if err != nil {
 		return nil, err
 	}
@@ -174,14 +168,7 @@ func DownloadFile(url string, dst string, userAgent string, timeoutMs int32, pro
 	defer tr.CloseIdleConnections()
 
 	client := &http.Client{Transport: tr, Timeout: timeoutDuration(timeoutMs)}
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	if userAgent != "" {
-		req.Header.Set("User-Agent", userAgent)
-	}
-	resp, err := client.Do(req)
+	resp, err := get(client, url, userAgent)
 	if err != nil {
 		return err
 	}
@@ -207,4 +194,25 @@ func DownloadFile(url string, dst string, userAgent string, timeoutMs int32, pro
 		return fmt.Errorf("incomplete download: %d of %d bytes", written, resp.ContentLength)
 	}
 	return os.Rename(tmp, dst)
+}
+
+// get performs a GET whose errors never contain the URL: subscription links
+// carry a secret token, and error texts end up in logs and on screen.
+func get(client *http.Client, rawURL string, userAgent string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, errors.New("invalid link")
+	}
+	if userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		var ue *neturl.Error
+		if errors.As(err, &ue) {
+			return nil, fmt.Errorf("%s: %w", req.URL.Hostname(), ue.Err)
+		}
+		return nil, err
+	}
+	return resp, nil
 }

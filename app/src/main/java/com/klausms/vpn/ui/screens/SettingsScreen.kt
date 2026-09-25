@@ -15,6 +15,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -53,7 +55,11 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit, onNavigate: (String) -
         onPauseOrDispose { }
     }
 
-    Scaffold(topBar = { BackTopBar("Настройки", onBack) }) { padding ->
+    // Results of long operations started here (updating the site lists).
+    val snackbar = remember { SnackbarHostState() }
+    LaunchedEffect(Unit) { vm.messages.collect { snackbar.showSnackbar(it) } }
+
+    Scaffold(topBar = { BackTopBar("Настройки", onBack) }, snackbarHost = { SnackbarHost(snackbar) }) { padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding)) {
             item { BusyBar(busy) }
 
@@ -77,7 +83,8 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit, onNavigate: (String) -
             item {
                 NavRow(
                     "Постоянный VPN",
-                    "Включите «Постоянная VPN» — VPN сам запустится после перезагрузки телефона.",
+                    "Включите «Постоянная VPN» — VPN сам запустится после перезагрузки телефона. " +
+                        "«Блокировать соединения без VPN» не включайте: приложения без VPN (банки, Госуслуги) останутся без интернета.",
                 ) { openSystem(context, Intent(Settings.ACTION_VPN_SETTINGS)) }
             }
             item {

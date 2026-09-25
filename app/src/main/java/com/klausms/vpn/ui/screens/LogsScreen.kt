@@ -1,7 +1,5 @@
 package com.klausms.vpn.ui.screens
 
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Column
@@ -55,7 +53,7 @@ fun LogsScreen(vm: MainViewModel, onBack: () -> Unit) {
         topBar = {
             BackTopBar("Журнал", onBack) {
                 TextButton(onClick = {
-                    context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("log", text))
+                    copySensitive(context, text)
                 }) { Text("Копировать") }
             }
         },

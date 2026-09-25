@@ -12,6 +12,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -76,8 +79,6 @@ class MainActivity : ComponentActivity() {
                 when {
                     route == "home" -> HomeScreen(
                         vm = vm,
-                        sharedText = sharedText,
-                        onSharedTextHandled = { sharedText = null },
                         onToggle = ::toggleVpn,
                         onOpenSettings = { route = "settings" },
                     )
@@ -89,6 +90,18 @@ class MainActivity : ComponentActivity() {
                     )
                     route == "logs" -> LogsScreen(vm = vm, onBack = { route = "settings" })
                     else -> route = "home"
+                }
+                // Shared keys are confirmed on whatever screen is open.
+                sharedText?.let { text ->
+                    AlertDialog(
+                        onDismissRequest = { sharedText = null },
+                        title = { Text("Добавить из «Поделиться»?") },
+                        text = { Text("Приложение получило текст. Если в нём есть ключи или ссылка на подписку, они будут добавлены.") },
+                        confirmButton = {
+                            TextButton(onClick = { vm.import(text); sharedText = null }) { Text("Добавить") }
+                        },
+                        dismissButton = { TextButton(onClick = { sharedText = null }) { Text("Отмена") } },
+                    )
                 }
             }
         }
@@ -107,7 +120,7 @@ class MainActivity : ComponentActivity() {
     private fun handleIntent(intent: Intent?) {
         when (intent?.action) {
             Intent.ACTION_SEND -> {
-                val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()
+                val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()?.trim()
                 if (!text.isNullOrEmpty()) sharedText = text.take(64 * 1024)
             }
             ACTION_CONNECT -> {
