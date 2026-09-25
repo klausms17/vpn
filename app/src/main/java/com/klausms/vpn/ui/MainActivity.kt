@@ -23,8 +23,6 @@ import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.ui.screens.AppsScreen
 import com.klausms.vpn.ui.screens.HomeScreen
 import com.klausms.vpn.ui.screens.LogsScreen
-import com.klausms.vpn.ui.screens.RulesKind
-import com.klausms.vpn.ui.screens.RulesScreen
 import com.klausms.vpn.ui.screens.SettingsScreen
 import com.klausms.vpn.ui.theme.KlausTheme
 
@@ -87,11 +85,6 @@ class MainActivity : ComponentActivity() {
                     route.startsWith("apps:") -> AppsScreen(
                         vm = vm,
                         includeMode = route == "apps:include",
-                        onBack = { route = "settings" },
-                    )
-                    route.startsWith("rules:") -> RulesScreen(
-                        vm = vm,
-                        kind = RulesKind.valueOf(route.removePrefix("rules:")),
                         onBack = { route = "settings" },
                     )
                     route == "logs" -> LogsScreen(vm = vm, onBack = { route = "settings" })

@@ -44,9 +44,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -72,7 +69,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.klausms.vpn.R
-import com.klausms.vpn.data.RoutingMode
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.Subscription
 import com.klausms.vpn.service.TrafficStats
@@ -99,7 +95,6 @@ fun HomeScreen(
     onOpenSettings: () -> Unit,
 ) {
     val profiles by vm.profiles.collectAsStateWithLifecycle()
-    val settings by vm.settings.collectAsStateWithLifecycle()
     val status by vm.status.collectAsStateWithLifecycle()
     val traffic by vm.traffic.collectAsStateWithLifecycle()
     val pings by vm.pings.collectAsStateWithLifecycle()
@@ -139,9 +134,6 @@ fun HomeScreen(
                     onToggle = onToggle,
                     onTest = { vm.testConnection() },
                 )
-            }
-            item {
-                ModeSelector(settings.mode) { mode -> vm.updateSettings { it.copy(mode = mode) } }
             }
             item {
                 Row(
@@ -315,39 +307,6 @@ private fun ConnectPanel(
             )
             TextButton(onClick = onTest) { Text("Проверить соединение") }
         }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ModeSelector(mode: RoutingMode, onSelect: (RoutingMode) -> Unit) {
-    val modes = RoutingMode.entries
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-            modes.forEachIndexed { index, m ->
-                SegmentedButton(
-                    selected = m == mode,
-                    onClick = { onSelect(m) },
-                    shape = SegmentedButtonDefaults.itemShape(index, modes.size),
-                ) {
-                    Text(
-                        when (m) {
-                            RoutingMode.RU_DIRECT -> "РФ напрямую"
-                            RoutingMode.BLOCKED_ONLY -> "Блокировки"
-                            RoutingMode.GLOBAL -> "Всё"
-                        },
-                        maxLines = 1,
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
-            }
-        }
-        Text(
-            mode.description,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 6.dp, start = 4.dp),
-        )
     }
 }
 

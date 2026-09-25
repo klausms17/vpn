@@ -472,8 +472,7 @@ class XrayVpnService : VpnService() {
     private suspend fun publishConnected() {
         val s = VpnStatusHolder.status.value
         if (s.state != VpnState.CONNECTED) return
-        val settings = Stores.settings(this).read()
-        withContext(Dispatchers.Main) { enterForeground("Подключено", "${s.profileName} · ${settings.mode.title}") }
+        withContext(Dispatchers.Main) { enterForeground("Подключено", s.profileName) }
     }
 
     private fun setStatus(status: VpnStatus) {
