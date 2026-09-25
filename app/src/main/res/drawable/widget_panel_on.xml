@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The upper panel while connected: a faint green light from the right. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="@dimen/widget_inner_radius" />
+            <gradient
+                android:angle="0"
+                android:startColor="#0AFFFFFF"
+                android:centerColor="#0F30D158"
+                android:endColor="#2430D158" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="@dimen/widget_inner_radius" />
+            <stroke android:width="1dp" android:color="#2430D158" />
+        </shape>
+    </item>
+</layer-list>

@@ -56,14 +56,14 @@ object VpnWidget {
     /** A test that started longer ago than this was cut short (process killed). */
     private const val TEST_STALE_MS = 30_000L
 
-    private const val GREEN = 0xFF3DDC97.toInt()
-    private const val AMBER = 0xFFF5B84B.toInt()
-    private const val RED = 0xFFFF6B6B.toInt()
-    private const val GREY = 0xFF6F7F8F.toInt()
-    private const val BAR_OFF = 0xFF3A4756.toInt()
-    private const val TEXT = 0xFFE8EEF3.toInt()
-    private const val TEXT_SOFT = 0xFFB7C3CE.toInt()
-    private const val TEXT_MUTED = 0xFF8A99A8.toInt()
+    // iOS system colours on dark.
+    private const val GREEN = 0xFF30D158.toInt()
+    private const val AMBER = 0xFFFF9F0A.toInt()
+    private const val RED = 0xFFFF453A.toInt()
+    private const val GREY = 0xFF8E8E93.toInt()
+    private const val BAR_OFF = 0x4DEBEBF5
+    private const val TEXT = 0xFFFFFFFF.toInt()
+    private const val TEXT_SECONDARY = 0x99EBEBF5.toInt()
 
     private const val RC_OPEN = 100
     private const val RC_CONNECT_UI = 101
@@ -249,8 +249,7 @@ object VpnWidget {
     ) {
         MINI(R.layout.widget_vpn_row, 110f, 40f, timerInStatus = true, showPing = false),
         ROW(R.layout.widget_vpn_row, 230f, 40f, timerInStatus = false, showPing = true),
-        SQUARE(R.layout.widget_vpn_square, 110f, 150f, timerInStatus = true, showPing = true),
-        FULL(R.layout.widget_vpn, 230f, 140f, timerInStatus = false, showPing = true),
+        FULL(R.layout.widget_vpn, 260f, 124f, timerInStatus = false, showPing = true),
     }
 
     /**
@@ -297,7 +296,8 @@ object VpnWidget {
         }
         v.setInt(R.id.status_dot, "setColorFilter", statusColor)
         v.setTextViewText(R.id.status_text, statusText)
-        v.setTextColor(R.id.status_text, if (m.state == VpnState.ERROR) RED else TEXT_SOFT)
+        v.setTextColor(R.id.status_text, if (m.state == VpnState.DISCONNECTED) TEXT_SECONDARY else statusColor)
+        v.setInt(R.id.panel, "setBackgroundResource", if (connected) R.drawable.widget_panel_on else R.drawable.widget_panel)
 
         // Connection timer: counted by the launcher, not by this app. Every
         // visibility is set explicitly: a launcher may re-apply this picture
@@ -334,7 +334,7 @@ object VpnWidget {
                 else -> R.drawable.widget_power_off
             },
         )
-        v.setInt(R.id.power_icon, "setColorFilter", if (connected) GREEN else if (busy) AMBER else TEXT_SOFT)
+        v.setInt(R.id.power_icon, "setColorFilter", if (connected) GREEN else if (busy) AMBER else TEXT)
         v.setViewVisibility(R.id.power_glow, if (connected) View.VISIBLE else View.GONE)
         val on = connected || m.state == VpnState.CONNECTING
         v.setContentDescription(
@@ -376,11 +376,10 @@ object VpnWidget {
         v.setTextViewText(R.id.ping_value, text)
         v.setTextColor(
             R.id.ping_value,
-            when (ping) {
-                is Ping.Ok -> if (compact) TEXT else color
-                Ping.Failed -> RED
-                Ping.Testing -> TEXT_MUTED
-                Ping.Unknown -> if (compact) TEXT else TEXT_MUTED
+            when {
+                ping == Ping.Failed -> RED
+                compact -> TEXT
+                else -> TEXT_SECONDARY
             },
         )
     }

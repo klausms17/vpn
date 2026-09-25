@@ -1,14 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <dimen name="widget_radius">24dp</dimen>
-    <color name="widget_text">#FFE8EEF3</color>
-    <color name="widget_text_muted">#FF8A99A8</color>
-    <color name="widget_text_soft">#FFB7C3CE</color>
+    <dimen name="widget_inner_radius">20dp</dimen>
+    <color name="widget_text">#FFFFFFFF</color>
+    <!-- iOS-style secondary and tertiary labels on dark. -->
+    <color name="widget_text_secondary">#99EBEBF5</color>
+    <color name="widget_text_tertiary">#4DEBEBF5</color>
 
     <string name="widget_label">Klaus VPN</string>
     <string name="widget_description">Включение VPN одним нажатием и проверка пинга</string>
     <string name="widget_ping">Пинг</string>
-    <string name="widget_timer_idle">--:--</string>
+    <string name="widget_timer_idle">00:00</string>
     <string name="widget_preview_server">Мой сервер</string>
     <string name="widget_preview_status">Отключен</string>
     <string name="widget_preview_protocol">VLESS | TCP | Reality</string>
