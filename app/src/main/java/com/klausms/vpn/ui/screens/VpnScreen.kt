@@ -39,8 +39,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.klausms.vpn.R
+import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.service.VpnState
+import com.klausms.vpn.service.VpnStatus
 import com.klausms.vpn.ui.MainViewModel
 import com.klausms.vpn.ui.PingResult
 import com.klausms.vpn.ui.components.CircleFlag
@@ -75,7 +77,27 @@ fun VpnScreen(
     val profiles by vm.profiles.collectAsStateWithLifecycle()
     val status by vm.status.collectAsStateWithLifecycle()
     val pings by vm.pings.collectAsStateWithLifecycle()
+    VpnContent(
+        status = status,
+        profiles = profiles,
+        pings = pings,
+        onToggle = onToggle,
+        onOpenServers = onOpenServers,
+        onAddServer = onAddServer,
+        onPing = { id -> if (vm.pings.value[id] == null) vm.ping(listOf(id)) },
+    )
+}
 
+@Composable
+fun VpnContent(
+    status: VpnStatus,
+    profiles: ProfilesState,
+    pings: Map<String, PingResult>,
+    onToggle: () -> Unit,
+    onOpenServers: () -> Unit,
+    onAddServer: () -> Unit,
+    onPing: (String) -> Unit,
+) {
     val state = status.state
     val active = state == VpnState.CONNECTED || state == VpnState.CONNECTING || state == VpnState.DISCONNECTING
     // The server the tunnel runs on, else the selected one.
@@ -91,8 +113,7 @@ fun VpnScreen(
 
     // Measure the selected server once, so its card shows a real latency.
     LaunchedEffect(server?.id) {
-        val id = server?.id ?: return@LaunchedEffect
-        if (vm.pings.value[id] == null) vm.ping(listOf(id))
+        server?.id?.let(onPing)
     }
 
     var heroCenterY by remember { mutableFloatStateOf(0f) }

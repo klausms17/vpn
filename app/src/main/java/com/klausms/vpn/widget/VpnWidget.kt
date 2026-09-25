@@ -14,6 +14,7 @@ import android.view.View
 import android.widget.RemoteViews
 import androidx.annotation.LayoutRes
 import androidx.annotation.RequiresApi
+import androidx.annotation.VisibleForTesting
 import androidx.core.content.edit
 import com.klausms.vpn.R
 import com.klausms.vpn.core.XrayCore
@@ -216,6 +217,29 @@ object VpnWidget {
         /** False until a tunnel has come up once (the user allowed the VPN). */
         val vpnAllowed: Boolean,
     )
+
+    /**
+     * Screenshot tests: every size of the widget for one state, built exactly
+     * as for the home screen. [pingMs]: null not measured, -1 no answer,
+     * -2 being measured.
+     */
+    @VisibleForTesting
+    internal fun previews(
+        context: Context,
+        state: VpnState,
+        connectedSince: Long,
+        profile: StoredProfile?,
+        pingMs: Long?,
+    ): Map<String, RemoteViews> {
+        val ping = when {
+            pingMs == null -> Ping.Unknown
+            pingMs == -1L -> Ping.Failed
+            pingMs < 0 -> Ping.Testing
+            else -> Ping.Ok(pingMs)
+        }
+        val m = Model(state, connectedSince, profile, ping, vpnAllowed = true)
+        return Variant.entries.associate { it.name to build(context, m, it) }
+    }
 
     private fun loadModel(context: Context): Model {
         val status = VpnStatusHolder.status.value

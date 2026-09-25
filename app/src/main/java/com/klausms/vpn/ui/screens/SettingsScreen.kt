@@ -27,6 +27,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.klausms.vpn.BuildConfig
 import com.klausms.vpn.R
+import com.klausms.vpn.data.AppSettings
 import com.klausms.vpn.ui.MainViewModel
 import com.klausms.vpn.ui.components.IconTile
 import com.klausms.vpn.ui.components.InsetGroup
@@ -60,6 +61,25 @@ fun SettingsScreen(vm: MainViewModel, onNavigate: (String) -> Unit) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val geoVersion by vm.geoVersion.collectAsStateWithLifecycle()
     val coreVersion by vm.coreVersion.collectAsStateWithLifecycle()
+    SettingsContent(
+        settings = settings,
+        geoVersion = geoVersion,
+        coreVersion = coreVersion,
+        onRussianApps = { v -> vm.updateSettings { it.copy(bypassRussianApps = v) } },
+        onUpdateGeo = { vm.updateGeo() },
+        onNavigate = onNavigate,
+    )
+}
+
+@Composable
+fun SettingsContent(
+    settings: AppSettings,
+    geoVersion: Long,
+    coreVersion: String,
+    onRussianApps: (Boolean) -> Unit,
+    onUpdateGeo: () -> Unit,
+    onNavigate: (String) -> Unit,
+) {
     val context = LocalContext.current
     var confirmGeo by remember { mutableStateOf(false) }
     var batteryUnrestricted by remember { mutableStateOf(isIgnoringBatteryOptimizations(context)) }
@@ -81,11 +101,11 @@ fun SettingsScreen(vm: MainViewModel, onNavigate: (String) -> Unit) {
                         trailing = {
                             IosSwitch(
                                 checked = settings.bypassRussianApps,
-                                onCheckedChange = { v -> vm.updateSettings { it.copy(bypassRussianApps = v) } },
+                                onCheckedChange = onRussianApps,
                                 description = "Российские приложения без VPN",
                             )
                         },
-                        onClick = { vm.updateSettings { it.copy(bypassRussianApps = !settings.bypassRussianApps) } },
+                        onClick = { onRussianApps(!settings.bypassRussianApps) },
                     )
                 }
             }
@@ -193,7 +213,7 @@ fun SettingsScreen(vm: MainViewModel, onNavigate: (String) -> Unit) {
                     color = kc.secondary,
                 )
             },
-            confirmButton = { TextButton(onClick = { confirmGeo = false; vm.updateGeo() }) { Text("Обновить", color = kc.green) } },
+            confirmButton = { TextButton(onClick = { confirmGeo = false; onUpdateGeo() }) { Text("Обновить", color = kc.green) } },
             dismissButton = { TextButton(onClick = { confirmGeo = false }) { Text("Отмена", color = kc.green) } },
         )
     }

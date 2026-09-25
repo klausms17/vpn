@@ -38,6 +38,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.klausms.vpn.R
+import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.Subscription
 import com.klausms.vpn.ui.MainViewModel
@@ -62,12 +63,45 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
+/** What the Servers tab can ask for. */
+class ServerActions(
+    val select: (String) -> Unit,
+    val ping: (String) -> Unit,
+    val pingAll: () -> Unit,
+    val rename: (id: String, name: String) -> Unit,
+    val delete: (String) -> Unit,
+    val refreshSubscription: (String) -> Unit,
+    val deleteSubscription: (String) -> Unit,
+)
+
 /** The Servers tab: own keys and subscriptions, pick one, check latency. */
 @Composable
 fun ServersScreen(vm: MainViewModel, onAdd: () -> Unit) {
     val profiles by vm.profiles.collectAsStateWithLifecycle()
     val pings by vm.pings.collectAsStateWithLifecycle()
     val whitelist by vm.whitelist.collectAsStateWithLifecycle()
+    val actions = remember(vm) {
+        ServerActions(
+            select = { vm.select(it) },
+            ping = { vm.ping(listOf(it)) },
+            pingAll = { vm.pingAll() },
+            rename = { id, name -> vm.rename(id, name) },
+            delete = { vm.delete(it) },
+            refreshSubscription = { vm.refreshSubscription(it) },
+            deleteSubscription = { vm.deleteSubscription(it) },
+        )
+    }
+    ServersContent(profiles, pings, whitelist, actions, onAdd)
+}
+
+@Composable
+fun ServersContent(
+    profiles: ProfilesState,
+    pings: Map<String, PingResult>,
+    whitelist: Map<String, Int>,
+    actions: ServerActions,
+    onAdd: () -> Unit,
+) {
     var renameTarget by remember { mutableStateOf<StoredProfile?>(null) }
 
     val subIds = profiles.subscriptions.map { it.id }.toSet()
@@ -79,7 +113,7 @@ fun ServersScreen(vm: MainViewModel, onAdd: () -> Unit) {
             item {
                 LargeTitle("Серверы") {
                     if (profiles.profiles.isNotEmpty()) {
-                        GlassIconButton(R.drawable.ic_gauge_ios, "Проверить все серверы", onClick = { vm.pingAll() })
+                        GlassIconButton(R.drawable.ic_gauge_ios, "Проверить все серверы", onClick = actions.pingAll)
                     }
                     GlassIconButton(R.drawable.ic_plus_ios, "Добавить сервер", onClick = onAdd, fill = kc.cta, iconSize = 18.dp)
                 }
@@ -99,7 +133,7 @@ fun ServersScreen(vm: MainViewModel, onAdd: () -> Unit) {
                                 ping = pings[p.id],
                                 whitelisted = whitelist[p.address] == 1,
                                 canDelete = true,
-                                vm = vm,
+                                actions = actions,
                                 onRename = { renameTarget = p },
                             )
                         }
@@ -111,7 +145,7 @@ fun ServersScreen(vm: MainViewModel, onAdd: () -> Unit) {
                 item(key = "h-${sub.id}") { SectionHeader(sub.name) }
                 item(key = "g-${sub.id}") {
                     InsetGroup {
-                        SubscriptionHeader(sub, onRefresh = { vm.refreshSubscription(sub.id) }, onDelete = { vm.deleteSubscription(sub.id) })
+                        SubscriptionHeader(sub, onRefresh = { actions.refreshSubscription(sub.id) }, onDelete = { actions.deleteSubscription(sub.id) })
                         servers.forEach { p ->
                             RowDivider(start = if (servers.first() == p) 16.dp else 72.dp)
                             ServerRow(
@@ -120,7 +154,7 @@ fun ServersScreen(vm: MainViewModel, onAdd: () -> Unit) {
                                 ping = pings[p.id],
                                 whitelisted = whitelist[p.address] == 1,
                                 canDelete = false,
-                                vm = vm,
+                                actions = actions,
                                 onRename = { renameTarget = p },
                             )
                         }
@@ -137,7 +171,7 @@ fun ServersScreen(vm: MainViewModel, onAdd: () -> Unit) {
         RenameDialog(Countries.stripFlags(target.name), onDismiss = { renameTarget = null }) { name ->
             // Keep the flag emoji, which carries the country.
             val flag = Countries.codeFrom(target.name)?.let { Countries.flag(it) + " " }.orEmpty()
-            vm.rename(target.id, flag + name)
+            actions.rename(target.id, flag + name)
             renameTarget = null
         }
     }
@@ -193,7 +227,7 @@ private fun ServerRow(
     ping: PingResult?,
     whitelisted: Boolean,
     canDelete: Boolean,
-    vm: MainViewModel,
+    actions: ServerActions,
     onRename: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -214,12 +248,12 @@ private fun ServerRow(
                     }
                 }
             },
-            onClick = { vm.select(profile.id) },
+            onClick = { actions.select(profile.id) },
             onLongClick = { menu = true },
             minHeight = 64.dp,
         )
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }, containerColor = kc.cardPressed) {
-            MenuItem("Проверить отклик", R.drawable.ic_gauge_ios) { menu = false; vm.ping(listOf(profile.id)) }
+            MenuItem("Проверить отклик", R.drawable.ic_gauge_ios) { menu = false; actions.ping(profile.id) }
             MenuItem("Переименовать", R.drawable.ic_pencil_ios) { menu = false; onRename() }
             profile.link?.let { link ->
                 MenuItem("Скопировать ключ", R.drawable.ic_copy_ios) { menu = false; copySensitive(context, link) }
@@ -234,7 +268,7 @@ private fun ServerRow(
             onDismissRequest = { confirmDelete = false },
             containerColor = kc.card,
             title = { Text("Удалить «${Countries.stripFlags(profile.name)}»?", style = IosType.headline, color = kc.label) },
-            confirmButton = { TextButton(onClick = { confirmDelete = false; vm.delete(profile.id) }) { Text("Удалить", color = kc.red) } },
+            confirmButton = { TextButton(onClick = { confirmDelete = false; actions.delete(profile.id) }) { Text("Удалить", color = kc.red) } },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Отмена", color = kc.green) } },
         )
     }

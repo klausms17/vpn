@@ -185,3 +185,26 @@ jobs:
             --prerelease \
             --title "$title" \
             --notes "$notes"
+
+      # A look at the real screens and the widget without a phone: drawn by
+      # Robolectric into PNGs and kept on the ui-screenshots branch. Never
+      # blocks the build above.
+      - name: Screenshots of the screens and the widget
+        id: screenshots
+        continue-on-error: true
+        run: ./gradlew --no-daemon testDebugUnitTest --tests 'com.klausms.vpn.ui.ScreenshotTest'
+
+      - name: Publish screenshots
+        if: always() && steps.screenshots.outcome != 'skipped'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dir=app/build/screenshots
+          if [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then echo "No screenshots."; exit 0; fi
+          cd "$dir"
+          git init -q -b ui-screenshots
+          git add -A
+          git -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+            commit -q -m "Screenshots of ${GITHUB_SHA::7} (${GITHUB_REF_NAME})"
+          git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/ui-screenshots

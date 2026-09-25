@@ -72,6 +72,23 @@ android {
         abortOnError = true
         checkReleaseBuilds = true
     }
+
+    testOptions {
+        // Screenshot tests draw the real resources (fonts, map, icons).
+        unitTests.isIncludeAndroidResources = true
+    }
+}
+
+tasks.withType<Test>().configureEach {
+    systemProperty("screenshots.dir", layout.buildDirectory.dir("screenshots").get().asFile.absolutePath)
+    // Real HWUI rendering: shadows and layers look as on a phone.
+    systemProperty("robolectric.pixelCopyRenderMode", "hardware")
+    systemProperty("java.awt.headless", "true")
+    maxHeapSize = "3g"
+    testLogging {
+        events("failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }
 
 dependencies {
@@ -93,4 +110,9 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
 
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+    // Test-only activity for the screenshot tests; debug builds only.
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
