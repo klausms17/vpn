@@ -12,22 +12,49 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.klausms.vpn.R
 import com.klausms.vpn.service.VpnState
+import com.klausms.vpn.ui.components.BusyPill
+import com.klausms.vpn.ui.components.GlassToast
+import com.klausms.vpn.ui.components.TabBar
+import com.klausms.vpn.ui.components.TabItem
+import com.klausms.vpn.ui.screens.AddKeySheet
 import com.klausms.vpn.ui.screens.AppsScreen
-import com.klausms.vpn.ui.screens.HomeScreen
+import com.klausms.vpn.ui.screens.LicensesScreen
 import com.klausms.vpn.ui.screens.LogsScreen
+import com.klausms.vpn.ui.screens.ServersScreen
 import com.klausms.vpn.ui.screens.SettingsScreen
+import com.klausms.vpn.ui.screens.VpnScreen
+import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.KlausTheme
+import com.klausms.vpn.ui.theme.kc
 
 class MainActivity : ComponentActivity() {
     companion object {
@@ -39,6 +66,12 @@ class MainActivity : ComponentActivity() {
         const val ACTION_CONNECT = "com.klausms.vpn.ui.CONNECT"
 
         private const val KEY_SHARED_TEXT = "shared_text"
+
+        private val tabs = listOf(
+            TabItem("vpn", "VPN", R.drawable.ic_tab_vpn),
+            TabItem("servers", "Серверы", R.drawable.ic_tab_servers),
+            TabItem("settings", "Настройки", R.drawable.ic_tab_settings),
+        )
     }
 
     private val vm: MainViewModel by viewModels()
@@ -72,38 +105,79 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             KlausTheme {
-                var route by rememberSaveable { mutableStateOf("home") }
-                BackHandler(enabled = route != "home") {
-                    route = if (route == "settings") "home" else "settings"
-                }
-                when {
-                    route == "home" -> HomeScreen(
+                AppShell()
+            }
+        }
+    }
+
+    @Composable
+    private fun AppShell() {
+        var tab by rememberSaveable { mutableStateOf("vpn") }
+        // A screen pushed over the tabs: "apps", "logs", "licenses".
+        var pushed by rememberSaveable { mutableStateOf<String?>(null) }
+        var showAdd by rememberSaveable { mutableStateOf(false) }
+        val busy by vm.busy.collectAsStateWithLifecycle()
+        val toasts = remember { SnackbarHostState() }
+        LaunchedEffect(Unit) { vm.messages.collect { toasts.showSnackbar(it) } }
+
+        BackHandler(enabled = pushed != null || tab != "vpn") {
+            if (pushed != null) pushed = null else tab = "vpn"
+        }
+
+        Box(Modifier.fillMaxSize().background(kc.page)) {
+            when (pushed) {
+                "apps" -> AppsScreen(vm = vm, includeMode = false, onBack = { pushed = null })
+                "logs" -> LogsScreen(vm = vm, onBack = { pushed = null })
+                "licenses" -> LicensesScreen(onBack = { pushed = null })
+                else -> when (tab) {
+                    "servers" -> ServersScreen(vm = vm, onAdd = { showAdd = true })
+                    "settings" -> SettingsScreen(vm = vm, onNavigate = { pushed = it })
+                    else -> VpnScreen(
                         vm = vm,
                         onToggle = ::toggleVpn,
-                        onOpenSettings = { route = "settings" },
-                    )
-                    route == "settings" -> SettingsScreen(vm = vm, onBack = { route = "home" }, onNavigate = { route = it })
-                    route.startsWith("apps:") -> AppsScreen(
-                        vm = vm,
-                        includeMode = route == "apps:include",
-                        onBack = { route = "settings" },
-                    )
-                    route == "logs" -> LogsScreen(vm = vm, onBack = { route = "settings" })
-                    else -> route = "home"
-                }
-                // Shared keys are confirmed on whatever screen is open.
-                sharedText?.let { text ->
-                    AlertDialog(
-                        onDismissRequest = { sharedText = null },
-                        title = { Text("Добавить из «Поделиться»?") },
-                        text = { Text("Приложение получило текст. Если в нём есть ключи или ссылка на подписку, они будут добавлены.") },
-                        confirmButton = {
-                            TextButton(onClick = { vm.import(text); sharedText = null }) { Text("Добавить") }
-                        },
-                        dismissButton = { TextButton(onClick = { sharedText = null }) { Text("Отмена") } },
+                        onOpenServers = { tab = "servers" },
+                        onAddServer = { showAdd = true },
                     )
                 }
             }
+            if (pushed == null) {
+                TabBar(
+                    items = tabs,
+                    selected = tab,
+                    onSelect = { tab = it },
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                )
+            }
+            Column(
+                Modifier.align(Alignment.TopCenter).windowInsetsPadding(WindowInsets.statusBars).padding(top = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                BusyPill(busy)
+                SnackbarHost(toasts) { data -> GlassToast(data.visuals.message) }
+            }
+        }
+
+        if (showAdd) {
+            AddKeySheet(onDismiss = { showAdd = false }, onAdd = { text -> showAdd = false; vm.import(text) })
+        }
+        // Shared keys are confirmed on whatever screen is open.
+        sharedText?.let { text ->
+            AlertDialog(
+                onDismissRequest = { sharedText = null },
+                containerColor = kc.card,
+                title = { Text("Добавить из «Поделиться»?", style = IosType.headline, color = kc.label) },
+                text = {
+                    Text(
+                        "Приложение получило текст. Если в нём есть ключи или ссылка на подписку, они будут добавлены.",
+                        style = IosType.subhead,
+                        color = kc.secondary,
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { vm.import(text); sharedText = null }) { Text("Добавить", color = kc.green) }
+                },
+                dismissButton = { TextButton(onClick = { sharedText = null }) { Text("Отмена", color = kc.green) } },
+            )
         }
     }
 

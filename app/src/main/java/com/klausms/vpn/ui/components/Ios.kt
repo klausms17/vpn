@@ -22,11 +22,13 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -155,14 +157,21 @@ fun LargeTitle(title: String, modifier: Modifier = Modifier, trailing: @Composab
 
 /** A 44 pt round glass button with an icon (toolbar buttons). */
 @Composable
-fun GlassIconButton(@DrawableRes icon: Int, description: String, onClick: () -> Unit, tint: Color = kc.label, iconSize: Dp = 20.dp) {
+fun GlassIconButton(
+    @DrawableRes icon: Int,
+    description: String,
+    onClick: () -> Unit,
+    tint: Color = kc.label,
+    iconSize: Dp = 20.dp,
+    fill: Color = Color(0x8C3A3A3C),
+) {
     val source = remember { MutableInteractionSource() }
     val scale = pressScale(source, 1.08f)
     Box(
         Modifier
             .size(44.dp)
             .scale(scale)
-            .glass(CircleShape, elevation = 6.dp)
+            .glass(CircleShape, fill = fill, elevation = 6.dp)
             .tap(source, onClick = onClick)
             .semantics { contentDescription = description },
         contentAlignment = Alignment.Center,
@@ -502,3 +511,51 @@ fun GlassToast(text: String) {
 
 /** Unused-safe placeholder size for the floating tab bar (content padding). */
 val TabBarSpace = 98.dp
+
+// ---------------------------------------------------------------- tab bar
+
+data class TabItem(val key: String, val title: String, @DrawableRes val icon: Int)
+
+/** Floating Liquid Glass capsule with the app's three tabs. */
+@Composable
+fun TabBar(items: List<TabItem>, selected: String, onSelect: (String) -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier
+            .windowInsetsPadding(WindowInsets.navigationBars)
+            .padding(start = 20.dp, end = 20.dp, bottom = 20.dp)
+            .fillMaxWidth()
+            .height(62.dp)
+            .glass(RoundedCornerShape(31.dp), elevation = 16.dp)
+            .padding(4.dp),
+    ) {
+        for (item in items) {
+            val isSelected = item.key == selected
+            val source = remember { MutableInteractionSource() }
+            val pressed by source.collectIsPressedAsState()
+            val bg by animateColorAsState(
+                when {
+                    isSelected -> Color(0x24FFFFFF)
+                    pressed -> Color(0x14FFFFFF)
+                    else -> Color.Transparent
+                },
+                label = "tab",
+            )
+            val tint = if (isSelected) kc.green else kc.label
+            Column(
+                Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(27.dp))
+                    .background(bg)
+                    .tap(source, role = Role.Tab) { onSelect(item.key) }
+                    .semantics { contentDescription = item.title },
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                IosIcon(item.icon, tint, Modifier.size(25.dp))
+                Spacer(Modifier.height(1.dp))
+                Text(item.title, style = IosType.tab, color = tint, maxLines = 1)
+            }
+        }
+    }
+}

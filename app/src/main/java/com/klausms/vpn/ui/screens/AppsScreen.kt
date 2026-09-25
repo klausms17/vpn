@@ -3,23 +3,24 @@ package com.klausms.vpn.ui.screens
 import android.content.Context
 import android.content.Intent
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Checkbox
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,16 +30,24 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.klausms.vpn.R
-import com.klausms.vpn.data.RussianApps
 import com.klausms.vpn.ui.MainViewModel
+import com.klausms.vpn.ui.components.IosIcon
+import com.klausms.vpn.ui.components.IosSwitch
+import com.klausms.vpn.ui.components.ListRow
+import com.klausms.vpn.ui.components.NavBar
+import com.klausms.vpn.ui.components.RowDivider
+import com.klausms.vpn.ui.components.SectionFooter
+import com.klausms.vpn.ui.theme.IosType
+import com.klausms.vpn.ui.theme.kc
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -74,25 +83,14 @@ fun AppsScreen(vm: MainViewModel, includeMode: Boolean, onBack: () -> Unit) {
         }
     }
 
-    Scaffold(
-        topBar = {
-            BackTopBar(
-                if (includeMode) "Приложения через VPN" else "Исключённые из VPN",
-                onBack,
-            ) {
-                if (!includeMode) {
-                    TextButton(onClick = {
-                        val russian = RussianApps.installed(context.packageManager)
-                        vm.updateSettings { it.copy(excludedApps = it.excludedApps + russian) }
-                    }) { Text("+ российские") }
-                }
-            }
-        },
-    ) { padding ->
+    Column(Modifier.fillMaxSize().background(kc.page)) {
+        NavBar(if (includeMode) "Через VPN" else "Без VPN", onBack, backLabel = "Настройки")
         val list = apps
         if (list == null) {
-            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-            return@Scaffold
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = kc.secondary)
+            }
+            return@Column
         }
         val q = query.trim().lowercase()
         // Checked apps go first, but only as they were when the screen opened
@@ -101,44 +99,62 @@ fun AppsScreen(vm: MainViewModel, includeMode: Boolean, onBack: () -> Unit) {
         val shown = list
             .filter { q.isEmpty() || it.label.lowercase().contains(q) || it.pkg.contains(q) }
             .sortedByDescending { it.pkg in sortSelected }
-        LazyColumn(Modifier.fillMaxSize().padding(padding)) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
             item {
-                Text(
-                    if (includeMode) "Через VPN пойдут только отмеченные приложения. Остальные — напрямую."
-                    else "Отмеченные приложения работают без VPN и не видят его.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                )
-            }
-            item {
-                OutlinedTextField(
+                BasicTextField(
                     value = query,
-                    onValueChange = { query = it },
+                    onValueChange = { query = it.take(100) },
                     singleLine = true,
-                    leadingIcon = { Ic(R.drawable.ic_search) },
-                    placeholder = { Text("Поиск") },
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    textStyle = IosType.body.copy(color = kc.label),
+                    cursorBrush = SolidColor(kc.green),
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(kc.fill)
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                    decorationBox = { inner ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IosIcon(R.drawable.ic_search, kc.secondary, Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Box {
+                                if (query.isEmpty()) Text("Поиск", style = IosType.body, color = kc.secondary)
+                                inner()
+                            }
+                        }
+                    },
                 )
             }
-            items(shown, key = { it.pkg }) { app ->
-                val checked = app.pkg in selected
-                Row(
-                    Modifier.fillMaxWidth().clickable { toggle(app.pkg) }.padding(horizontal = 16.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+            item {
+                SectionFooter(
+                    if (includeMode) "Через VPN пойдут только отмеченные приложения. Остальные — напрямую."
+                    else "Отмеченные приложения работают без VPN и не видят его. Российские банки и Госуслуги уже работают без VPN, если включён этот режим в настройках.",
+                )
+            }
+            item { Spacer(Modifier.height(12.dp)) }
+            // One lazy item per app (a phone can have hundreds), drawn as
+            // one inset group: rounded corners on the first and last row.
+            itemsIndexed(shown, key = { _, app -> app.pkg }) { i, app ->
+                val top = if (i == 0) 26.dp else 0.dp
+                val bottom = if (i == shown.lastIndex) 26.dp else 0.dp
+                Column(
+                    Modifier
+                        .padding(horizontal = 20.dp)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(topStart = top, topEnd = top, bottomStart = bottom, bottomEnd = bottom))
+                        .background(kc.card),
                 ) {
-                    AppIcon(context, app.pkg, icons)
-                    Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                        Text(app.label, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(
-                            app.pkg,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    Checkbox(checked = checked, onCheckedChange = { toggle(app.pkg) })
+                    if (i > 0) RowDivider(start = 68.dp)
+                    val checked = app.pkg in selected
+                    ListRow(
+                        title = app.label,
+                        leading = { AppIcon(context, app.pkg, icons) },
+                        trailing = {
+                            IosSwitch(checked = checked, onCheckedChange = { toggle(app.pkg) }, description = app.label)
+                        },
+                        onClick = { toggle(app.pkg) },
+                        minHeight = 56.dp,
+                    )
                 }
             }
         }
@@ -159,5 +175,5 @@ private fun AppIcon(context: Context, pkg: String, cache: HashMap<String, ImageB
         }
     }
     val b = bitmap
-    if (b != null) Image(b, null, Modifier.size(40.dp)) else Box(Modifier.size(40.dp))
+    if (b != null) Image(b, null, Modifier.size(40.dp)) else Box(Modifier.size(40.dp).clip(RoundedCornerShape(9.dp)).background(kc.cardPressed))
 }

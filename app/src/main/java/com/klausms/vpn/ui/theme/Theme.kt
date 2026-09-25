@@ -118,13 +118,6 @@ private val materialType = Typography().let { t ->
     )
 }
 
-/** Status colours shared by the whole UI. */
-object StatusColors {
-    val connected = Color(0xFF30D158)
-    val connecting = Color(0xFFFF9230)
-    val idle = Color(0xFF8E8E93)
-}
-
 @Composable
 fun KlausTheme(content: @Composable () -> Unit) {
     // Always the dark appearance: it is the approved design, and the widget
