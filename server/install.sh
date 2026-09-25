@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Klaus VPN server installer: Xray (latest release) with VLESS + REALITY.
 #
-#   curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/<branch>/server/install.sh | sudo bash
-#   (or copy this file to the server and run: sudo bash install.sh)
+#   Copy this file to the server and run: sudo bash install.sh
 #
 # Options (environment variables):
 #   SNI=www.example.com  site REALITY imitates (default: first working from a built-in list)

@@ -190,6 +190,13 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 	var rules []rule
 	// 1. DNS from apps is answered by Xray's DNS module (see buildDNS).
 	rules = append(rules, rule{"inboundTag": dnsInbounds, "port": "53", "outboundTag": dnsOutTag})
+	if o.Tun {
+		// Anything else sent to the tunnel's own addresses is refused at
+		// once. Android's "Private DNS (automatic)" probes DNS-over-TLS on
+		// port 853 of the VPN DNS address; refusing it immediately makes
+		// Android fall back to plain DNS without a multi-second stall.
+		rules = append(rules, rule{"ip": []string{TunDNSv4 + "/32", TunIPv4 + "/32"}, "outboundTag": blockTag})
+	}
 	// 2. The DNS module's own upstream queries.
 	if o.Mode != ModeGlobal {
 		rules = append(rules, rule{"inboundTag": []string{dnsModuleTag}, "ip": ruDNS, "outboundTag": DirectTag})

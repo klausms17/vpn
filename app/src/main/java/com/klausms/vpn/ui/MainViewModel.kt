@@ -1,7 +1,8 @@
 package com.klausms.vpn.ui
 
 import android.app.Application
-import android.net.Uri
+import androidx.core.content.edit
+import androidx.core.net.toUri
 import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -82,6 +83,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 AppLog.e("startup", e)
             }
         }
+        refreshStaleSubscriptions()
+    }
+
+    /**
+     * Subscriptions are refreshed when the app is opened and they are older
+     * than a day: never in the background, so no battery is spent on it.
+     */
+    private fun refreshStaleSubscriptions() = viewModelScope.launch {
+        val now = System.currentTimeMillis()
+        for (sub in profiles.value.subscriptions) {
+            if (now - sub.updatedAt > 24 * 60 * 60 * 1000L) refreshSubscription(sub.id, quiet = true).join()
+        }
     }
 
     private fun message(text: String) {
@@ -109,7 +122,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun notificationPermissionAsked(): Boolean = uiPrefs.getBoolean("notif_asked", false)
 
-    fun markNotificationPermissionAsked() = uiPrefs.edit().putBoolean("notif_asked", true).apply()
+    fun markNotificationPermissionAsked() = uiPrefs.edit { putBoolean("notif_asked", true) }
 
     /** Re-applies server/settings to a running tunnel (debounced). */
     private fun reconnectIfRunning(delayMs: Long = 0) {
@@ -264,7 +277,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val ready = pinWhereNeeded(parsed.profiles, errors)
         val sub = Subscription(
             id = UUID.randomUUID().toString(),
-            name = decodeTitle(fetched.profileTitle) ?: Uri.parse(url).host ?: "Подписка",
+            name = decodeTitle(fetched.profileTitle) ?: url.toUri().host ?: "Подписка",
             url = url,
             updatedAt = System.currentTimeMillis(),
             userInfo = fetched.userInfo.ifBlank { null },
@@ -281,9 +294,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         message("Подписка «${sub.name}»: серверов ${stored.size}")
     }
 
-    fun refreshSubscription(id: String) = viewModelScope.launch {
+    fun refreshSubscription(id: String, quiet: Boolean = false) = viewModelScope.launch {
         val sub = profiles.value.subscriptions.firstOrNull { it.id == id } ?: return@launch
-        _busy.value = "Обновление подписки…"
+        if (!quiet) _busy.value = "Обновление подписки…"
         try {
             val (parsed, fetched) = downloadSubscription(sub.url)
             val errors = parsed.errors.toMutableList()
@@ -311,12 +324,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             checkWhitelist(stored)
             if (oldSelected != null && oldSelected.subscriptionId == sub.id && next.selected?.outbounds != oldSelected.outbounds) reconnectIfRunning()
-            message("Подписка обновлена: серверов ${stored.size}")
+            if (!quiet) message("Подписка обновлена: серверов ${stored.size}")
         } catch (e: Exception) {
             repo.updateProfiles { s -> s.copy(subscriptions = s.subscriptions.map { if (it.id == sub.id) it.copy(lastError = e.userMessage()) else it }) }
-            message("Не удалось обновить подписку: ${e.userMessage()}")
+            if (!quiet) message("Не удалось обновить подписку: ${e.userMessage()}")
         } finally {
-            _busy.value = null
+            if (!quiet) _busy.value = null
         }
     }
 
@@ -415,6 +428,5 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         vpn.unbind()
-        super.onCleared()
     }
 }

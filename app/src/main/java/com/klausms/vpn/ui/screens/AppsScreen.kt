@@ -2,7 +2,6 @@ package com.klausms.vpn.ui.screens
 
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -42,7 +41,6 @@ import com.klausms.vpn.data.RussianApps
 import com.klausms.vpn.ui.MainViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.util.Locale
 
 private data class AppEntry(val pkg: String, val label: String)
 
@@ -55,7 +53,7 @@ private fun loadApps(context: Context): List<AppEntry> {
         .distinctBy { it.packageName }
         .filter { it.packageName != context.packageName }
         .map { AppEntry(it.packageName, pm.getApplicationLabel(it).toString()) }
-        .sortedBy { it.label.lowercase(Locale.getDefault()) }
+        .sortedBy { it.label.lowercase() }
         .toList()
 }
 
@@ -96,9 +94,9 @@ fun AppsScreen(vm: MainViewModel, includeMode: Boolean, onBack: () -> Unit) {
             Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             return@Scaffold
         }
-        val q = query.trim().lowercase(Locale.getDefault())
+        val q = query.trim().lowercase()
         val shown = list
-            .filter { q.isEmpty() || it.label.lowercase(Locale.getDefault()).contains(q) || it.pkg.contains(q) }
+            .filter { q.isEmpty() || it.label.lowercase().contains(q) || it.pkg.contains(q) }
             .sortedByDescending { it.pkg in selected }
         LazyColumn(Modifier.fillMaxSize().padding(padding)) {
             item {

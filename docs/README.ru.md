@@ -16,10 +16,15 @@
 ## 2. Сервер
 
 Нужен VPS за границей (Нидерланды, Германия, Финляндия и т. п.): 1 ядро, 1 ГБ ОЗУ,
-Ubuntu 24.04 или Debian 12. Подключитесь к нему по SSH и выполните:
+Ubuntu 24.04 или Debian 12. Репозиторий приватный, поэтому скрипт копируется вручную:
+
+1. Откройте на GitHub файл `server/install.sh` → кнопка **Raw** → скопируйте весь текст.
+2. Подключитесь к серверу по SSH и выполните `nano install.sh`, вставьте текст,
+   сохраните (Ctrl+O, Enter, Ctrl+X).
+3. Запустите:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/klausms17/vpn/main/server/install.sh | sudo bash
+sudo bash install.sh
 ```
 
 Скрипт сам:
@@ -33,8 +38,6 @@ curl -fsSL https://raw.githubusercontent.com/klausms17/vpn/main/server/install.s
 Повторный запуск **не меняет ключи** (так же обновляется Xray). Новые ключи: `RESET=1`.
 Свой сайт для маскировки: `SNI=www.example.com`.
 
-> Если репозиторий приватный, скопируйте `server/install.sh` на сервер вручную и запустите
-> `sudo bash install.sh`.
 
 ## 3. Добавление ключа
 
@@ -74,6 +77,7 @@ curl -fsSL https://raw.githubusercontent.com/klausms17/vpn/main/server/install.s
 трафик на ваш зарубежный сервер:
 
 ```bash
+# install-relay.sh копируется на российский сервер так же, как install.sh
 sudo UPSTREAM='vless://…ключ основного сервера…' bash install-relay.sh
 ```
 

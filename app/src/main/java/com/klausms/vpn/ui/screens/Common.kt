@@ -24,7 +24,7 @@ import androidx.compose.ui.unit.dp
 import com.klausms.vpn.R
 
 @Composable
-fun Ic(@DrawableRes id: Int, description: String? = null, modifier: Modifier = Modifier.size(24.dp), tint: Color? = null) {
+fun Ic(@DrawableRes id: Int, description: String? = null, modifier: Modifier = Modifier, tint: Color? = null) {
     if (tint != null) Icon(painterResource(id), description, modifier, tint = tint)
     else Icon(painterResource(id), description, modifier)
 }

@@ -13,6 +13,7 @@ import android.os.ParcelFileDescriptor
 import android.os.RemoteCallbackList
 import android.os.SystemClock
 import androidx.core.app.ServiceCompat
+import androidx.core.content.edit
 import com.klausms.vpn.core.BuildOptions
 import com.klausms.vpn.core.XrayCore
 import com.klausms.vpn.core.userMessage
@@ -508,7 +509,7 @@ internal object RuntimeState {
     fun shouldRun(context: Context) = prefs(context).getBoolean("should_run", false)
 
     fun setShouldRun(context: Context, value: Boolean) {
-        prefs(context).edit().putBoolean("should_run", value).apply()
+        prefs(context).edit { putBoolean("should_run", value) }
     }
 
     /** Allows at most 3 automatic restarts within 5 minutes. */
@@ -519,7 +520,7 @@ internal object RuntimeState {
             .mapNotNull { it.toLongOrNull() }
             .filter { now - it < 5 * 60_000 }
         if (recent.size >= 3) return false
-        p.edit().putString("restarts", (recent + now).joinToString(",")).apply()
+        p.edit { putString("restarts", (recent + now).joinToString(",")) }
         return true
     }
 
