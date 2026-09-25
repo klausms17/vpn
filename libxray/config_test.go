@@ -209,3 +209,37 @@ func TestTunSettings(t *testing.T) {
 	}
 	t.Logf("%d IPv4+IPv6 routes", len(cfg.Routes))
 }
+
+func TestOutboundsAreSanitized(t *testing.T) {
+	ob := json.RawMessage(`{"protocol":"vless","streamSettings":{"security":"reality",
+		"realitySettings":{"fingerprint":"randomizednoalpn","show":true,"masterKeyLog":"/data/x"},
+		"xhttpSettings":{"extra":{"downloadSettings":{"realitySettings":{"masterKeyLog":"/data/y","fingerprint":"ios"}}}}}}`)
+	res, err := prepareOutbounds([]json.RawMessage{ob})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(mustJSON(res[0]))
+	for _, bad := range []string{"masterKeyLog", `"show"`, "randomizednoalpn", `"ios"`} {
+		if strings.Contains(out, bad) {
+			t.Errorf("sanitized outbound still contains %s: %s", bad, out)
+		}
+	}
+}
+
+func TestBlockedDomainsNeverFallBackToPlainDNS(t *testing.T) {
+	cfg, err := buildConfig(&BuildOptions{Outbounds: []json.RawMessage{json.RawMessage(`{"protocol":"vless"}`)}, Mode: ModeRuDirect, Tun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers := cfg["dns"].(map[string]any)["servers"].([]any)
+	var blocked []map[string]any
+	for _, s := range servers {
+		m := s.(map[string]any)
+		if d, ok := m["domains"].([]string); ok && len(d) == 1 && d[0] == "geosite:ru-blocked" {
+			blocked = append(blocked, m)
+		}
+	}
+	if len(blocked) == 0 || blocked[len(blocked)-1]["finalQuery"] != true {
+		t.Fatalf("the last ru-blocked resolver must be final: %v", blocked)
+	}
+}

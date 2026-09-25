@@ -194,6 +194,18 @@ func profilesFromConfig(cfg map[string]any, name string) ([]*Profile, error) {
 			p.Name = fmt.Sprintf("%s #%d", name, n+1)
 		}
 		fillSummary(p, root)
+		// A root that skipped certificate checks is pinned on import.
+		if ss, ok := root["streamSettings"].(map[string]any); ok {
+			if tls, ok := ss["tlsSettings"].(map[string]any); ok {
+				if insecure, _ := tls["allowInsecure"].(bool); insecure {
+					p.NeedsCertPin = true
+					p.CertPinSNI, _ = tls["serverName"].(string)
+					if nw, _ := ss["network"].(string); nw == "hysteria" {
+						p.CertPinQuic = true
+					}
+				}
+			}
+		}
 		profiles = append(profiles, p)
 	}
 	return profiles, nil
@@ -251,9 +263,37 @@ func retagChain(chain []map[string]any) ([]json.RawMessage, error) {
 				}
 			}
 		}
+		// Xray removed "proxySettings": express the hop as the equivalent
+		// sockopt.dialerProxy so such subscriptions keep working.
 		if ps, ok := c["proxySettings"].(map[string]any); ok {
-			if t, _ := ps["tag"].(string); rename[t] != "" {
-				ps["tag"] = rename[t]
+			if t, _ := ps["tag"].(string); t != "" {
+				if rename[t] != "" {
+					t = rename[t]
+				}
+				ss, _ := c["streamSettings"].(map[string]any)
+				if ss == nil {
+					ss = map[string]any{}
+					c["streamSettings"] = ss
+				}
+				so, _ := ss["sockopt"].(map[string]any)
+				if so == nil {
+					so = map[string]any{}
+					ss["sockopt"] = so
+				}
+				if _, set := so["dialerProxy"]; !set {
+					so["dialerProxy"] = t
+				}
+			}
+			delete(c, "proxySettings")
+		}
+		// Xray also removed "allowInsecure". The root server gets its
+		// certificate pinned instead (see profilesFromConfig); a hop cannot.
+		if ss, ok := c["streamSettings"].(map[string]any); ok {
+			if tls, ok := ss["tlsSettings"].(map[string]any); ok {
+				if insecure, _ := tls["allowInsecure"].(bool); insecure && i > 0 {
+					return nil, errf("цепочка серверов с отключённой проверкой сертификата не поддерживается")
+				}
+				delete(tls, "allowInsecure")
 			}
 		}
 		out = append(out, mustJSON(c))

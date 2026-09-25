@@ -113,6 +113,7 @@ func prepareOutbounds(outbounds []json.RawMessage) ([]any, error) {
 		if err := json.Unmarshal(raw, &ob); err != nil {
 			return nil, fmt.Errorf("outbound %d: %w", i, err)
 		}
+		sanitizeOutbound(ob)
 		tag, _ := ob["tag"].(string)
 		if i == 0 {
 			ob["tag"] = ProxyTag
@@ -144,7 +145,9 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 	outbounds = append(outbounds,
 		map[string]any{"tag": DirectTag, "protocol": "freedom"},
 		map[string]any{"tag": blockTag, "protocol": "blackhole"},
-		map[string]any{"tag": dnsOutTag, "protocol": "dns"},
+		// Level 1: DNS flows are freed after seconds, not the default minutes
+		// (each app query is its own flow).
+		map[string]any{"tag": dnsOutTag, "protocol": "dns", "settings": map[string]any{"userLevel": 1}},
 	)
 
 	sniffing := map[string]any{
@@ -252,9 +255,12 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 	}
 
 	return map[string]any{
-		"log":       logCfg,
-		"stats":     map[string]any{},
-		"policy":    map[string]any{"system": map[string]any{"statsOutboundUplink": true, "statsOutboundDownlink": true}},
+		"log":   logCfg,
+		"stats": map[string]any{},
+		"policy": map[string]any{
+			"levels": map[string]any{"1": map[string]any{"connIdle": 10}},
+			"system": map[string]any{"statsOutboundUplink": true, "statsOutboundDownlink": true},
+		},
 		"dns":       buildDNS(o),
 		"inbounds":  inbounds,
 		"outbounds": outbounds,
@@ -265,11 +271,16 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 func buildDNS(o *BuildOptions) map[string]any {
 	var servers []any
 	doh := func(domains []string) {
-		for _, addr := range dohDNS {
+		for i, addr := range dohDNS {
 			s := map[string]any{"address": addr}
 			if domains != nil {
 				s["domains"] = domains
 				s["skipFallback"] = true
+				if i == len(dohDNS)-1 {
+					// Blocked domains must never fall through to Yandex or
+					// the ISP resolver when encrypted DNS is slow.
+					s["finalQuery"] = true
+				}
 			}
 			servers = append(servers, s)
 		}
@@ -277,6 +288,11 @@ func buildDNS(o *BuildOptions) map[string]any {
 	ru := func(domains []string) {
 		for _, addr := range append(append([]string{}, ruDNS...), "localhost") {
 			s := map[string]any{"address": addr}
+			if addr != "localhost" {
+				// Yandex answers in tens of ms; where outside DNS is blocked
+				// (offices, hotels) do not stall every lookup for seconds.
+				s["timeoutMs"] = 1000
+			}
 			if domains != nil {
 				s["domains"] = domains
 				s["skipFallback"] = true
@@ -284,6 +300,12 @@ func buildDNS(o *BuildOptions) map[string]any {
 			servers = append(servers, s)
 		}
 	}
+	// The router answers its own admin names (tplinkwifi.net, my.keenetic.net).
+	servers = append(servers, map[string]any{
+		"address":      "localhost",
+		"domains":      []string{"geosite:private", "full:my.keenetic.net", "domain:routerlogin.net"},
+		"skipFallback": true,
+	})
 	switch o.Mode {
 	case ModeRuDirect:
 		// Blocked .ru domains must not be resolved by a Russian resolver.
@@ -369,4 +391,28 @@ func hostFromURL(s string) string {
 		return strings.TrimSuffix(rest, ".")
 	}
 	return ""
+}
+
+// sanitizeOutbound removes options a link or subscription must never
+// control: key logging to arbitrary files ("masterKeyLog") and REALITY's
+// debug output ("show"). It also maps REALITY fingerprints that do not
+// always send the post-quantum key share to chrome, as links do.
+func sanitizeOutbound(v any) {
+	switch x := v.(type) {
+	case map[string]any:
+		delete(x, "masterKeyLog")
+		if rs, ok := x["realitySettings"].(map[string]any); ok {
+			delete(rs, "show")
+			if fp, ok := rs["fingerprint"].(string); ok {
+				rs["fingerprint"] = realityFingerprint(fp)
+			}
+		}
+		for _, child := range x {
+			sanitizeOutbound(child)
+		}
+	case []any:
+		for _, child := range x {
+			sanitizeOutbound(child)
+		}
+	}
 }
