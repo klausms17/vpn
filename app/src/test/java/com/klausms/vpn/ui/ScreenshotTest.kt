@@ -53,7 +53,8 @@ import javax.imageio.ImageIO
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-@Config(sdk = [36], qualifiers = "w393dp-h852dp-xxhdpi", application = Application::class)
+// Android 15: the Android 16 runtime needs JDK internals Robolectric cannot always reach.
+@Config(sdk = [35], qualifiers = "w393dp-h852dp-xxhdpi", application = Application::class)
 class ScreenshotTest {
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
