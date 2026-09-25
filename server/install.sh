@@ -3,7 +3,9 @@
 #
 #   Copy this file to the server and run: sudo bash install.sh
 #
-# Options (environment variables):
+# Options (environment variables), written AFTER sudo, e.g.
+#   sudo RESET=1 bash install.sh      (RESET=1 sudo … would not work)
+#
 #   SNI=www.example.com  site REALITY imitates (default: first working from a built-in list)
 #   PORT=443             main port (VLESS + REALITY + Vision, fastest)
 #   XHTTP_PORT=8443      backup port (VLESS + REALITY + XHTTP), 0 to disable
@@ -34,8 +36,15 @@ command -v systemctl >/dev/null || die "нужен systemd (Ubuntu 22.04+/Debian
 say "Устанавливаю зависимости"
 if command -v apt-get >/dev/null; then
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y -qq curl ca-certificates openssl qrencode >/dev/null
+  # A fresh VPS may still be running its first automatic updates: wait for
+  # apt instead of failing on its lock.
+  cloud-init status --wait >/dev/null 2>&1 || true
+  for i in $(seq 1 60); do
+    apt-get update -qq && break
+    [ "$i" -eq 60 ] && die "apt занят другим процессом, повторите через несколько минут"
+    sleep 10
+  done
+  apt-get -o DPkg::Lock::Timeout=600 install -y -qq curl ca-certificates openssl qrencode >/dev/null
 elif command -v dnf >/dev/null; then
   dnf install -y -q curl ca-certificates openssl qrencode >/dev/null
 else
@@ -43,14 +52,21 @@ else
 fi
 
 say "Устанавливаю/обновляю Xray до последней версии"
-bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null
+bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null ||
+  die "не удалось установить Xray (нет доступа к github.com?). Повторите запуск через минуту"
 XRAY=/usr/local/bin/xray
 [ -x "$XRAY" ] || die "Xray не установился"
 "$XRAY" version | head -1
 
+# Never silently replace an Xray setup this script did not create: its
+# clients would stop working. FORCE=1 replaces it (a copy is kept).
+if [ ! -f "$STATE" ] && [ -s "$CONF" ] && [ "$(tr -d ' \t\r\n' < "$CONF")" != "{}" ] && [ "${FORCE:-0}" != "1" ]; then
+  die "в $CONF уже есть настройки Xray, сделанные не этим скриптом: после замены старые ключи перестанут работать. Если это нужно, запустите: sudo FORCE=1 bash $0 (копия сохранится рядом)"
+fi
+
 # ---------------------------------------------------------------- keys
 if [ -f "$STATE" ] && [ "$RESET" != "1" ]; then
-  say "Использую существующие ключи ($STATE)"
+  say "Использую существующие ключи ($STATE). Новые: sudo RESET=1 bash install.sh"
   # shellcheck disable=SC1090
   . "$STATE"
 else
@@ -156,6 +172,7 @@ cat > "$CONF_NEXT" <<EOF
 }
 EOF
 "$XRAY" run -test -c "$CONF_NEXT" >/dev/null || die "Xray не принял конфигурацию (см. $CONF_NEXT)"
+if [ -s "$CONF" ] && ! cmp -s "$CONF" "$CONF_NEXT"; then cp -p "$CONF" "$CONF.bak-$(date +%Y%m%d-%H%M%S)"; fi
 mv "$CONF_NEXT" "$CONF"
 chmod 644 "$CONF"
 

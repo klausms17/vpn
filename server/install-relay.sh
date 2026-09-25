@@ -51,6 +51,12 @@ q() {
 UP_SEC="$(q security)"; UP_TYPE="$(q type)"; UP_PBK="$(q pbk)"; UP_SID="$(q sid)"
 UP_SNI="$(q sni)"; UP_FP="$(q fp)"; UP_FLOW="$(q flow)"; UP_PATH="$(q path)"
 [ "$UP_SEC" = "reality" ] || die "поддерживаются ключи с REALITY (security=reality)"
+# Current REALITY servers need a post-quantum key share in the hello; only
+# these fingerprints always send it.
+case "$(printf '%s' "${UP_FP:-chrome}" | tr 'A-Z' 'a-z')" in
+  chrome) UP_FP=chrome ;; firefox) UP_FP=firefox ;; safari) UP_FP=safari ;;
+  *) UP_FP=chrome ;;
+esac
 [ -n "$UP_PBK" ] && [ -n "$UP_SNI" ] || die "в ключе нет pbk или sni"
 case "${UP_TYPE:-tcp}" in
   tcp|raw) UP_NET=raw ;;
@@ -63,10 +69,25 @@ say "Основной сервер: $UP_HOST:$UP_PORT ($UP_NET)"
 say "Устанавливаю зависимости и Xray"
 if command -v apt-get >/dev/null; then
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq && apt-get install -y -qq curl ca-certificates openssl qrencode >/dev/null
+  # A fresh VPS may still be running its first automatic updates: wait for
+  # apt instead of failing on its lock.
+  cloud-init status --wait >/dev/null 2>&1 || true
+  for i in $(seq 1 60); do
+    apt-get update -qq && break
+    [ "$i" -eq 60 ] && die "apt занят другим процессом, повторите через несколько минут"
+    sleep 10
+  done
+  apt-get -o DPkg::Lock::Timeout=600 install -y -qq curl ca-certificates openssl qrencode >/dev/null
 fi
-bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null
+bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/dev/null ||
+  die "не удалось установить Xray (нет доступа к github.com?). Повторите запуск через минуту"
 XRAY=/usr/local/bin/xray
+
+# Never silently replace an Xray setup this script did not create: its
+# clients would stop working. FORCE=1 replaces it (a copy is kept).
+if [ ! -f "$STATE" ] && [ -s "$CONF" ] && [ "$(tr -d ' \t\r\n' < "$CONF")" != "{}" ] && [ "${FORCE:-0}" != "1" ]; then
+  die "в $CONF уже есть настройки Xray, сделанные не этим скриптом: после замены старые ключи перестанут работать. Если это нужно, запустите: sudo FORCE=1 bash $0 (копия сохранится рядом)"
+fi
 
 if [ -f "$STATE" ] && [ "$RESET" != "1" ]; then
   # shellcheck disable=SC1090
@@ -85,7 +106,9 @@ check_sni() {
   out="$(timeout 15 "$XRAY" tls ping "$1" 2>/dev/null)" || return 1
   printf '%s' "$out" | sed -n '/Pinging with SNI/,$p' | grep -q "TLS 1.3"
 }
-if [ -z "${SNI:-}" ]; then
+if [ -n "${SNI:-}" ]; then
+  check_sni "$SNI" || die "сайт $SNI не подходит для маскировки (нужен TLS 1.3)"
+else
   if [ -n "${SNI_SAVED:-}" ]; then SNI="$SNI_SAVED"; else
     for c in $SNI_CANDIDATES; do if check_sni "$c"; then SNI="$c"; break; fi; done
   fi
@@ -158,6 +181,7 @@ cat > "$CONF_NEXT" <<EOF
 }
 EOF
 "$XRAY" run -test -c "$CONF_NEXT" >/dev/null || die "Xray не принял конфигурацию ($CONF_NEXT)"
+if [ -s "$CONF" ] && ! cmp -s "$CONF" "$CONF_NEXT"; then cp -p "$CONF" "$CONF.bak-$(date +%Y%m%d-%H%M%S)"; fi
 mv "$CONF_NEXT" "$CONF"
 chmod 644 "$CONF"
 

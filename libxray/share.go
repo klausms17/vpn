@@ -460,8 +460,11 @@ var errPlaintext = errf("ключ без шифрования (нет TLS/REALIT
 // exactly this way), so e.g. "edge" or "ios" from an old link is replaced by
 // "chrome", which works with both old and new servers.
 func realityFingerprint(fp string) string {
+	// Current REALITY servers drop a hello without the X25519MLKEM768 key
+	// share. These fingerprints always send it; "randomizednoalpn" only on
+	// some process starts, so it is mapped to chrome like the rest.
 	switch fp {
-	case "chrome", "firefox", "safari", "randomizednoalpn":
+	case "chrome", "firefox", "safari":
 		return fp
 	}
 	return "chrome"

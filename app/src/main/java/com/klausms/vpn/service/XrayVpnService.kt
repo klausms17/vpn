@@ -166,7 +166,7 @@ class XrayVpnService : VpnService() {
                     if (config == null && !RuntimeState.shouldRun(this)) {
                         withContext(Dispatchers.Main) { stopIfLatest(startId) }
                     } else {
-                        startTunnel(startId)
+                        startTunnel(startId, userRequested = true)
                     }
                 }
             }
@@ -185,7 +185,11 @@ class XrayVpnService : VpnService() {
                     return START_NOT_STICKY
                 }
                 enterForeground("Подключение…", null)
-                enqueue { if (config == null) startTunnel(startId) else publishConnected() }
+                // A null intent is our own restart after the process died;
+                // everything else (the app, tile, widget, Always-on) is a
+                // start someone asked for.
+                val requested = intent != null
+                enqueue { if (config == null) startTunnel(startId, requested) else publishConnected() }
             }
         }
         return START_STICKY
@@ -225,7 +229,7 @@ class XrayVpnService : VpnService() {
 
     // ------------------------------------------------------------------ start
 
-    private suspend fun startTunnel(startId: Int) {
+    private suspend fun startTunnel(startId: Int, userRequested: Boolean) {
         val restarting = config != null
         setStatus(VpnStatus(VpnState.CONNECTING, profileName = VpnStatusHolder.status.value.profileName))
         try {
@@ -254,7 +258,7 @@ class XrayVpnService : VpnService() {
             // Bring the new interface up before the old one goes away:
             // Android then switches over without a moment of traffic
             // flowing outside the VPN.
-            val newTun = establishTun(profile, settings)
+            val newTun = establishTun(profile, settings, userRequested)
             val oldTun = tun
             resetJob?.cancel()
             if (restarting) {
@@ -287,6 +291,16 @@ class XrayVpnService : VpnService() {
             publishConnected()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+            if (e is AnotherVpnException) {
+                // The user switched to another VPN app while we were down:
+                // leave it alone and stay off, without an error.
+                AppLog.i("another VPN is active, not restarting")
+                stopCore()
+                RuntimeState.setShouldRun(this, false)
+                setStatus(VpnStatus(VpnState.DISCONNECTED))
+                withContext(Dispatchers.Main) { stopIfLatest(startId) }
+                return
+            }
             val message = (e as? VpnStartException)?.message ?: "Ошибка запуска: ${e.userMessage()}"
             AppLog.e("tunnel start failed: $message")
             stopCore()
@@ -297,8 +311,10 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    private fun establishTun(profile: StoredProfile, settings: AppSettings): ParcelFileDescriptor {
-        if (prepare(this) != null) {
+    private fun establishTun(profile: StoredProfile, settings: AppSettings, userRequested: Boolean): ParcelFileDescriptor {
+        // prepare() is not a query: with an earlier consent it takes the VPN
+        // over from whichever app runs one. Only do that when asked to.
+        if (userRequested && prepare(this) != null) {
             RuntimeState.setVpnConsented(this, false)
             throw VpnStartException("Нет разрешения на VPN. Откройте приложение и подключитесь оттуда.")
         }
@@ -332,7 +348,11 @@ class XrayVpnService : VpnService() {
         if (lockdownConflict) AppLog.w("lockdown is on while some apps bypass the VPN: they will have no network")
         (networkMonitor?.network ?: lastNetwork)?.let { builder.setUnderlyingNetworks(arrayOf(it)) }
         val pfd = builder.establish()
-            ?: throw VpnStartException("Система не разрешила создать VPN. Возможно, включён другой постоянный VPN.")
+            ?: if (userRequested) {
+                throw VpnStartException("Система не разрешила создать VPN. Возможно, включён другой постоянный VPN.")
+            } else {
+                throw AnotherVpnException()
+            }
         RuntimeState.setVpnConsented(this, true)
         return pfd
     }
@@ -473,7 +493,7 @@ class XrayVpnService : VpnService() {
                     connectedAtElapsed = SystemClock.elapsedRealtime()
                 } catch (e: Exception) {
                     AppLog.e("core restart after network change failed", e)
-                    enqueue { startTunnel(startId) }
+                    enqueue { if (RuntimeState.shouldRun(this@XrayVpnService)) startTunnel(startId, userRequested = false) }
                 }
             }
         }
@@ -569,6 +589,9 @@ class XrayVpnService : VpnService() {
 }
 
 private class VpnStartException(message: String) : Exception(message)
+
+/** An automatic restart found another app's VPN in place. */
+private class AnotherVpnException : Exception("another VPN is active")
 
 /**
  * Small state private to the VPN process: whether the tunnel should be up

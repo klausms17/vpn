@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xtls/xray-core/common/geodata"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/session"
 	core "github.com/xtls/xray-core/core"
@@ -77,6 +79,9 @@ func (c *Controller) Start(configJSON string, tunFd int32) (err error) {
 	}
 	if err := os.Setenv(envTunFd, strconv.Itoa(int(tunFd))); err != nil {
 		return fmt.Errorf("set tun fd: %w", err)
+	}
+	if err := reloadGeoIfChanged(); err != nil {
+		return err
 	}
 
 	inst, err := newInstance(configJSON)
@@ -238,4 +243,40 @@ func recoverInto(err *error) {
 	if r := recover(); r != nil {
 		*err = fmt.Errorf("xray panic: %v", r)
 	}
+}
+
+// Xray caches geoip/geosite matchers per file name for the life of the
+// process, so after the app updates the databases a restarted core would
+// keep routing with the old ones. Reload them when the files changed.
+var geoStamp struct {
+	sync.Mutex
+	value string
+}
+
+func reloadGeoIfChanged() error {
+	dir := os.Getenv(envAsset)
+	if dir == "" {
+		return nil
+	}
+	var b strings.Builder
+	for _, name := range []string{"geoip.dat", "geosite.dat"} {
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			return nil // the core reports a missing file itself
+		}
+		fmt.Fprintf(&b, "%s:%d:%d;", name, fi.Size(), fi.ModTime().UnixNano())
+	}
+	cur := b.String()
+	geoStamp.Lock()
+	defer geoStamp.Unlock()
+	if geoStamp.value == "" || geoStamp.value == cur {
+		// First core in this process (nothing cached yet), or unchanged.
+		geoStamp.value = cur
+		return nil
+	}
+	if err := errors.Join(geodata.IPReg.Reload(), geodata.DomainReg.Reload()); err != nil {
+		return fmt.Errorf("reload geo data: %w", err)
+	}
+	geoStamp.value = cur
+	return nil
 }

@@ -311,3 +311,16 @@ func expect(t *testing.T, got, want any) {
 		t.Errorf("got %#v, want %#v", got, want)
 	}
 }
+
+func TestRealityFingerprintAlwaysSendsPostQuantumShare(t *testing.T) {
+	cases := map[string]string{
+		"chrome": "chrome", "firefox": "firefox", "safari": "safari",
+		"randomizednoalpn": "chrome", "random": "chrome", "randomized": "chrome",
+		"ios": "chrome", "android": "chrome", "edge": "chrome", "360": "chrome", "qq": "chrome", "": "chrome",
+	}
+	for in, want := range cases {
+		if got := realityFingerprint(in); got != want {
+			t.Errorf("realityFingerprint(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
