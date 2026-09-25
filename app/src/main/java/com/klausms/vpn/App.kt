@@ -4,6 +4,7 @@ import android.app.Application
 import android.os.Build
 import com.klausms.vpn.data.AppRepository
 import com.klausms.vpn.util.AppLog
+import com.klausms.vpn.widget.VpnWidget
 import java.io.File
 
 class App : Application() {
@@ -14,6 +15,9 @@ class App : Application() {
         super.onCreate()
         val isVpnProcess = currentProcessName().endsWith(":vpn")
         AppLog.init(this, if (isVpnProcess) "vpn" else "ui")
+        // A fresh VPN process means any widget picture from before (e.g. a
+        // tunnel that was killed) may be stale.
+        if (isVpnProcess) VpnWidget.update(this)
     }
 
     private fun currentProcessName(): String =

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="widget_radius">24dp</dimen>
+    <color name="widget_text">#FFE8EEF3</color>
+    <color name="widget_text_muted">#FF8A99A8</color>
+    <color name="widget_text_soft">#FFB7C3CE</color>
+
+    <string name="widget_label">Klaus VPN</string>
+    <string name="widget_description">Включение VPN одним нажатием и проверка пинга</string>
+    <string name="widget_ping">Пинг</string>
+    <string name="widget_timer_idle">--:--</string>
+    <string name="widget_preview_server">Мой сервер</string>
+    <string name="widget_preview_status">Отключен</string>
+    <string name="widget_preview_protocol">VLESS | TCP | Reality</string>
+    <string name="widget_preview_ping">—</string>
+    <string name="widget_power_on">Подключить VPN</string>
+    <string name="widget_power_off">Отключить VPN</string>
+    <string name="widget_ping_action">Проверить пинг</string>
+</resources>

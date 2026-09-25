@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Soft halo behind the power button while connected. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
+    <gradient
+        android:type="radial"
+        android:gradientRadius="50%"
+        android:startColor="#553DDC97"
+        android:centerColor="#223DDC97"
+        android:endColor="#003DDC97" />
+</shape>

@@ -25,6 +25,7 @@ import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.Stores
 import com.klausms.vpn.ui.MainActivity
 import com.klausms.vpn.util.AppLog
+import com.klausms.vpn.widget.VpnWidget
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +36,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import libxray.Controller
 import libxray.Libxray
@@ -61,12 +64,27 @@ class XrayVpnService : VpnService() {
 
         private const val NETWORK_SETTLE_MS = 1_500L
         private const val MIN_UPTIME_FOR_RESET_MS = 3_000L
+
+        /** The running core, for the widget's ping (same process). */
+        @Volatile
+        var liveController: Controller? = null
+            private set
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     @OptIn(ExperimentalCoroutinesApi::class)
     private val worker = Dispatchers.IO.limitedParallelism(1)
+
+    // Start/stop jobs run strictly one after another, including their hops
+    // to the main thread (a single-thread dispatcher alone would let the next
+    // job start while the previous one waits for the main thread).
+    private val serial = Mutex()
+
+    // The newest command's startId. A job only stops the service if no newer
+    // command arrived meanwhile, so a quick "off, on" never loses the "on".
+    @Volatile
+    private var lastStartId = 0
 
     // Written only on [worker]; read elsewhere.
     @Volatile
@@ -131,14 +149,15 @@ class XrayVpnService : VpnService() {
         if (intent?.action == ACTION_BIND) binder else super.onBind(intent)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        lastStartId = startId
         when (intent?.action) {
             ACTION_DISCONNECT -> {
-                disconnect(userInitiated = true)
+                disconnect(userInitiated = true, startId)
                 return START_NOT_STICKY
             }
             ACTION_RECONNECT -> {
                 enterForeground("Переподключение…", null)
-                scope.launch(worker) { startTunnel() }
+                enqueue { startTunnel(startId) }
             }
             // ACTION_CONNECT, the system's Always-on VPN (SERVICE_INTERFACE)
             // and a restart after the process was killed (null intent).
@@ -155,7 +174,7 @@ class XrayVpnService : VpnService() {
                     return START_NOT_STICKY
                 }
                 enterForeground("Подключение…", null)
-                scope.launch(worker) { if (config == null) startTunnel() else publishConnected() }
+                enqueue { if (config == null) startTunnel(startId) else publishConnected() }
             }
         }
         return START_STICKY
@@ -164,7 +183,7 @@ class XrayVpnService : VpnService() {
     override fun onRevoke() {
         // Another VPN took over or the user revoked permission in settings.
         AppLog.i("VPN permission revoked by the system")
-        disconnect(userInitiated = true)
+        disconnect(userInitiated = true, lastStartId)
     }
 
     override fun onDestroy() {
@@ -177,9 +196,17 @@ class XrayVpnService : VpnService() {
         super.onDestroy()
     }
 
+    private fun enqueue(block: suspend () -> Unit) = scope.launch(worker) { serial.withLock { block() } }
+
+    /** Leaves the foreground and stops, unless a newer command is waiting. */
+    private fun stopIfLatest(startId: Int) {
+        if (startId != lastStartId) return
+        leaveForegroundAndStop()
+    }
+
     // ------------------------------------------------------------------ start
 
-    private suspend fun startTunnel() {
+    private suspend fun startTunnel(startId: Int) {
         val restarting = config != null
         setStatus(VpnStatus(VpnState.CONNECTING, profileName = VpnStatusHolder.status.value.profileName))
         try {
@@ -228,6 +255,7 @@ class XrayVpnService : VpnService() {
                 if (oldTun != null && oldTun !== newTun) closeQuietly(oldTun)
             }
             config = newConfig
+            liveController = c
             resetOnNetworkChange = settings.resetOnNetworkChange
             connectedAtElapsed = SystemClock.elapsedRealtime()
             totalUp = 0
@@ -246,12 +274,13 @@ class XrayVpnService : VpnService() {
             RuntimeState.setShouldRun(this, false)
             setStatus(VpnStatus(VpnState.ERROR, message = message))
             if (!isAppVisible()) Notifications.showError(this, message)
-            withContext(Dispatchers.Main) { leaveForegroundAndStop() }
+            withContext(Dispatchers.Main) { stopIfLatest(startId) }
         }
     }
 
     private fun establishTun(profile: StoredProfile, settings: AppSettings): ParcelFileDescriptor {
         if (prepare(this) != null) {
+            RuntimeState.setVpnConsented(this, false)
             throw VpnStartException("Нет разрешения на VPN. Откройте приложение и подключитесь оттуда.")
         }
         val tunCfg = XrayCore.tunConfig(settings.ipv6)
@@ -279,8 +308,10 @@ class XrayVpnService : VpnService() {
         }
         applyPerAppRules(builder, settings)
         (networkMonitor?.network ?: lastNetwork)?.let { builder.setUnderlyingNetworks(arrayOf(it)) }
-        return builder.establish()
+        val pfd = builder.establish()
             ?: throw VpnStartException("Система не разрешила создать VPN. Возможно, включён другой постоянный VPN.")
+        RuntimeState.setVpnConsented(this, true)
+        return pfd
     }
 
     private fun applyPerAppRules(builder: Builder, settings: AppSettings) {
@@ -327,20 +358,26 @@ class XrayVpnService : VpnService() {
 
     // ------------------------------------------------------------------ stop
 
-    private fun disconnect(userInitiated: Boolean) {
+    private fun disconnect(userInitiated: Boolean, startId: Int) {
         if (userInitiated) RuntimeState.setShouldRun(this, false)
         setStatus(VpnStatus(VpnState.DISCONNECTING, profileName = VpnStatusHolder.status.value.profileName))
-        scope.launch(worker) {
+        enqueue {
+            // A start that was still running has just finished; say again
+            // that the tunnel is going down.
+            if (VpnStatusHolder.status.value.state != VpnState.DISCONNECTING) {
+                setStatus(VpnStatus(VpnState.DISCONNECTING, profileName = VpnStatusHolder.status.value.profileName))
+            }
             stopCore()
             setStatus(VpnStatus(VpnState.DISCONNECTED))
             AppLog.i("tunnel down")
-            withContext(Dispatchers.Main) { leaveForegroundAndStop() }
+            withContext(Dispatchers.Main) { stopIfLatest(startId) }
         }
     }
 
     /** Stops the core first, then closes the TUN fd it was reading. */
     private fun stopCore() {
         resetJob?.cancel()
+        liveController = null
         try {
             controller?.stop()
         } catch (e: Exception) {
@@ -396,19 +433,22 @@ class XrayVpnService : VpnService() {
         // until timeouts. Restarting the core resets them at once, so apps
         // (messengers, video) reconnect immediately over the new network.
         resetJob?.cancel()
+        val startId = lastStartId
         resetJob = scope.launch(worker) {
             delay(NETWORK_SETTLE_MS)
-            val cfg = config ?: return@launch
-            val fd = tun ?: return@launch
-            val c = controller ?: return@launch
-            AppLog.i("network changed, resetting connections")
-            try {
-                c.stop()
-                c.start(cfg, fd.fd)
-                connectedAtElapsed = SystemClock.elapsedRealtime()
-            } catch (e: Exception) {
-                AppLog.e("core restart after network change failed", e)
-                scope.launch(worker) { startTunnel() }
+            serial.withLock {
+                val cfg = config ?: return@withLock
+                val fd = tun ?: return@withLock
+                val c = controller ?: return@withLock
+                AppLog.i("network changed, resetting connections")
+                try {
+                    c.stop()
+                    c.start(cfg, fd.fd)
+                    connectedAtElapsed = SystemClock.elapsedRealtime()
+                } catch (e: Exception) {
+                    AppLog.e("core restart after network change failed", e)
+                    enqueue { startTunnel(startId) }
+                }
             }
         }
     }
@@ -438,6 +478,7 @@ class XrayVpnService : VpnService() {
 
     private fun setStatus(status: VpnStatus) {
         VpnStatusHolder.set(status)
+        VpnWidget.update(this)
         scope.launch {
             val n = callbacks.beginBroadcast()
             try {
@@ -510,6 +551,18 @@ internal object RuntimeState {
 
     fun setShouldRun(context: Context, value: Boolean) {
         prefs(context).edit { putBoolean("should_run", value) }
+    }
+
+    /**
+     * Whether the user has allowed this VPN (a tunnel came up once). Lets the
+     * widget connect directly without calling VpnService.prepare(), which is
+     * not a query: with an earlier consent it takes the VPN over from
+     * whichever app is running one.
+     */
+    fun vpnConsented(context: Context) = prefs(context).getBoolean("vpn_consented", false)
+
+    fun setVpnConsented(context: Context, value: Boolean) {
+        if (vpnConsented(context) != value) prefs(context).edit { putBoolean("vpn_consented", value) }
     }
 
     /** Allows at most 3 automatic restarts within 5 minutes. */

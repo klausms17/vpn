@@ -89,5 +89,27 @@
                 android:name="android.service.quicksettings.TOGGLEABLE_TILE"
                 android:value="true" />
         </service>
+
+        <!-- Home screen widget. Lives in the VPN process, which owns the VPN
+             state. Exported only so the system can deliver the launcher's
+             widget events (all of them just redraw the widget). -->
+        <receiver
+            android:name=".widget.VpnWidgetProvider"
+            android:exported="true"
+            android:label="@string/widget_label"
+            android:process=":vpn">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/vpn_widget_info" />
+        </receiver>
+
+        <!-- Taps on the widget's buttons. Only this app can reach it. -->
+        <receiver
+            android:name=".widget.VpnWidgetActionReceiver"
+            android:exported="false"
+            android:process=":vpn" />
     </application>
 </manifest>

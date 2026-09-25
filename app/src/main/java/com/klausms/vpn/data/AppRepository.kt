@@ -1,6 +1,7 @@
 package com.klausms.vpn.data
 
 import android.content.Context
+import com.klausms.vpn.widget.VpnWidget
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -11,6 +12,7 @@ import kotlinx.coroutines.withContext
 
 /** Profiles and settings for the UI process, persisted atomically. */
 class AppRepository(context: Context) {
+    private val appContext = context.applicationContext
     private val profileStore = Stores.profiles(context)
     private val settingsStore = Stores.settings(context)
     private val mutex = Mutex()
@@ -24,7 +26,11 @@ class AppRepository(context: Context) {
     suspend fun updateProfiles(transform: (ProfilesState) -> ProfilesState): ProfilesState = mutex.withLock {
         val next = transform(_profiles.value)
         if (next != _profiles.value) {
-            withContext(Dispatchers.IO) { profileStore.write(next) }
+            withContext(Dispatchers.IO) {
+                profileStore.write(next)
+                // The widget shows the selected server's name.
+                VpnWidget.requestRefresh(appContext)
+            }
             _profiles.value = next
         }
         next

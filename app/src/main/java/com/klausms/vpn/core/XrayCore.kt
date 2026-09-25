@@ -94,8 +94,8 @@ object XrayCore {
     fun tunConfig(ipv6: Boolean): TunConfig = AppJson.decodeFromString(Libxray.tunSettings(ipv6))
 
     /** Real latency through the server (TLS/REALITY handshake + HTTP). */
-    fun measureDelay(outbounds: JsonArray): Long =
-        Libxray.measureOutboundDelay(proxyOnlyConfig(outbounds), TEST_URL, 10_000)
+    fun measureDelay(outbounds: JsonArray, timeoutMs: Int = 10_000): Long =
+        Libxray.measureOutboundDelay(proxyOnlyConfig(outbounds), TEST_URL, timeoutMs)
 
     /** Downloads [url], optionally through [via] (a profile's outbounds). */
     fun fetch(url: String, via: JsonArray?): libxray.FetchResult =
