@@ -10,10 +10,12 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,6 +37,7 @@ import com.klausms.vpn.ui.components.IosSwitch
 import com.klausms.vpn.ui.components.LargeTitle
 import com.klausms.vpn.ui.components.ListRow
 import com.klausms.vpn.ui.components.RowDivider
+import com.klausms.vpn.ui.components.ScrollEdge
 import com.klausms.vpn.ui.components.SectionFooter
 import com.klausms.vpn.ui.components.SectionHeader
 import com.klausms.vpn.ui.components.tabBarClearance
@@ -88,8 +91,10 @@ fun SettingsContent(
         onPauseOrDispose { }
     }
 
+    val list = rememberLazyListState()
+    val collapsed by remember { derivedStateOf { list.firstVisibleItemIndex > 0 } }
     Box(Modifier.fillMaxSize().background(kc.page)) {
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = tabBarClearance() + 16.dp)) {
+        LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(bottom = tabBarClearance() + 16.dp)) {
             item { LargeTitle("Настройки") }
 
             item { SectionHeader("Приложения без VPN") }
@@ -199,6 +204,7 @@ fun SettingsContent(
                 }
             }
         }
+        ScrollEdge("Настройки", collapsed)
     }
 
     if (confirmGeo) {

@@ -210,7 +210,7 @@ private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, now: Long
     val showTimer = state == VpnState.CONNECTED && since > 0
     val timerHeight by animateDpAsState(if (showTimer) 54.dp else 0.dp, tween(450), label = "timer")
     Column(
-        Modifier.padding(top = 4.dp).height(118.dp).fillMaxWidth().padding(horizontal = 24.dp),
+        Modifier.padding(top = 14.dp).height(108.dp).fillMaxWidth().padding(horizontal = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
@@ -298,7 +298,12 @@ fun PingLine(ping: PingResult?) {
         is PingResult.Ok -> {
             val (level, color) = pingLevel(ping.ms)
             SignalBars(level, color)
-            Text("${ping.ms} мс", style = IosType.subhead.copy(fontFeatureSettings = "tnum"), color = kc.secondary, maxLines = 1)
+            Text(
+                "${ping.ms} мс",
+                style = IosType.subhead.copy(fontFeatureSettings = "tnum"),
+                color = if (level >= 3) kc.secondary else color,
+                maxLines = 1,
+            )
         }
         is PingResult.Failed -> {
             SignalBars(1, kc.red)

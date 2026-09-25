@@ -1,8 +1,10 @@
 package com.klausms.vpn.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -31,9 +33,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.klausms.vpn.R
 import com.klausms.vpn.ui.components.GlassIconButton
+import com.klausms.vpn.ui.components.IosIcon
 import com.klausms.vpn.ui.components.PrimaryButton
 import com.klausms.vpn.ui.components.SecondaryButton
 import com.klausms.vpn.ui.theme.IosType
@@ -100,11 +106,28 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit) {
                     .background(kc.fill)
                     .padding(horizontal = 16.dp, vertical = 14.dp),
                 decorationBox = { inner ->
-                    Box {
-                        if (text.isEmpty()) {
-                            Text("vless://… или ссылка на подписку", style = IosType.subhead, color = kc.tertiary)
+                    Row {
+                        Box(Modifier.weight(1f)) {
+                            if (text.isEmpty()) {
+                                Text("vless://… или ссылка на подписку", style = IosType.subhead, color = kc.tertiary)
+                            }
+                            inner()
                         }
-                        inner()
+                        if (text.isNotEmpty()) {
+                            // iOS clear button.
+                            Box(
+                                Modifier
+                                    .padding(start = 8.dp)
+                                    .size(22.dp)
+                                    .clip(CircleShape)
+                                    .background(kc.tertiary)
+                                    .clickable(onClickLabel = "Очистить", role = Role.Button) { text = "" }
+                                    .semantics { contentDescription = "Очистить" },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                IosIcon(R.drawable.ic_close_ios, kc.card, Modifier.size(9.dp))
+                            }
+                        }
                     }
                 },
             )
@@ -115,25 +138,26 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit) {
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
             )
             Spacer(Modifier.height(20.dp))
+            // The buttons never swap places: a quick second tap on "paste"
+            // must not add the keys unseen.
+            val paste: () -> Unit = {
+                val clip = readClipboard(context)
+                if (clip == null) clipboardEmpty = true else { text = clip; clipboardEmpty = false }
+            }
             if (text.isBlank()) {
-                PrimaryButton(
-                    "Вставить из буфера",
-                    onClick = {
-                        val clip = readClipboard(context)
-                        if (clip == null) clipboardEmpty = true else { text = clip; clipboardEmpty = false }
-                    },
-                    icon = R.drawable.ic_clipboard_ios,
-                )
-                Spacer(Modifier.height(10.dp))
-                PrimaryButton("Добавить", onClick = {}, enabled = false)
+                PrimaryButton("Вставить из буфера", onClick = paste, icon = R.drawable.ic_clipboard_ios)
             } else {
-                PrimaryButton("Добавить", onClick = {
+                SecondaryButton("Вставить из буфера", onClick = paste, icon = R.drawable.ic_clipboard_ios)
+            }
+            Spacer(Modifier.height(10.dp))
+            PrimaryButton(
+                "Добавить",
+                onClick = {
                     val keys = text
                     close { onAdd(keys) }
-                })
-                Spacer(Modifier.height(10.dp))
-                SecondaryButton("Очистить", onClick = { text = "" })
-            }
+                },
+                enabled = text.isNotBlank(),
+            )
         }
     }
 }

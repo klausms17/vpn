@@ -1,6 +1,9 @@
 package com.klausms.vpn.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -24,6 +28,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,9 +37,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -53,10 +60,13 @@ import com.klausms.vpn.ui.components.IosIcon
 import com.klausms.vpn.ui.components.LargeTitle
 import com.klausms.vpn.ui.components.PrimaryButton
 import com.klausms.vpn.ui.components.RowDivider
+import com.klausms.vpn.ui.components.ScrollEdge
 import com.klausms.vpn.ui.components.SectionFooter
 import com.klausms.vpn.ui.components.SectionHeader
 import com.klausms.vpn.ui.components.SignalBars
 import com.klausms.vpn.ui.components.groupRow
+import com.klausms.vpn.ui.components.pressScale
+import com.klausms.vpn.ui.components.tap
 import com.klausms.vpn.ui.components.tabBarClearance
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
@@ -111,8 +121,10 @@ fun ServersContent(
     // Servers whose subscription is gone are treated as own keys.
     val own = profiles.profiles.filter { it.subscriptionId == null || it.subscriptionId !in subIds }
 
+    val list = rememberLazyListState()
+    val collapsed by remember { derivedStateOf { list.firstVisibleItemIndex > 0 } }
     Box(Modifier.fillMaxSize().background(kc.page)) {
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = tabBarClearance() + 16.dp)) {
+        LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(bottom = tabBarClearance() + 16.dp)) {
             item {
                 LargeTitle("Серверы") {
                     if (profiles.profiles.isNotEmpty()) {
@@ -129,7 +141,7 @@ fun ServersContent(
                 item(key = "own-header") { SectionHeader("Мои ключи") }
                 itemsIndexed(own, key = { _, p -> p.id }) { i, p ->
                     Column(Modifier.groupRow(first = i == 0, last = i == own.lastIndex).background(kc.card)) {
-                        if (i > 0) RowDivider(start = 72.dp)
+                        if (i > 0) RowDivider(start = FLAG_TEXT_START)
                         ServerRow(
                             profile = p,
                             selected = p.id == profiles.selectedId,
@@ -152,7 +164,7 @@ fun ServersContent(
                 }
                 itemsIndexed(servers, key = { _, p -> "${sub.id}/${p.id}" }) { i, p ->
                     Column(Modifier.groupRow(first = false, last = i == servers.lastIndex).background(kc.card)) {
-                        RowDivider(start = if (i == 0) 16.dp else 72.dp)
+                        RowDivider(start = if (i == 0) 16.dp else FLAG_TEXT_START)
                         ServerRow(
                             profile = p,
                             selected = p.id == profiles.selectedId,
@@ -169,6 +181,7 @@ fun ServersContent(
                 }
             }
         }
+        ScrollEdge("Серверы", collapsed)
     }
 
     renameTarget?.let { target ->
@@ -244,7 +257,7 @@ private fun ServerRow(
             subtitle = describe(profile),
             badge = if (whitelisted) ({ WhitelistBadge() }) else null,
             titleMaxLines = 1,
-            leading = { CircleFlag(code) },
+            leading = { CircleFlag(code, 32.dp) },
             trailing = {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     RowPing(ping)
@@ -289,16 +302,20 @@ private fun MenuItem(text: String, icon: Int, destructive: Boolean = false, onCl
     )
 }
 
+/** Where row text starts after a 32 dp flag: 16 + 32 + 12. */
+private val FLAG_TEXT_START = 60.dp
+
 @Composable
 private fun RowPing(ping: PingResult?) {
     when (ping) {
         is PingResult.Ok -> {
+            // Same colours as the VPN card and the widget.
             val (level, color) = pingLevel(ping.ms)
-            SignalBars(level, if (level >= 3) color else kc.gray)
+            SignalBars(level, color)
             Text(
                 "${ping.ms} мс",
                 style = IosType.subhead.copy(fontFeatureSettings = "tnum"),
-                color = if (level >= 3) color else kc.secondary,
+                color = if (level >= 3) kc.secondary else color,
                 maxLines = 1,
             )
         }
@@ -325,12 +342,24 @@ private fun WhitelistBadge() {
 @Composable
 private fun SubscriptionHeader(sub: Subscription, onRefresh: () -> Unit, onDelete: () -> Unit) {
     var confirmDelete by remember { mutableStateOf(false) }
+    var menu by remember { mutableStateOf(false) }
     val usage = parseUserInfo(sub.userInfo)
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
     Box {
+        // Tap or long press: refresh or delete the subscription.
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(start = 16.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
+                .background(if (pressed) kc.cardPressed else Color.Transparent)
+                .combinedClickable(
+                    interactionSource = source,
+                    indication = null,
+                    onClickLabel = "Действия с подпиской",
+                    onClick = { menu = true },
+                    onLongClick = { menu = true },
+                )
+                .padding(start = 16.dp, end = 6.dp, top = 12.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
@@ -338,7 +367,7 @@ private fun SubscriptionHeader(sub: Subscription, onRefresh: () -> Unit, onDelet
                     usage?.text ?: "Подписка",
                     style = IosType.subhead,
                     color = kc.label,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
                 if (usage?.fraction != null) {
@@ -354,10 +383,12 @@ private fun SubscriptionHeader(sub: Subscription, onRefresh: () -> Unit, onDelet
                     }
                 }
             }
-            Spacer(Modifier.width(12.dp))
-            GlassIconButton(R.drawable.ic_refresh_ios, "Обновить подписку", onClick = onRefresh, iconSize = 18.dp)
-            Spacer(Modifier.width(6.dp))
-            GlassIconButton(R.drawable.ic_trash_ios, "Удалить подписку", onClick = { confirmDelete = true }, tint = kc.red, iconSize = 18.dp)
+            Spacer(Modifier.width(8.dp))
+            RefreshButton(onRefresh)
+        }
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }, containerColor = kc.cardPressed) {
+            MenuItem("Обновить", R.drawable.ic_refresh_ios) { menu = false; onRefresh() }
+            MenuItem("Удалить подписку", R.drawable.ic_trash_ios, destructive = true) { menu = false; confirmDelete = true }
         }
     }
     if (confirmDelete) {
@@ -368,6 +399,26 @@ private fun SubscriptionHeader(sub: Subscription, onRefresh: () -> Unit, onDelet
             confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Удалить", color = kc.red) } },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Отмена", color = kc.green) } },
         )
+    }
+}
+
+/** A 34 dp filled circle inside a 44 dp touch target, as in the mockup. */
+@Composable
+private fun RefreshButton(onClick: () -> Unit) {
+    val source = remember { MutableInteractionSource() }
+    val scale = pressScale(source)
+    Box(
+        Modifier
+            .size(44.dp)
+            .scale(scale)
+            .clip(CircleShape)
+            .tap(source, onClick = onClick)
+            .semantics { contentDescription = "Обновить подписку" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.size(34.dp).clip(CircleShape).background(kc.fill), contentAlignment = Alignment.Center) {
+            IosIcon(R.drawable.ic_refresh_ios, kc.green, Modifier.size(17.dp))
+        }
     }
 }
 

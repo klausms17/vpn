@@ -66,6 +66,9 @@ enum class HeroState { OFF, CONNECTING, ON, NO_SERVER }
 private const val BOARD_W = 390f
 private const val HERO_Y = 303f
 private const val MAP_H = 600f
+
+/** Below this board y the map has faded out; a pin there would float on black. */
+private const val MAP_FADE_Y = 450f
 private const val PX_PER_DEG = 6.84
 private const val ANCHOR_X = 120.0
 private const val ANCHOR_Y = 191.0
@@ -189,7 +192,9 @@ fun HeroBackdrop(state: HeroState, heroCenterY: Float, pin: Offset?, modifier: M
         // Server location.
         if (pin != null && state != HeroState.NO_SERVER) {
             val p = Offset(pin.x * s, top + pin.y * s)
-            if (p.x in 0f..size.width && p.y in 0f..heroCenterY) {
+            // Where the map is visible, and not under the connect disc.
+            val clearOfDisc = (p - center).getDistance() > 84.dp.toPx() + 8f * s
+            if (p.x in 0f..size.width && p.y in 0f..size.height && pin.y < MAP_FADE_Y && clearOfDisc) {
                 drawCircle(pinInk.copy(alpha = 0.2f), radius = 8f * s, center = p)
                 drawCircle(pinInk, radius = 3f * s, center = p)
             }
@@ -252,13 +257,11 @@ fun ConnectDisc(state: HeroState, label: String, onClick: () -> Unit, modifier: 
                 .clip(CircleShape)
                 .background(if (on) Color(0xB30E7024) else Color(0x663A3A3C))
                 .background(
-                    Brush.radialGradient(
-                        if (on) {
-                            listOf(Color(0x6630D158), Color(0x7030D158), Color(0xB330D158))
-                        } else {
-                            listOf(Color(0x08FFFFFF), Color(0x0DFFFFFF), Color(0x21FFFFFF))
-                        },
-                    ),
+                    if (on) {
+                        Brush.radialGradient(0f to Color(0x6630D158), 0.88f to Color(0x7030D158), 1f to Color(0xB330D158))
+                    } else {
+                        Brush.radialGradient(0f to Color(0x08FFFFFF), 0.78f to Color(0x0DFFFFFF), 1f to Color(0x21FFFFFF))
+                    },
                 )
                 .background(
                     Brush.verticalGradient(

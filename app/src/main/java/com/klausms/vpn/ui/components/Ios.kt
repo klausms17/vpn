@@ -14,6 +14,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -155,6 +156,43 @@ fun LargeTitle(title: String, modifier: Modifier = Modifier, trailing: @Composab
     ) {
         Text(title, style = IosType.largeTitle, color = kc.label, maxLines = 1, modifier = Modifier.weight(1f))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically, content = trailing)
+    }
+}
+
+/**
+ * The top edge of a scrolling tab, as in iOS: content fades out under the
+ * status bar, and once the large title has scrolled away a small centred
+ * title takes its place. Put it last in the Box that holds the list.
+ */
+@Composable
+fun BoxScope.ScrollEdge(title: String, collapsed: Boolean) {
+    val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val shown by animateFloatAsState(if (collapsed) 1f else 0f, label = "scrollEdge")
+    val page = kc.page
+    // Always: nothing readable under the clock and battery icons.
+    Box(
+        Modifier
+            .align(Alignment.TopCenter)
+            .fillMaxWidth()
+            .height(top + 8.dp)
+            .background(Brush.verticalGradient(0f to page, 0.75f to page.copy(alpha = 0.9f), 1f to page.copy(alpha = 0f))),
+    )
+    // Scrolled: a taller fade with the small title.
+    Box(
+        Modifier
+            .align(Alignment.TopCenter)
+            .fillMaxWidth()
+            .height(top + 56.dp)
+            .graphicsLayer { alpha = shown }
+            .background(Brush.verticalGradient(0f to page, 0.6f to page.copy(alpha = 0.85f), 1f to page.copy(alpha = 0f))),
+    ) {
+        Text(
+            title,
+            style = IosType.headline,
+            color = kc.label,
+            maxLines = 1,
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = top + 11.dp),
+        )
     }
 }
 
@@ -408,19 +446,19 @@ fun IconTile(@DrawableRes icon: Int, color: Color) {
 
 // ----------------------------------------------------------------- controls
 
-/** iOS switch: 51×31 capsule, green when on. */
+/** iOS 26 switch: 63×28 capsule with a pill thumb, green when on. */
 @Composable
 fun IosSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit, enabled: Boolean = true, description: String? = null) {
     val source = remember { MutableInteractionSource() }
     val track by animateColorAsState(if (checked) kc.green else kc.switchOff, label = "switchTrack")
     val x by animateDpAsState(
-        if (checked) 22.dp else 2.dp,
+        if (checked) 24.dp else 2.dp,
         spring(dampingRatio = 0.7f, stiffness = Spring.StiffnessMedium),
         label = "switchThumb",
     )
     Box(
         Modifier
-            .size(width = 51.dp, height = 31.dp)
+            .size(width = 63.dp, height = 28.dp)
             .clip(CircleShape)
             .background(track)
             // toggleable, not clickable: TalkBack then says "on" or "off".
@@ -438,8 +476,8 @@ fun IosSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit, enabled: Boo
         Box(
             Modifier
                 .offset(x = x, y = 2.dp)
-                .size(27.dp)
-                .shadow(3.dp, CircleShape)
+                .size(width = 37.dp, height = 24.dp)
+                .shadow(2.dp, CircleShape)
                 .background(Color.White, CircleShape),
         )
     }
