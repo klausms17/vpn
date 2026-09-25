@@ -1,0 +1,169 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+  schedule:
+    # Weekly rebuild so the bundled Russian databases stay fresh.
+    - cron: "23 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Core (Go) tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: libxray/go.mod
+          cache-dependency-path: libxray/go.sum
+
+      - name: Download Russian routing databases
+        run: scripts/fetch-geo.sh geo-upstream
+
+      - name: Vet
+        working-directory: libxray
+        run: go vet ./...
+
+      - name: Unit and end-to-end tests (real Xray servers)
+        working-directory: libxray
+        env:
+          GEO_DIR: ${{ github.workspace }}/geo-upstream
+        run: go test -count=1 -timeout 15m ./...
+
+      - name: Start-up time and memory budget
+        working-directory: libxray
+        env:
+          GEO_DIR: ${{ github.workspace }}/geo-upstream
+          MEM_TEST: "1"
+        run: go test -count=1 -run TestStartupCost -v ./...
+
+      - name: Keep the tested databases for the APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: geo-upstream
+          path: geo-upstream/
+          retention-days: 3
+
+  android:
+    name: Android APK
+    needs: core
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      VERSION_CODE: ${{ github.run_number }}
+      VERSION_NAME: 1.0.${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: libxray/go.mod
+          cache-dependency-path: libxray/go.sum
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: geo-upstream
+          path: geo-upstream
+
+      - name: Build Xray core library (gomobile)
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          scripts/build-libxray.sh
+
+      - name: Bundle Russian routing databases
+        run: scripts/prepare-geo.sh geo-upstream
+
+      - name: Signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            {
+              echo "SIGNING_KEYSTORE_PATH=$RUNNER_TEMP/release.jks"
+              echo "SIGNING_STORE_PASSWORD=$STORE_PASSWORD"
+              echo "SIGNING_KEY_ALIAS=${KEY_ALIAS:-release}"
+              echo "SIGNING_KEY_PASSWORD=${KEY_PASSWORD:-$STORE_PASSWORD}"
+            } >> "$GITHUB_ENV"
+            echo "Release key configured."
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 secret is not set: the APK is signed with a temporary debug key and cannot update a previous install."
+          fi
+
+      - name: Build APKs
+        run: ./gradlew --no-daemon --stacktrace assembleRelease lintRelease
+
+      - name: Check native library 16 KB alignment
+        run: |
+          readelf="$(ls "$ANDROID_NDK_LATEST_HOME"/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf)"
+          apk=app/build/outputs/apk/release/app-arm64-v8a-release.apk
+          unzip -o -q "$apk" 'lib/*' -d /tmp/apk
+          for so in /tmp/apk/lib/*/*.so; do
+            "$readelf" -lW "$so" | awk -v f="$so" '/LOAD/ { if ($NF != "0x4000" && $NF != "0x10000") { print "bad alignment " $NF " in " f; bad=1 } } END { exit bad }'
+          done
+          echo "All native libraries are 16 KB aligned."
+
+      - name: Collect APKs
+        run: |
+          mkdir -p dist
+          for f in app/build/outputs/apk/release/*.apk; do
+            abi="$(basename "$f" | sed -e 's/^app-//' -e 's/-release.*//')"
+            cp "$f" "dist/KlausVPN-${VERSION_NAME}-${abi}.apk"
+          done
+          (cd dist && sha256sum *.apk > SHA256SUMS.txt)
+          ls -la dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: KlausVPN-${{ env.VERSION_NAME }}
+          path: dist/
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-release.html
+          if-no-files-found: ignore
+
+      - name: Publish test build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          tag="build-$(echo "$BRANCH" | tr '/' '-')"
+          gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+          notes="Сборка ${VERSION_NAME} из ветки ${BRANCH} (${GITHUB_SHA::7}).
+
+          Какой файл скачать:
+          - KlausVPN-${VERSION_NAME}-arm64-v8a.apk — почти все современные телефоны
+          - KlausVPN-${VERSION_NAME}-armeabi-v7a.apk — старые 32-битные телефоны
+          - KlausVPN-${VERSION_NAME}-universal.apk — если не знаете, какой нужен (больше размер)"
+          gh release create "$tag" dist/* \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Klaus VPN ${VERSION_NAME} (${BRANCH})" \
+            --notes "$notes"

@@ -1,0 +1,140 @@
+package com.klausms.vpn.ui
+
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.VpnService
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import com.klausms.vpn.service.VpnState
+import com.klausms.vpn.ui.screens.AppsScreen
+import com.klausms.vpn.ui.screens.HomeScreen
+import com.klausms.vpn.ui.screens.LogsScreen
+import com.klausms.vpn.ui.screens.RulesKind
+import com.klausms.vpn.ui.screens.RulesScreen
+import com.klausms.vpn.ui.screens.SettingsScreen
+import com.klausms.vpn.ui.theme.KlausTheme
+
+class MainActivity : ComponentActivity() {
+    companion object {
+        /** Sent by the Quick Settings tile when the VPN permission is missing. */
+        const val ACTION_CONNECT = "com.klausms.vpn.ui.CONNECT"
+    }
+
+    private val vm: MainViewModel by viewModels()
+
+    /** Text shared into the app, waiting for the user's confirmation. */
+    private var sharedText by mutableStateOf<String?>(null)
+
+    private val vpnPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == RESULT_OK) vm.startVpn()
+        else vm.startVpnDenied()
+    }
+
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        // The VPN works either way; the notification is only a status display.
+        connectWithPermission()
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
+        super.onCreate(savedInstanceState)
+        lifecycle.addObserver(object : DefaultLifecycleObserver {
+            // Talk to the VPN process only while visible: no background work.
+            override fun onStart(owner: LifecycleOwner) = vm.vpn.bind()
+            override fun onStop(owner: LifecycleOwner) = vm.vpn.unbind()
+        })
+        handleIntent(intent)
+
+        setContent {
+            KlausTheme {
+                var route by rememberSaveable { mutableStateOf("home") }
+                BackHandler(enabled = route != "home") {
+                    route = if (route == "settings") "home" else "settings"
+                }
+                when {
+                    route == "home" -> HomeScreen(
+                        vm = vm,
+                        sharedText = sharedText,
+                        onSharedTextHandled = { sharedText = null },
+                        onToggle = ::toggleVpn,
+                        onOpenSettings = { route = "settings" },
+                    )
+                    route == "settings" -> SettingsScreen(vm = vm, onBack = { route = "home" }, onNavigate = { route = it })
+                    route.startsWith("apps:") -> AppsScreen(
+                        vm = vm,
+                        includeMode = route == "apps:include",
+                        onBack = { route = "settings" },
+                    )
+                    route.startsWith("rules:") -> RulesScreen(
+                        vm = vm,
+                        kind = RulesKind.valueOf(route.removePrefix("rules:")),
+                        onBack = { route = "settings" },
+                    )
+                    route == "logs" -> LogsScreen(vm = vm, onBack = { route = "settings" })
+                    else -> route = "home"
+                }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        when (intent?.action) {
+            Intent.ACTION_SEND -> {
+                val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()
+                if (!text.isNullOrEmpty()) sharedText = text.take(64 * 1024)
+            }
+            ACTION_CONNECT -> toggleVpn()
+        }
+    }
+
+    private fun toggleVpn() {
+        when (vm.status.value.state) {
+            VpnState.CONNECTED, VpnState.CONNECTING -> vm.stopVpn()
+            VpnState.DISCONNECTING -> Unit
+            else -> {
+                if (vm.profiles.value.selected == null) {
+                    vm.startVpn() // shows "add a key first"
+                    return
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+                    !vm.notificationPermissionAsked()
+                ) {
+                    vm.markNotificationPermissionAsked()
+                    notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    return
+                }
+                connectWithPermission()
+            }
+        }
+    }
+
+    private fun connectWithPermission() {
+        val request = try {
+            VpnService.prepare(this)
+        } catch (e: Exception) {
+            vm.startVpnDenied()
+            return
+        }
+        if (request != null) vpnPermission.launch(request) else vm.startVpn()
+    }
+}

@@ -1,0 +1,123 @@
+package com.klausms.vpn.core
+
+import android.content.Context
+import com.klausms.vpn.data.AppJson
+import com.klausms.vpn.data.GeoFiles
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
+import libxray.Libxray
+
+/** A server as parsed by the core (see libxray/share.go Profile). */
+@Serializable
+data class ParsedProfile(
+    val name: String = "",
+    val protocol: String = "",
+    val address: String = "",
+    val port: Int = 0,
+    val network: String = "",
+    val security: String = "",
+    val link: String? = null,
+    val outbounds: JsonArray,
+    val needsCertPin: Boolean = false,
+    val certPinSni: String? = null,
+    val certPinQuic: Boolean = false,
+)
+
+@Serializable
+data class SubscriptionParseResult(
+    val profiles: List<ParsedProfile> = emptyList(),
+    val errors: List<String> = emptyList(),
+)
+
+@Serializable
+data class TunConfig(
+    val mtu: Int,
+    val addresses: List<String>,
+    val routes: List<String>,
+    val dnsServers: List<String>,
+)
+
+/** Input of the core's config builder (see libxray/config.go BuildOptions). */
+@Serializable
+data class BuildOptions(
+    val outbounds: JsonArray,
+    val mode: String,
+    val ipv6: Boolean,
+    val directRules: List<String>,
+    val proxyRules: List<String>,
+    val blockRules: List<String>,
+    val logLevel: String,
+    val logFile: String,
+    val tun: Boolean,
+)
+
+/**
+ * Kotlin facade over the Go core. All calls are blocking; call them from a
+ * background dispatcher. Errors arrive as exceptions whose message is meant
+ * for the user.
+ */
+object XrayCore {
+    const val TEST_URL = "https://www.gstatic.com/generate_204"
+    const val USER_AGENT = "KlausVPN/1.0 (Android)"
+
+    @Volatile
+    private var initialized = false
+
+    fun init(context: Context) {
+        if (initialized) return
+        synchronized(this) {
+            if (!initialized) {
+                Libxray.initEnv(GeoFiles.activeDir(context).absolutePath)
+                initialized = true
+            }
+        }
+    }
+
+    fun version(): String = Libxray.version()
+
+    fun parseLink(link: String): ParsedProfile = AppJson.decodeFromString(Libxray.parseLink(link))
+
+    fun parseSubscription(body: ByteArray): SubscriptionParseResult =
+        AppJson.decodeFromString(Libxray.parseSubscription(body))
+
+    /** Pins the server certificate for links that asked to skip verification. */
+    fun pinCertificate(profile: ParsedProfile): ParsedProfile {
+        val hash = Libxray.fetchCertSha256(profile.address, profile.port, profile.certPinSni ?: "", profile.certPinQuic, 8000)
+        return AppJson.decodeFromString(Libxray.pinCertificate(AppJson.encodeToString(ParsedProfile.serializer(), profile), hash))
+    }
+
+    fun buildConfig(options: BuildOptions): String =
+        Libxray.buildConfig(AppJson.encodeToString(BuildOptions.serializer(), options))
+
+    fun proxyOnlyConfig(outbounds: JsonArray): String = Libxray.buildProxyOnlyConfig(outbounds.toString())
+
+    fun tunConfig(ipv6: Boolean): TunConfig = AppJson.decodeFromString(Libxray.tunSettings(ipv6))
+
+    /** Real latency through the server (TLS/REALITY handshake + HTTP). */
+    fun measureDelay(outbounds: JsonArray): Long =
+        Libxray.measureOutboundDelay(proxyOnlyConfig(outbounds), TEST_URL, 10_000)
+
+    /** Downloads [url], optionally through [via] (a profile's outbounds). */
+    fun fetch(url: String, via: JsonArray?): libxray.FetchResult =
+        Libxray.fetch(url, USER_AGENT, 25_000, via?.let { proxyOnlyConfig(it) } ?: "")
+
+    fun downloadFile(url: String, dst: String, via: JsonArray?) =
+        Libxray.downloadFile(url, dst, USER_AGENT, 600_000, via?.let { proxyOnlyConfig(it) } ?: "")
+
+    fun trimGeoFile(src: String, dst: String, codes: String) = Libxray.trimGeoFile(src, dst, codes)
+
+    fun checkGeoFile(path: String, codes: String) = Libxray.checkGeoFile(path, codes)
+
+    /** 1 = every address of [host] is on the Russian mobile whitelist, 0 = none, -1 = some. */
+    fun whitelistStatus(context: Context, host: String): Int =
+        Libxray.hostInGeoIP(GeoFiles.file(context, GeoFiles.GEOIP).absolutePath, "ru-whitelist", host, 5_000)
+
+    val geositeCodes: String get() = Libxray.GeositeCodes
+    val geoipCodes: String get() = Libxray.GeoipCodes
+}
+
+/** Go errors reach Kotlin as plain exceptions; this keeps the text readable. */
+fun Throwable.userMessage(): String {
+    val m = message?.trim().orEmpty()
+    return m.ifEmpty { javaClass.simpleName }
+}
