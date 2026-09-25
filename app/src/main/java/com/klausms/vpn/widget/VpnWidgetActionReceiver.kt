@@ -3,9 +3,8 @@ package com.klausms.vpn.widget
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.klausms.vpn.service.RuntimeState
 import com.klausms.vpn.service.VpnCommands
-import com.klausms.vpn.service.VpnState
-import com.klausms.vpn.service.VpnStatusHolder
 import com.klausms.vpn.util.AppLog
 
 /**
@@ -24,13 +23,15 @@ class VpnWidgetActionReceiver : BroadcastReceiver() {
         when (intent.action) {
             ACTION_PING -> VpnWidget.ping(context, goAsync())
             ACTION_DISCONNECT -> {
-                val state = VpnStatusHolder.status.value.state
-                if (state == VpnState.CONNECTED || state == VpnState.CONNECTING) {
-                    try {
-                        VpnCommands.disconnect(context)
-                    } catch (e: Exception) {
-                        AppLog.w("widget could not stop the VPN", e)
-                    }
+                // Only sent from an "on" picture. Honour it even if this
+                // process was just restarted and does not know the state
+                // yet: a pending automatic restart must not bring the
+                // tunnel back after the user turned it off.
+                RuntimeState.setShouldRun(context, false)
+                try {
+                    VpnCommands.disconnect(context)
+                } catch (e: Exception) {
+                    AppLog.w("widget could not stop the VPN", e)
                 }
                 VpnWidget.update(context, goAsync())
             }

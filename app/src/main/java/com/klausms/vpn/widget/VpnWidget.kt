@@ -261,6 +261,15 @@ object VpnWidget {
         MINI(R.layout.widget_vpn_row, 110f, 40f, timerInStatus = true, showPing = false),
         ROW(R.layout.widget_vpn_row, 230f, 40f, timerInStatus = false, showPing = true),
         FULL(R.layout.widget_vpn, 260f, 124f, timerInStatus = false, showPing = true),
+        ;
+
+        /**
+         * FULL grows with the system font size: 16 dp of padding, the 46 dp
+         * strip, and the text column (about 61 dp at scale 1) or the 64 dp
+         * power button, whichever is taller.
+         */
+        fun minHeight(scale: Float): Float =
+            if (this == FULL) 62f + maxOf(61f * scale, 64f) else minHeight
     }
 
     /**
@@ -268,9 +277,10 @@ object VpnWidget {
      * widget is resized. Each size is the smallest one its layout needs.
      */
     @RequiresApi(Build.VERSION_CODES.S)
-    private fun responsive(context: Context, m: Model) = RemoteViews(
-        Variant.entries.associate { SizeF(it.minWidth, it.minHeight) to build(context, m, it) },
-    )
+    private fun responsive(context: Context, m: Model): RemoteViews {
+        val scale = fontScale(context)
+        return RemoteViews(Variant.entries.associate { SizeF(it.minWidth, it.minHeight(scale)) to build(context, m, it) })
+    }
 
     /** Older launchers: one layout for portrait and one for landscape. */
     private fun sized(context: Context, m: Model, options: Bundle?): RemoteViews {
@@ -279,18 +289,23 @@ object VpnWidget {
         val minH = options?.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT) ?: 0
         val maxH = options?.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT) ?: 0
         if (minW <= 0 || minH <= 0) return build(context, m, Variant.FULL)
-        val portrait = variantFor(minW.toFloat(), maxH.coerceAtLeast(minH).toFloat())
-        val landscape = variantFor(maxW.coerceAtLeast(minW).toFloat(), minH.toFloat())
+        val scale = fontScale(context)
+        val portrait = variantFor(minW.toFloat(), maxH.coerceAtLeast(minH).toFloat(), scale)
+        val landscape = variantFor(maxW.coerceAtLeast(minW).toFloat(), minH.toFloat(), scale)
         if (portrait == landscape) return build(context, m, portrait)
         return RemoteViews(build(context, m, landscape), build(context, m, portrait))
     }
 
     /** The largest layout that fits, as Android 12+ picks it. */
-    private fun variantFor(width: Float, height: Float): Variant =
+    private fun variantFor(width: Float, height: Float, scale: Float): Variant =
         Variant.entries
-            .filter { it.minWidth <= width + 1 && it.minHeight <= height + 1 }
-            .maxByOrNull { it.minWidth * it.minHeight }
+            .filter { it.minWidth <= width + 1 && it.minHeight(scale) <= height + 1 }
+            .maxByOrNull { it.minWidth * it.minHeight(scale) }
             ?: Variant.MINI
+
+    /** The launcher uses the same system font scale as this process. */
+    private fun fontScale(context: Context): Float =
+        context.resources.configuration.fontScale.coerceIn(0.85f, 2f)
 
     private fun build(context: Context, m: Model, variant: Variant): RemoteViews {
         val v = RemoteViews(context.packageName, variant.layout)
@@ -358,6 +373,18 @@ object VpnWidget {
         val showPing = variant.showPing && profile != null
         v.setViewVisibility(R.id.ping_button, if (showPing) View.VISIBLE else View.GONE)
         renderPing(v, m.ping, compact = variant != Variant.FULL)
+        val action = context.getString(R.string.widget_ping_action)
+        val spoken = when (val ping = m.ping) {
+            is Ping.Ok -> "${ping.ms} мс"
+            Ping.Failed -> "нет связи"
+            Ping.Testing -> "проверка"
+            Ping.Unknown -> null
+        }
+        // The compact pill carries the result inside it; say it too.
+        v.setContentDescription(
+            R.id.ping_button,
+            if (variant == Variant.FULL || spoken == null) action else "$action, $spoken",
+        )
         if (showPing) v.setOnClickPendingIntent(R.id.ping_button, broadcast(context, VpnWidgetActionReceiver.ACTION_PING, RC_PING))
 
         v.setOnClickPendingIntent(android.R.id.background, openAppIntent(context))
