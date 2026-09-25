@@ -80,9 +80,7 @@ func (c *Controller) Start(configJSON string, tunFd int32) (err error) {
 	if err := os.Setenv(envTunFd, strconv.Itoa(int(tunFd))); err != nil {
 		return fmt.Errorf("set tun fd: %w", err)
 	}
-	if err := reloadGeoIfChanged(); err != nil {
-		return err
-	}
+	reloadGeoIfChanged()
 
 	inst, err := newInstance(configJSON)
 	if err != nil {
@@ -253,16 +251,21 @@ var geoStamp struct {
 	value string
 }
 
-func reloadGeoIfChanged() error {
+// reloadGeo is replaced in tests.
+var reloadGeo = func() error { return errors.Join(geodata.IPReg.Reload(), geodata.DomainReg.Reload()) }
+
+// reloadGeoIfChanged never fails the start: if the reload does not work,
+// the core simply keeps the lists it already had, as before the update.
+func reloadGeoIfChanged() {
 	dir := os.Getenv(envAsset)
 	if dir == "" {
-		return nil
+		return
 	}
 	var b strings.Builder
 	for _, name := range []string{"geoip.dat", "geosite.dat"} {
 		fi, err := os.Stat(filepath.Join(dir, name))
 		if err != nil {
-			return nil // the core reports a missing file itself
+			return // the core reports a missing file itself
 		}
 		fmt.Fprintf(&b, "%s:%d:%d;", name, fi.Size(), fi.ModTime().UnixNano())
 	}
@@ -272,11 +275,10 @@ func reloadGeoIfChanged() error {
 	if geoStamp.value == "" || geoStamp.value == cur {
 		// First core in this process (nothing cached yet), or unchanged.
 		geoStamp.value = cur
-		return nil
+		return
 	}
-	if err := errors.Join(geodata.IPReg.Reload(), geodata.DomainReg.Reload()); err != nil {
-		return fmt.Errorf("reload geo data: %w", err)
+	if err := reloadGeo(); err != nil {
+		return // keep the stamp: try again on the next start
 	}
 	geoStamp.value = cur
-	return nil
 }
