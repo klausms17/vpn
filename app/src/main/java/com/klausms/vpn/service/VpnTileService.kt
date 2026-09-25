@@ -1,5 +1,6 @@
 package com.klausms.vpn.service
 
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Intent
 import android.net.VpnService
@@ -57,6 +58,8 @@ class VpnTileService : TileService() {
         }
     }
 
+    // The Intent overload is the only option below Android 14.
+    @SuppressLint("StartActivityAndCollapseDeprecated")
     private fun openApp() {
         val intent = Intent(this, MainActivity::class.java)
             .setAction(MainActivity.ACTION_CONNECT)

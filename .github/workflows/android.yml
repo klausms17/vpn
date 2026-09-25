@@ -115,7 +115,14 @@ jobs:
           fi
 
       - name: Build APKs
-        run: ./gradlew --no-daemon --stacktrace assembleRelease lintRelease
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: Lint
+        run: |
+          ./gradlew --no-daemon lintRelease || {
+            cat app/build/intermediates/lint_intermediate_text_report/release/lintReportRelease/lint-results-release.txt
+            exit 1
+          }
 
       - name: Check native library 16 KB alignment
         run: |
