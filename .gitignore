@@ -1,0 +1,23 @@
+# Build outputs
+build/
+.gradle/
+.kotlin/
+local.properties
+*.apk
+*.aab
+*.aar
+!gradle/wrapper/gradle-wrapper.jar
+captures/
+.idea/
+*.iml
+.DS_Store
+
+# Generated in CI / by scripts
+app/libs/
+app/src/main/assets/geo/
+geo-cache/
+
+# Signing material must never be committed
+*.jks
+*.keystore
+keystore.properties
