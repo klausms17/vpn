@@ -30,8 +30,14 @@ import com.klausms.vpn.ui.theme.KlausTheme
 
 class MainActivity : ComponentActivity() {
     companion object {
-        /** Sent by the Quick Settings tile when the VPN permission is missing. */
+        /**
+         * Sent by the Quick Settings tile and the widget when the app is
+         * needed to connect (VPN permission, no server yet). Only connects,
+         * never disconnects.
+         */
         const val ACTION_CONNECT = "com.klausms.vpn.ui.CONNECT"
+
+        private const val KEY_SHARED_TEXT = "shared_text"
     }
 
     private val vm: MainViewModel by viewModels()
@@ -57,7 +63,11 @@ class MainActivity : ComponentActivity() {
             override fun onStart(owner: LifecycleOwner) = vm.vpn.bind()
             override fun onStop(owner: LifecycleOwner) = vm.vpn.unbind()
         })
-        handleIntent(intent)
+        sharedText = savedInstanceState?.getString(KEY_SHARED_TEXT)
+        // Handle the launch intent once: not again after a rotation or when
+        // reopened from Recents, which re-deliver the original intent.
+        val fromHistory = (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0
+        if (savedInstanceState == null && !fromHistory) handleIntent(intent)
 
         setContent {
             KlausTheme {
@@ -91,6 +101,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        sharedText?.let { outState.putString(KEY_SHARED_TEXT, it) }
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIntent(intent)
@@ -102,7 +117,10 @@ class MainActivity : ComponentActivity() {
                 val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()
                 if (!text.isNullOrEmpty()) sharedText = text.take(64 * 1024)
             }
-            ACTION_CONNECT -> toggleVpn()
+            ACTION_CONNECT -> {
+                val state = vm.status.value.state
+                if (state != VpnState.CONNECTED && state != VpnState.CONNECTING) toggleVpn()
+            }
         }
     }
 
