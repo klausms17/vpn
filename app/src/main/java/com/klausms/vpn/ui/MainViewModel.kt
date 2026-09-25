@@ -302,7 +302,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val errors = parsed.errors.toMutableList()
             val ready = pinWhereNeeded(parsed.profiles, errors)
             val oldSelected = profiles.value.selected
-            val stored = ready.map { it.toStored(sub.id) }
+            // Servers that are still in the subscription keep their ids, so
+            // the selection, ping results and the running tunnel's identity
+            // survive a refresh.
+            val unused = profiles.value.profiles.filter { it.subscriptionId == sub.id }.toMutableList()
+            val stored = ready.map { p ->
+                val fresh = p.toStored(sub.id)
+                val match = unused.firstOrNull { it.name == fresh.name && it.address == fresh.address && it.port == fresh.port }
+                    ?: unused.firstOrNull { it.address == fresh.address && it.port == fresh.port && it.protocol == fresh.protocol }
+                if (match == null) {
+                    fresh
+                } else {
+                    unused.remove(match)
+                    fresh.copy(id = match.id, createdAt = match.createdAt)
+                }
+            }
             val next = repo.updateProfiles { s ->
                 val keepSelection = oldSelected?.takeIf { it.subscriptionId == sub.id }?.let { old ->
                     stored.firstOrNull { it.name == old.name && it.address == old.address && it.port == old.port }

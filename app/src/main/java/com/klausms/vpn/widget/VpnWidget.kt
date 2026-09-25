@@ -6,7 +6,6 @@ import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -18,10 +17,12 @@ import androidx.annotation.RequiresApi
 import androidx.core.content.edit
 import com.klausms.vpn.R
 import com.klausms.vpn.core.XrayCore
+import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.Stores
 import com.klausms.vpn.service.RuntimeState
 import com.klausms.vpn.service.VpnState
+import com.klausms.vpn.service.VpnStatus
 import com.klausms.vpn.service.VpnStatusHolder
 import com.klausms.vpn.service.XrayVpnService
 import com.klausms.vpn.ui.MainActivity
@@ -49,12 +50,11 @@ object VpnWidget {
     private const val PREFS = "widget"
     private const val KEY_PING_PROFILE = "ping_profile"
     private const val KEY_PING_MS = "ping_ms"
-    private const val KEY_TESTING_SINCE = "testing_since"
 
     private const val PING_TIMEOUT_MS = 8_000
 
-    /** A test that started longer ago than this was cut short (process killed). */
-    private const val TEST_STALE_MS = 30_000L
+    /** A second tap this soon after a result is taken as a double tap. */
+    private const val DOUBLE_TAP_MS = 1_500L
 
     // iOS system colours on dark.
     private const val GREEN = 0xFF30D158.toInt()
@@ -106,8 +106,15 @@ object VpnWidget {
     fun ping(context: Context, pending: BroadcastReceiver.PendingResult?) {
         val app = context.applicationContext
         scope.launch {
+            var released = false
+            val release = {
+                if (!released) {
+                    released = true
+                    pending?.finish()
+                }
+            }
             try {
-                measure(app)
+                measure(app, release)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 AppLog.w("widget ping failed", e)
@@ -117,7 +124,7 @@ object VpnWidget {
                 } catch (e: Exception) {
                     AppLog.w("widget update failed", e)
                 }
-                pending?.finish()
+                release()
             }
         }
     }
@@ -128,58 +135,67 @@ object VpnWidget {
 
     // ----------------------------------------------------------------- ping
 
-    private suspend fun measure(context: Context) {
+    // In memory only, touched on [renderer]: a test cut short by process
+    // death must not leave the widget showing "…".
+    @Volatile
+    private var testingProfile: String? = null
+
+    @Volatile
+    private var lastResultAt = 0L
+
+    private suspend fun measure(context: Context, release: () -> Unit) {
         val status = VpnStatusHolder.status.value
-        val live = XrayVpnService.liveController.takeIf { status.state == VpnState.CONNECTED }
-        val profiles = Stores.profiles(context).read()
-        val profile = (if (live != null) profiles.profiles.firstOrNull { it.id == status.profileId } else null)
-            ?: profiles.selected
-            ?: return
+        // No test while the tunnel is going up or down.
+        if (status.state == VpnState.CONNECTING || status.state == VpnState.DISCONNECTING) return
+        // While a tunnel core runs, always measure through it (the path the
+        // apps' traffic takes). A second, temporary core in this process
+        // would take over Xray's process-wide logger from the tunnel.
+        val live = XrayVpnService.liveController
+        val profile = displayedProfile(status, Stores.profiles(context).read()) ?: return
         val prefs = prefs(context)
 
         val started = withContext(renderer) {
-            if (testingFor(prefs) == profile.id) return@withContext false
+            val recent = SystemClock.elapsedRealtime() - lastResultAt < DOUBLE_TAP_MS &&
+                prefs.getString(KEY_PING_PROFILE, null) == profile.id
+            if (testingProfile == profile.id || recent) return@withContext false
+            testingProfile = profile.id
             prefs.edit(commit = true) {
                 putString(KEY_PING_PROFILE, profile.id)
                 remove(KEY_PING_MS)
-                putLong(KEY_TESTING_SINCE, SystemClock.elapsedRealtime())
             }
             render(context)
             true
         }
         if (!started) return
+        // The running VPN service keeps this process alive: let the next tap
+        // (e.g. the power button) through instead of queueing it behind the test.
+        if (live != null) release()
 
         val ms = try {
-            if (live != null && profile.id == status.profileId) {
-                // Through the running core: the same path the apps' traffic takes.
-                live.measureDelay(XrayCore.TEST_URL, PING_TIMEOUT_MS)
-            } else {
-                XrayCore.measureDelay(profile.outbounds, PING_TIMEOUT_MS)
-            }
+            live?.measureDelay(XrayCore.TEST_URL, PING_TIMEOUT_MS)
+                ?: XrayCore.measureDelay(profile.outbounds, PING_TIMEOUT_MS)
         } catch (e: Exception) {
             AppLog.i("widget ping: ${e.message}")
             -1L
         }
 
         withContext(renderer) {
-            // Another server may have been tested meanwhile; keep its result.
+            if (testingProfile == profile.id) testingProfile = null
+            // Another server may have been picked meanwhile; keep only a matching result.
             if (prefs.getString(KEY_PING_PROFILE, null) == profile.id) {
-                prefs.edit(commit = true) {
-                    putLong(KEY_PING_MS, ms)
-                    remove(KEY_TESTING_SINCE)
-                }
+                prefs.edit(commit = true) { putLong(KEY_PING_MS, ms) }
+                lastResultAt = SystemClock.elapsedRealtime()
             }
         }
     }
 
-    /** The profile whose test is running now, if any. */
-    private fun testingFor(prefs: SharedPreferences): String? {
-        val since = prefs.getLong(KEY_TESTING_SINCE, 0L)
-        if (since == 0L) return null
-        val age = SystemClock.elapsedRealtime() - since
-        // Negative after a reboot, too old after the process was killed.
-        if (age < 0 || age > TEST_STALE_MS) return null
-        return prefs.getString(KEY_PING_PROFILE, null)
+    /** The server the widget shows: the connected one, else the selected one. */
+    private fun displayedProfile(status: VpnStatus, profiles: ProfilesState): StoredProfile? {
+        val active = status.state == VpnState.CONNECTED ||
+            status.state == VpnState.CONNECTING ||
+            status.state == VpnState.DISCONNECTING
+        return (if (active) profiles.profiles.firstOrNull { it.id == status.profileId } else null)
+            ?: profiles.selected
     }
 
     // --------------------------------------------------------------- render
@@ -203,16 +219,11 @@ object VpnWidget {
 
     private fun loadModel(context: Context): Model {
         val status = VpnStatusHolder.status.value
-        val profiles = Stores.profiles(context).read()
-        val active = status.state == VpnState.CONNECTED ||
-            status.state == VpnState.CONNECTING ||
-            status.state == VpnState.DISCONNECTING
-        val profile = (if (active) profiles.profiles.firstOrNull { it.id == status.profileId } else null)
-            ?: profiles.selected
+        val profile = displayedProfile(status, Stores.profiles(context).read())
         val prefs = prefs(context)
         val ping = when {
             profile == null -> Ping.Unknown
-            testingFor(prefs) == profile.id -> Ping.Testing
+            testingProfile == profile.id -> Ping.Testing
             prefs.getString(KEY_PING_PROFILE, null) != profile.id -> Ping.Unknown
             !prefs.contains(KEY_PING_MS) -> Ping.Unknown
             else -> prefs.getLong(KEY_PING_MS, -1L).let { if (it < 0) Ping.Failed else Ping.Ok(it) }

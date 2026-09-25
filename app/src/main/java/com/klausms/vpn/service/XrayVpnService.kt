@@ -189,6 +189,9 @@ class XrayVpnService : VpnService() {
     override fun onDestroy() {
         networkMonitor?.stop()
         networkMonitor = null
+        // Never leave the widget, tile or app showing a tunnel that is gone.
+        val state = VpnStatusHolder.status.value.state
+        if (state != VpnState.DISCONNECTED && state != VpnState.ERROR) setStatus(VpnStatus(VpnState.DISCONNECTED))
         scope.cancel()
         // Synchronous: the process may be killed right after this.
         stopCore()
@@ -198,10 +201,15 @@ class XrayVpnService : VpnService() {
 
     private fun enqueue(block: suspend () -> Unit) = scope.launch(worker) { serial.withLock { block() } }
 
-    /** Leaves the foreground and stops, unless a newer command is waiting. */
+    /**
+     * Leaves the foreground and stops, unless a newer command is waiting.
+     * stopSelf(startId) lets the system make the final check atomically: a
+     * start it already accepted but not yet delivered keeps the service.
+     */
     private fun stopIfLatest(startId: Int) {
         if (startId != lastStartId) return
-        leaveForegroundAndStop()
+        leaveForeground()
+        stopSelf(startId)
     }
 
     // ------------------------------------------------------------------ start
@@ -400,14 +408,13 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    private fun leaveForegroundAndStop() {
+    private fun leaveForeground() {
         networkMonitor?.stop()
         networkMonitor = null
         lastNetwork = null
         trafficJob?.cancel()
         trafficJob = null
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-        stopSelf()
     }
 
     // --------------------------------------------------------- network change

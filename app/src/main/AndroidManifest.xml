@@ -91,12 +91,14 @@
         </service>
 
         <!-- Home screen widget. Lives in the VPN process, which owns the VPN
-             state. Exported only so the system can deliver the launcher's
-             widget events (all of them just redraw the widget). -->
+             state. Exported so the system can deliver widget events, but only
+             senders holding BIND_APPWIDGET (the system) get through: no other
+             app can poke the tunnel process. -->
         <receiver
             android:name=".widget.VpnWidgetProvider"
             android:exported="true"
             android:label="@string/widget_label"
+            android:permission="android.permission.BIND_APPWIDGET"
             android:process=":vpn">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
