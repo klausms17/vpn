@@ -40,4 +40,7 @@ object VpnStatusHolder {
     internal fun set(status: VpnStatus) {
         _status.value = status
     }
+
+    /** Replaces [expected] with [status] only if nothing else changed it meanwhile. */
+    internal fun compareAndSet(expected: VpnStatus, status: VpnStatus): Boolean = _status.compareAndSet(expected, status)
 }
