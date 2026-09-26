@@ -1,9 +1,18 @@
 package com.klausms.vpn.ui.screens
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -16,12 +25,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -34,12 +45,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.klausms.vpn.R
+import com.klausms.vpn.data.AppUpdate
 import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.service.VpnState
@@ -51,12 +65,17 @@ import com.klausms.vpn.ui.components.Countries
 import com.klausms.vpn.ui.components.GlassIconButton
 import com.klausms.vpn.ui.components.HeroBackdrop
 import com.klausms.vpn.ui.components.HeroState
+import com.klausms.vpn.ui.components.IconTile
+import com.klausms.vpn.ui.components.InsetGroup
+import com.klausms.vpn.ui.components.PrimaryButton
 import com.klausms.vpn.ui.components.ScrollEdge
+import com.klausms.vpn.ui.components.SecondaryButton
 import com.klausms.vpn.ui.components.mapPoint
 import com.klausms.vpn.ui.components.navBarClearance
 import com.klausms.vpn.ui.components.rememberSecondsTicker
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
+import com.klausms.vpn.util.AppLog
 import com.klausms.vpn.util.formatDuration
 
 /**
@@ -74,6 +93,8 @@ fun HomeScreen(
     val status by vm.status.collectAsStateWithLifecycle()
     val pings by vm.pings.collectAsStateWithLifecycle()
     val whitelist by vm.whitelist.collectAsStateWithLifecycle()
+    val update by vm.update.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     val actions = remember(vm) {
         ServerActions(
             select = { vm.select(it) },
@@ -99,6 +120,9 @@ fun HomeScreen(
             val last = vm.pings.value[id]
             if (last == null || last is PingResult.Failed) vm.ping(listOf(id))
         },
+        update = update,
+        onUpdate = { if (!openInBrowser(context, it.apkUrl)) vm.updateNotOpened() },
+        onDismissUpdate = { vm.dismissUpdate() },
     )
 }
 
@@ -113,6 +137,10 @@ fun HomeContent(
     onAdd: () -> Unit,
     onOpenSettings: () -> Unit,
     onPing: (String) -> Unit,
+    /** A newer app build to offer, or null. */
+    update: AppUpdate? = null,
+    onUpdate: (AppUpdate) -> Unit = {},
+    onDismissUpdate: () -> Unit = {},
 ) {
     val state = status.state
     val active = state == VpnState.CONNECTED || state == VpnState.CONNECTING || state == VpnState.DISCONNECTING
@@ -140,12 +168,12 @@ fun HomeContent(
     // fade out on the way; read only while drawing, so scrolling is cheap.
     val list = rememberLazyListState()
     var heroCenterY by remember { mutableFloatStateOf(Float.NaN) }
-    var topBarHeight by remember { mutableIntStateOf(0) }
+    var topHeight by remember { mutableIntStateOf(0) }
     val fadeDistance = with(LocalDensity.current) { 260.dp.toPx() }
     val backdropAlpha: () -> Float = {
         val scrolled = when (list.firstVisibleItemIndex) {
             0 -> list.firstVisibleItemScrollOffset.toFloat()
-            1 -> topBarHeight + list.firstVisibleItemScrollOffset.toFloat()
+            1 -> topHeight + list.firstVisibleItemScrollOffset.toFloat()
             else -> fadeDistance
         }
         (1f - scrolled / fadeDistance).coerceIn(0f, 1f)
@@ -160,11 +188,11 @@ fun HomeContent(
             contentPadding = PaddingValues(bottom = navBarClearance() + 24.dp),
         ) {
             item(key = "top") {
-                TopBar(
-                    onOpenSettings = onOpenSettings,
-                    onAdd = onAdd,
-                    modifier = Modifier.onSizeChanged { topBarHeight = it.height },
-                )
+                // One item with the bar, so the items below keep their indexes.
+                Column(Modifier.fillMaxWidth().onSizeChanged { topHeight = it.height }) {
+                    TopBar(onOpenSettings = onOpenSettings, onAdd = onAdd)
+                    UpdateCard(update, onUpdate = onUpdate, onLater = onDismissUpdate)
+                }
             }
             item(key = "hero") {
                 Column(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -232,6 +260,66 @@ private fun TopBar(onOpenSettings: () -> Unit, onAdd: () -> Unit, modifier: Modi
         Spacer(Modifier.weight(1f))
         GlassIconButton(R.drawable.ic_plus_ios, "Добавить сервер", onClick = onAdd, fill = kc.cta, iconSize = 18.dp)
     }
+}
+
+/**
+ * A newer build on the owner's panel. «Обновить» downloads it in the
+ * browser and Android's installer takes over; «Позже» hides it until an
+ * even newer one. It slides in and out, so the screen does not jump.
+ */
+@Composable
+private fun UpdateCard(update: AppUpdate?, onUpdate: (AppUpdate) -> Unit, onLater: () -> Unit) {
+    // The one shown last, for the way out after «Позже».
+    val last = remember { mutableStateOf(update) }
+    SideEffect { if (update != null) last.value = update }
+    AnimatedVisibility(
+        visible = update != null,
+        enter = fadeIn() + expandVertically(),
+        exit = fadeOut() + shrinkVertically(),
+    ) {
+        (update ?: last.value)?.let { shown ->
+            InsetGroup(Modifier.padding(top = 8.dp, bottom = 8.dp)) {
+                Row(
+                    Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconTile(R.drawable.ic_refresh_ios, kc.green)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "Доступна новая версия ${shown.versionName}",
+                            style = IosType.headline,
+                            color = kc.label,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            "Файл скачается в браузере — откройте его, чтобы установить",
+                            style = IosType.footnote,
+                            color = kc.secondary,
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
+                    }
+                }
+                Row(
+                    Modifier.padding(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    SecondaryButton("Позже", onClick = onLater, modifier = Modifier.weight(1f))
+                    PrimaryButton("Обновить", onClick = { onUpdate(shown) }, modifier = Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+/** Opens [url] in the browser; false when the phone has none. */
+private fun openInBrowser(context: Context, url: String): Boolean = try {
+    context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri()).addCategory(Intent.CATEGORY_BROWSABLE))
+    true
+} catch (e: ActivityNotFoundException) {
+    AppLog.w("nothing opens the update link", e)
+    false
 }
 
 @Composable

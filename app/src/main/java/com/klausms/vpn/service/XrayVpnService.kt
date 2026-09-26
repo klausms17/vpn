@@ -198,6 +198,8 @@ class XrayVpnService : VpnService() {
     @Volatile
     private var owedRefresh: String? = null
 
+    private val blockReporter by lazy { BlockReporter(this) }
+
     private var unlockRegistered = false
 
     // Unlocking is when the phone is about to be used: a cheap moment to
@@ -849,9 +851,31 @@ class XrayVpnService : VpnService() {
                 expectedSelection = saved.selectedId,
                 notice = notice,
             )
+            // Up on another server: the phone is online, so the failed one
+            // does not answer from this network.
+            if (winner.id != failed.id && runningProfile?.id == winner.id) reportBlocked(failed, saved)
         } catch (ex: Exception) {
             if (ex is CancellationException) throw ex
             AppLog.w("server switch failed", ex)
+        }
+    }
+
+    /**
+     * Tells the owner's panel that [failed] stopped answering here, if its
+     * subscription asked for that (see [BlockReporter]). In the background:
+     * the switch never waits for it, and nothing it does can fail the tunnel.
+     */
+    private fun reportBlocked(failed: StoredProfile, state: ProfilesState) {
+        val sub = state.subscriptions.firstOrNull { it.id == failed.subscriptionId } ?: return
+        if (sub.reportUrl == null) return
+        val network = networkMonitor?.network ?: lastNetwork
+        scope.launch(Dispatchers.IO) {
+            try {
+                blockReporter.report(failed, sub, network) { liveController }
+            } catch (ex: Exception) {
+                if (ex is CancellationException) throw ex
+                AppLog.w("block report failed", ex)
+            }
         }
     }
 

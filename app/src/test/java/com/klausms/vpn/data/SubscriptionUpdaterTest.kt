@@ -122,6 +122,38 @@ class SubscriptionUpdaterTest {
     }
 
     @Test
+    fun panelAddressesAreKeptUntilAListSaysOtherwise() {
+        val report = "https://sub.example.com/klaus/report"
+        val app = "https://sub.example.com/app/version.json"
+        val state = ProfilesState(listOf(stored("a", parsed("NL", "nl.example.com"))), listOf(sub), selectedId = "a")
+        val first = SubscriptionUpdater.merge(state, "s1", fetched(parsed("NL", "nl.example.com")).copy(reportUrl = report, appUrl = app), now, ids())
+        assertEquals(report, first.subscriptions.single().reportUrl)
+        assertEquals(app, first.subscriptions.single().appUrl)
+        // Refused or only messages, without the headers: the addresses stay.
+        val refused = SubscriptionUpdater.merge(first, "s1", SubscriptionUpdater.Fetched(emptyList(), notice = SubscriptionUpdater.HWID_LIMIT), now, ids())
+        assertEquals(report, refused.subscriptions.single().reportUrl)
+        assertEquals(app, refused.subscriptions.single().appUrl)
+        // A real list without them: the owner took them away.
+        val removed = SubscriptionUpdater.merge(refused, "s1", fetched(parsed("NL", "nl.example.com")), now, ids())
+        assertNull(removed.subscriptions.single().reportUrl)
+        assertNull(removed.subscriptions.single().appUrl)
+    }
+
+    @Test
+    fun onlyHttpsAddressesFromThePanel() {
+        assertEquals("https://sub.example.com/klaus/report", httpsUrl(" https://sub.example.com/klaus/report "))
+        assertEquals("https://[2001:db8::1]:8443/r?x=1", httpsUrl("https://[2001:db8::1]:8443/r?x=1"))
+        assertEquals("https://впн.example/app/version.json", httpsUrl("https://впн.example/app/version.json"))
+        for (bad in listOf(
+            null, "", "http://sub.example.com/r", "sub.example.com/r", "https://", "https:///r", "https://:443/r",
+            "https://user:pw@sub.example.com/r", "https://sub.example.com/a b", "https://sub.example.com/\u0000",
+            "javascript:alert(1)", "https://sub.example.com/" + "a".repeat(1000),
+        )) {
+            assertNull(bad, httpsUrl(bad))
+        }
+    }
+
+    @Test
     fun aRealListClearsTheNotice() {
         val state = ProfilesState(emptyList(), listOf(sub.copy(notice = SubscriptionUpdater.HWID_LIMIT)), selectedId = null)
         val next = SubscriptionUpdater.merge(state, "s1", fetched(parsed("NL", "nl.example.com")), now, ids())

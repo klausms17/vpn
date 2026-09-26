@@ -43,6 +43,10 @@ data class Subscription(
     val announce: String? = null,
     /** Where to ask the owner for help ("support-url" header). */
     val supportUrl: String? = null,
+    /** Where to say that a server stopped answering ("klaus-report-url" header, https only). */
+    val reportUrl: String? = null,
+    /** The owner's latest app build, version.json ("klaus-app-url" header, https only). */
+    val appUrl: String? = null,
 )
 
 @Serializable
