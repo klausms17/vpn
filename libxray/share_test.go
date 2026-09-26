@@ -324,3 +324,225 @@ func TestRealityFingerprintAlwaysSendsPostQuantumShare(t *testing.T) {
 		}
 	}
 }
+
+// uriComponent encodes like JavaScript's encodeURIComponent, which is how
+// Remnawave writes every query value and remark.
+func uriComponent(s string) string {
+	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
+}
+
+// Links shaped exactly like Remnawave's base64 subscription
+// (xray.generator.service.ts), one parameter family per case.
+func TestRemnawaveLinkParams(t *testing.T) {
+	k := getKeys(t)
+	pin := strings.Repeat("ab", 32)
+	fragment := `{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","length":"100-200","delay":"10-20"}}]}`
+	hyMask := `{"udp":[{"type":"salamander","settings":{"password":"obfs-pw"}}],"quicParams":{"congestion":"bbr","debug":true}}`
+	ssCred := base64.StdEncoding.EncodeToString([]byte("chacha20-ietf-poly1305:n0t?s0>s1mple~"))
+	ss22Cred := base64.StdEncoding.EncodeToString([]byte("2022-blake3-aes-128-gcm:" + k.SS2022Key))
+	if !strings.ContainsAny(ssCred, "+/") || !strings.HasSuffix(ssCred, "==") {
+		t.Fatalf("test credential %q must use the full base64 alphabet and padding", ssCred)
+	}
+
+	cases := []struct {
+		name  string
+		link  string
+		check func(t *testing.T, p *Profile, ob map[string]any)
+	}{
+		{"vless fm -> finalmask",
+			"vless://" + k.UUID + "@203.0.113.10:443?encryption=none&flow=xtls-rprx-vision&type=tcp&security=reality&sni=ya.ru&fp=chrome&pbk=" + k.RealityPub + "&sid=ab&fm=" + uriComponent(fragment) + "#" + uriComponent("🇩🇪 Германия"),
+			func(t *testing.T, p *Profile, ob map[string]any) {
+				expect(t, p.Name, "🇩🇪 Германия")
+				expect(t, dig(ob, "streamSettings", "finalmask", "tcp", 0, "type"), "fragment")
+				expect(t, dig(ob, "streamSettings", "finalmask", "tcp", 0, "settings", "packets"), "tlshello")
+			}},
+		{"trojan fm -> finalmask",
+			"trojan://" + uriComponent(k.TrojanPassword) + "@tr.example.com:443?type=tcp&security=tls&sni=tr.example.com&fp=chrome&fm=" + uriComponent(fragment) + "#T",
+			func(t *testing.T, p *Profile, ob map[string]any) {
+				expect(t, dig(ob, "settings", "servers", 0, "password"), k.TrojanPassword)
+				expect(t, dig(ob, "streamSettings", "finalmask", "tcp", 0, "settings", "length"), "100-200")
+			}},
+		{"hysteria2 fm with the same salamander as obfs",
+			"hysteria2://" + uriComponent("hy auth") + "@hy.example.com:443/?obfs=salamander&obfs-password=obfs-pw&sni=hy.example.com&pinSHA256=" + pin + "&fm=" + uriComponent(hyMask) + "#HY",
+			func(t *testing.T, p *Profile, ob map[string]any) {
+				expect(t, dig(ob, "streamSettings", "hysteriaSettings", "auth"), "hy auth")
+				masks := dig(ob, "streamSettings", "finalmask", "udp").([]any)
+				expect(t, len(masks), 1) // not added a second time from obfs
+				expect(t, dig(ob, "streamSettings", "finalmask", "quicParams", "congestion"), "bbr")
+				expect(t, dig(ob, "streamSettings", "tlsSettings", "pinnedPeerCertSha256"), pin)
+				expect(t, p.NeedsCertPin, false)
+			}},
+		{"hysteria2 fm without salamander gets the obfs one",
+			"hysteria2://auth@hy.example.com:443/?obfs=salamander&obfs-password=obfs-pw&sni=hy.example.com&fm=" + uriComponent(`{"quicParams":{"congestion":"reno"}}`) + "#HY",
+			func(t *testing.T, p *Profile, ob map[string]any) {
+				expect(t, dig(ob, "streamSettings", "finalmask", "udp", 0, "settings", "password"), "obfs-pw")
+				expect(t, dig(ob, "streamSettings", "finalmask", "quicParams", "congestion"), "reno")
+			}},
+		{"tls cs, pcs, vcn",
+			"vless://" + k.UUID + "@cdn.example.com:443?encryption=none&type=tcp&security=tls&sni=cdn.example.com&fp=chrome&alpn=" + uriComponent("h2,http/1.1") + "&pcs=" + pin + "&vcn=" + uriComponent("cdn.example.com,backup.example.com") + "&cs=" + uriComponent("TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256") + "#TLS",
+			func(t *testing.T, p *Profile, ob map[string]any) {
+				tls := dig(ob, "streamSettings", "tlsSettings")
+				expect(t, dig(tls, "cipherSuites"), "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256")
+				expect(t, dig(tls, "pinnedPeerCertSha256"), pin)
+				expect(t, dig(tls, "verifyPeerCertByName"), "cdn.example.com,backup.example.com")
+			}},
+		{"ws heartbeatPeriod",
+			"vless://" + k.UUID + "@cdn.example.com:443?encryption=none&type=ws&path=" + uriComponent("/ws?ed=2048") + "&host=cdn.example.com&heartbeatPeriod=30&security=tls&sni=cdn.example.com#WS",
+			func(t *testing.T, p *Profile, ob map[string]any) {
+				expect(t, dig(ob, "streamSettings", "wsSettings", "heartbeatPeriod"), 30)
+				expect(t, dig(ob, "streamSettings", "wsSettings", "path"), "/ws?ed=2048")
+			}},
+		{"ws bad heartbeatPeriod is ignored",
+			"vless://" + k.UUID + "@cdn.example.com:443?encryption=none&type=ws&heartbeatPeriod=soon&security=tls#WS",
+			func(t *testing.T, p *Profile, ob map[string]any) {
+				if dig(ob, "streamSettings", "wsSettings", "heartbeatPeriod") != nil {
+					t.Error("an invalid heartbeatPeriod must be dropped")
+				}
+			}},
+		{"reality pqv and spx",
+			"vless://" + k.UUID + "@203.0.113.10:443?encryption=none&type=tcp&security=reality&sni=ya.ru&fp=chrome&pbk=" + k.RealityPub + "&sid=ab&pqv=" + k.MldsaVerify + "&spx=" + uriComponent("/search?q=1") + "#R",
+			func(t *testing.T, p *Profile, ob map[string]any) {
+				expect(t, dig(ob, "streamSettings", "realitySettings", "mldsa65Verify"), k.MldsaVerify)
+				expect(t, dig(ob, "streamSettings", "realitySettings", "spiderX"), "/search?q=1")
+			}},
+		{"xhttp extra",
+			"vless://" + k.UUID + "@x.example.com:443?encryption=none&type=xhttp&path=" + uriComponent("/xh") + "&host=x.example.com&mode=packet-up&extra=" + uriComponent(`{"xPaddingBytes":"100-1000","noGRPCHeader":true}`) + "&security=tls&sni=x.example.com#X",
+			func(t *testing.T, p *Profile, ob map[string]any) {
+				expect(t, dig(ob, "streamSettings", "xhttpSettings", "mode"), "packet-up")
+				expect(t, dig(ob, "streamSettings", "xhttpSettings", "extra", "noGRPCHeader"), true)
+			}},
+		{"vless encryption passes through",
+			"vless://" + k.UUID + "@pq.example.com:443?encryption=" + uriComponent(k.VlessEncrypt) + "&type=tcp&security=reality&sni=ya.ru&fp=chrome&pbk=" + k.RealityPub + "&sid=ab#PQ",
+			func(t *testing.T, p *Profile, ob map[string]any) {
+				expect(t, dig(ob, "settings", "vnext", 0, "users", 0, "encryption"), k.VlessEncrypt)
+			}},
+		{"ss standard base64 with padding",
+			"ss://" + ssCred + "@198.51.100.2:8388#" + uriComponent("SS сервер"),
+			func(t *testing.T, p *Profile, ob map[string]any) {
+				expect(t, p.Name, "SS сервер")
+				expect(t, dig(ob, "settings", "servers", 0, "method"), "chacha20-ietf-poly1305")
+				expect(t, dig(ob, "settings", "servers", 0, "password"), "n0t?s0>s1mple~")
+			}},
+		{"ss 2022 standard base64 with padding",
+			"ss://" + ss22Cred + "@198.51.100.3:443#SS22",
+			func(t *testing.T, p *Profile, ob map[string]any) {
+				expect(t, dig(ob, "settings", "servers", 0, "method"), "2022-blake3-aes-128-gcm")
+				expect(t, dig(ob, "settings", "servers", 0, "password"), k.SS2022Key)
+			}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := mustParse(t, c.link)
+			c.check(t, p, outbound(t, p))
+			cfg, err := BuildProxyOnlyConfig(outboundsJSON(t, p))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(cfg, `"debug"`) {
+				t.Error("quicParams.debug must be removed")
+			}
+			if err := ValidateConfig(cfg); err != nil {
+				t.Fatalf("xray rejected the config: %v\n%s", err, cfg)
+			}
+		})
+	}
+
+	if _, err := parseLink("vless://" + k.UUID + "@h.example.com:443?security=tls&fm=%7Bbroken#x"); err == nil || !strings.Contains(err.Error(), "fm") {
+		t.Errorf("a broken fm must be reported, got %v", err)
+	}
+}
+
+func TestServerDescriptionIsStripped(t *testing.T) {
+	k := getKeys(t)
+	desc := base64.StdEncoding.EncodeToString([]byte("Быстрый сервер"))
+	link := "vless://" + k.UUID + "@203.0.113.10:443?encryption=none&type=tcp&security=reality&sni=ya.ru&fp=chrome&pbk=" + k.RealityPub + "&sid=ab#" + uriComponent("NL ?1") + "?serverDescription=" + desc
+	p := mustParse(t, link)
+	expect(t, p.Name, "NL ?1")
+	if strings.Contains(p.Link, "serverDescription") {
+		t.Errorf("stored link keeps the suffix: %s", p.Link)
+	}
+	// Also in a subscription, and for links without a query (ss).
+	ss := "ss://" + base64.StdEncoding.EncodeToString([]byte("aes-256-gcm:pw")) + "@198.51.100.2:8388#SS?serverDescription=" + desc
+	res, err := parseSubscription([]byte(base64.StdEncoding.EncodeToString([]byte(link + "\n" + ss))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect(t, len(res.Profiles), 2)
+	expect(t, res.Profiles[1].Name, "SS")
+	expect(t, dig(outbound(t, res.Profiles[1]), "settings", "servers", 0, "password"), "pw")
+	// A link without a remark is left alone.
+	expect(t, stripServerDescription("vless://id@h:1?serverDescription=x"), "vless://id@h:1?serverDescription=x")
+}
+
+// Remnawave serves fake servers instead of an error: expired, disabled,
+// device limit, app not supported.
+func TestSubscriptionNotices(t *testing.T) {
+	k := getKeys(t)
+	placeholder := func(remark string) string {
+		return "vless://00000000-0000-0000-0000-000000000000@0.0.0.0:1?encryption=none&type=tcp&security=none#" + uriComponent(remark) + "?serverDescription=eA=="
+	}
+	real := "vless://" + k.UUID + "@a.example.com:443?encryption=none&type=tcp&security=reality&sni=ya.ru&fp=chrome&pbk=" + k.RealityPub + "&sid=ab#A"
+
+	// Only placeholders: not an error, no profiles, the messages as notices.
+	body := base64.StdEncoding.EncodeToString([]byte(placeholder("⌛ Subscription expired") + "\n" + placeholder("Contact support") + "\n" + placeholder("Contact support")))
+	res, err := parseSubscription([]byte(body))
+	if err != nil {
+		t.Fatalf("placeholders only must not be an error: %v", err)
+	}
+	expect(t, len(res.Profiles), 0)
+	expect(t, strings.Join(res.Notices, "|"), "⌛ Subscription expired|Contact support")
+	out, _ := ParseSubscription([]byte(body))
+	if !strings.Contains(out, `"profiles":[]`) || !strings.Contains(out, `"notices":["⌛ Subscription expired","Contact support"]`) {
+		t.Errorf("JSON for the app: %s", out)
+	}
+
+	// Mixed: the placeholder never becomes a server.
+	res, err = parseSubscription([]byte(real + "\n" + placeholder("Limit of devices reached")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect(t, len(res.Profiles), 1)
+	expect(t, res.Profiles[0].Name, "A")
+	expect(t, strings.Join(res.Notices, "|"), "Limit of devices reached")
+
+	// Either marker is enough.
+	for _, link := range []string{
+		"vless://" + k.UUID + "@0.0.0.0:1?security=none#App not supported",
+		"vless://00000000-0000-0000-0000-000000000000@203.0.113.1:443?security=reality&pbk=" + k.RealityPub + "#App not supported",
+	} {
+		res, err := parseSubscription([]byte(link))
+		if err != nil || len(res.Profiles) != 0 || len(res.Notices) != 1 {
+			t.Errorf("%s: %v %+v", link, err, res)
+		}
+	}
+
+	// The JSON format (XRAY_JSON) carries them the same way.
+	jsonSub := `[{"remarks":"🚫 Subscription disabled","outbounds":[{"tag":"proxy","protocol":"vless","settings":{"vnext":[{"address":"0.0.0.0","port":1,"users":[{"id":"00000000-0000-0000-0000-000000000000","encryption":"none"}]}]},"streamSettings":{"network":"tcp","security":"none"}}]}]`
+	res, err = parseSubscription([]byte(jsonSub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect(t, len(res.Profiles), 0)
+	expect(t, strings.Join(res.Notices, "|"), "🚫 Subscription disabled")
+
+	// Neither servers nor notices: the old errors stay.
+	if _, err := parseSubscription([]byte(placeholder(""))); err == nil || !strings.Contains(err.Error(), "нет серверов") {
+		t.Errorf("a nameless placeholder alone is still an empty subscription, got %v", err)
+	}
+	if _, err := parseSubscription([]byte("vless://" + k.UUID + "@c.example.com:443?type=quic#C")); err == nil {
+		t.Error("a subscription with only broken links must still fail")
+	}
+}
+
+func TestSubscriptionEncryptedWithAge(t *testing.T) {
+	armored := "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBhYmMK\n-----END AGE ENCRYPTED FILE-----\n"
+	for name, body := range map[string]string{
+		"armored": armored,
+		"base64":  base64.StdEncoding.EncodeToString([]byte(armored)),
+	} {
+		_, err := parseSubscription([]byte(body))
+		if err == nil || err.Error() != "подписка зашифрована для другого приложения — попросите владельца выдать обычную ссылку" {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+}

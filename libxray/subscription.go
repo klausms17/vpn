@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -14,7 +15,17 @@ type SubscriptionResult struct {
 	Profiles []*Profile `json:"profiles"`
 	// Human readable reasons for entries that could not be imported.
 	Errors []string `json:"errors,omitempty"`
+	// Messages the panel sent as fake servers instead of real ones
+	// ("Subscription expired", "Limit of devices reached", ...). A result
+	// can hold only notices and no profiles.
+	Notices []string `json:"notices,omitempty"`
 }
+
+// ageArmor starts a body encrypted with age: a response rule of the panel
+// encrypts the list for one particular app.
+const ageArmor = "-----BEGIN AGE ENCRYPTED FILE-----"
+
+var errEncrypted = errf("подписка зашифрована для другого приложения — попросите владельца выдать обычную ссылку")
 
 // ParseSubscription understands the formats subscription panels serve:
 // base64 list of links, plain list of links, and Xray JSON configs (a single
@@ -33,6 +44,9 @@ func parseSubscription(body []byte) (*SubscriptionResult, error) {
 	if len(body) == 0 {
 		return nil, errf("подписка пустая")
 	}
+	if bytes.HasPrefix(body, []byte(ageArmor)) {
+		return nil, errEncrypted
+	}
 	res := &SubscriptionResult{}
 	if body[0] == '{' || body[0] == '[' {
 		if err := parseJSONConfigs(body, res); err != nil {
@@ -46,6 +60,9 @@ func parseSubscription(body []byte) (*SubscriptionResult, error) {
 				return nil, errf("не удалось разобрать подписку: это не список ключей")
 			}
 			text = string(decoded)
+			if strings.HasPrefix(strings.TrimSpace(text), ageArmor) {
+				return nil, errEncrypted
+			}
 			if t := strings.TrimSpace(text); strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[") {
 				if err := parseJSONConfigs([]byte(t), res); err != nil {
 					return nil, err
@@ -58,6 +75,11 @@ func parseSubscription(body []byte) (*SubscriptionResult, error) {
 			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
 				continue
 			}
+			line = stripServerDescription(line)
+			if notice, ok := placeholderNotice(line); ok {
+				res.addNotice(notice)
+				continue
+			}
 			p, err := parseLink(line)
 			if err != nil {
 				res.addError(line, err)
@@ -67,12 +89,68 @@ func parseSubscription(body []byte) (*SubscriptionResult, error) {
 		}
 	}
 	if len(res.Profiles) == 0 {
+		if len(res.Notices) > 0 {
+			// Not an error: the panel is talking to the user (expired,
+			// device limit, ...). The caller keeps its old servers.
+			res.Profiles = []*Profile{}
+			return res, nil
+		}
 		if len(res.Errors) > 0 {
 			return nil, errf("в подписке нет подходящих серверов: %s", res.Errors[0])
 		}
 		return nil, errf("в подписке нет серверов")
 	}
 	return res, nil
+}
+
+func (r *SubscriptionResult) addNotice(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" || len(r.Notices) >= 20 || slices.Contains(r.Notices, text) {
+		return
+	}
+	r.Notices = append(r.Notices, text)
+}
+
+// Remnawave answers with fake servers when it has something to say instead
+// (subscription expired or disabled, device limit reached, app not
+// supported, ...): VLESS entries at 0.0.0.0:1 with the all-zero UUID, named
+// after the message.
+const zeroUUID = "00000000-0000-0000-0000-000000000000"
+
+func isPlaceholder(address string, port int, id string) bool {
+	return (address == "0.0.0.0" && port == 1) || strings.EqualFold(strings.TrimSpace(id), zeroUUID)
+}
+
+// placeholderNotice checks a share link. It returns the link's remark when
+// the link is such a fake server.
+func placeholderNotice(link string) (string, bool) {
+	if strings.Index(link, "://") <= 0 {
+		return "", false
+	}
+	u, err := parseShareURL(link)
+	if err != nil || !isPlaceholder(u.host, u.port, u.userinfo) {
+		return "", false
+	}
+	return u.fragment, true
+}
+
+// placeholderProfile checks a profile from a JSON config the same way.
+func placeholderProfile(p *Profile) bool {
+	var ob struct {
+		Settings struct {
+			Vnext []struct {
+				Users []struct {
+					ID string `json:"id"`
+				} `json:"users"`
+			} `json:"vnext"`
+		} `json:"settings"`
+	}
+	id := ""
+	if len(p.Outbounds) > 0 && json.Unmarshal(p.Outbounds[0], &ob) == nil &&
+		len(ob.Settings.Vnext) > 0 && len(ob.Settings.Vnext[0].Users) > 0 {
+		id = ob.Settings.Vnext[0].Users[0].ID
+	}
+	return isPlaceholder(p.Address, p.Port, id)
 }
 
 func (r *SubscriptionResult) addError(entry string, err error) {
@@ -107,7 +185,8 @@ func parseJSONConfigs(body []byte, res *SubscriptionResult) error {
 		configs = []map[string]any{single}
 	}
 	for i, cfg := range configs {
-		name, _ := cfg["remarks"].(string)
+		remarks, _ := cfg["remarks"].(string)
+		name := remarks
 		if name == "" {
 			name = fmt.Sprintf("Сервер %d", i+1)
 		}
@@ -116,7 +195,13 @@ func parseJSONConfigs(body []byte, res *SubscriptionResult) error {
 			res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", name, err))
 			continue
 		}
-		res.Profiles = append(res.Profiles, profiles...)
+		for _, p := range profiles {
+			if placeholderProfile(p) {
+				res.addNotice(remarks)
+				continue
+			}
+			res.Profiles = append(res.Profiles, p)
+		}
 	}
 	return nil
 }

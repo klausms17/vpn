@@ -128,6 +128,43 @@ func prepareOutbounds(outbounds []json.RawMessage) ([]any, error) {
 	return res, nil
 }
 
+// namespaceOutbounds prepares a profile's outbounds like
+// BuildProxyOnlyConfig and moves them under prefix, so that several
+// profiles fit into one instance: every tag becomes prefix+"-"+tag (the
+// root prefix+"-proxy") and dialerProxy references follow. It returns the
+// outbounds and the root's tag.
+func namespaceOutbounds(outbounds []json.RawMessage, prefix string) ([]any, string, error) {
+	obs, err := prepareOutbounds(outbounds)
+	if err != nil {
+		return nil, "", err
+	}
+	rename := map[string]string{}
+	for _, x := range obs {
+		tag, _ := x.(map[string]any)["tag"].(string)
+		if _, dup := rename[tag]; dup {
+			return nil, "", fmt.Errorf("duplicate outbound tag %q", tag)
+		}
+		rename[tag] = prefix + "-" + tag
+	}
+	for _, x := range obs {
+		ob := x.(map[string]any)
+		ob["tag"] = rename[ob["tag"].(string)]
+		if ss, ok := ob["streamSettings"].(map[string]any); ok {
+			if so, ok := ss["sockopt"].(map[string]any); ok {
+				if t, _ := so["dialerProxy"].(string); t != "" {
+					// A hop outside the profile would be another
+					// candidate's outbound (or none at all).
+					if rename[t] == "" {
+						return nil, "", fmt.Errorf("dialerProxy %q is not in the profile", t)
+					}
+					so["dialerProxy"] = rename[t]
+				}
+			}
+		}
+	}
+	return obs, rename[ProxyTag], nil
+}
+
 type rule = map[string]any
 
 func buildConfig(o *BuildOptions) (map[string]any, error) {
@@ -394,13 +431,18 @@ func hostFromURL(s string) string {
 }
 
 // sanitizeOutbound removes options a link or subscription must never
-// control: key logging to arbitrary files ("masterKeyLog") and REALITY's
-// debug output ("show"). It also maps REALITY fingerprints that do not
-// always send the post-quantum key share to chrome, as links do.
+// control: key logging to arbitrary files ("masterKeyLog"), REALITY's debug
+// output ("show") and Hysteria's congestion debug ("quicParams.debug"). It
+// also maps REALITY fingerprints that do not always send the post-quantum
+// key share to chrome, as links do.
 func sanitizeOutbound(v any) {
 	switch x := v.(type) {
 	case map[string]any:
 		delete(x, "masterKeyLog")
+		// Hysteria's congestion debug switches on process-wide output.
+		if qp, ok := x["quicParams"].(map[string]any); ok {
+			delete(qp, "debug")
+		}
 		if rs, ok := x["realitySettings"].(map[string]any); ok {
 			delete(rs, "show")
 			if fp, ok := rs["fingerprint"].(string); ok {

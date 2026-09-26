@@ -7,6 +7,7 @@ package libxray
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -18,12 +19,18 @@ import (
 	"sync"
 	"time"
 
+	applog "github.com/xtls/xray-core/app/log"
 	"github.com/xtls/xray-core/common/geodata"
+	commonlog "github.com/xtls/xray-core/common/log"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/session"
 	core "github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/features/dns"
+	xoutbound "github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/features/stats"
+	"github.com/xtls/xray-core/infra/conf"
 	"github.com/xtls/xray-core/infra/conf/serial"
+	"github.com/xtls/xray-core/transport/internet"
 
 	// Registers every protocol, transport and app that Xray ships with.
 	_ "github.com/xtls/xray-core/main/distro/all"
@@ -188,6 +195,210 @@ func MeasureOutboundDelay(configJSON string, url string, timeoutMs int32) (ms in
 	return measureDelay(inst, url, timeoutDuration(timeoutMs))
 }
 
+// FetchThroughTunnel is FetchWithHeaders through the proxy outbound of the
+// running instance: for refreshing a subscription whose panel is blocked
+// while the VPN is up, without a temporary core. Fails when not running.
+func (c *Controller) FetchThroughTunnel(url, userAgent, headersJSON string, timeoutMs int32) (result *FetchResult, err error) {
+	defer recoverInto(&err)
+
+	extra, err := parseHeaders(headersJSON)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	inst := c.instance
+	c.mu.Unlock()
+	if inst == nil {
+		return nil, errors.New("core is not running")
+	}
+	tr := proxyTransport(inst)
+	defer tr.CloseIdleConnections()
+	return doFetch(tr, url, userAgent, extra, timeoutDuration(timeoutMs))
+}
+
+// maxProbeParallel caps ProbeOutbounds' concurrent probes: each one holds
+// the buffers of a proxy handshake.
+const maxProbeParallel = 6
+
+// ProbeOutbounds measures the delay to url through several candidate
+// servers at once. candidatesJSON is a JSON array with one entry per
+// candidate: the profile's outbounds array (as for BuildProxyOnlyConfig).
+// It returns a JSON array of int64 in input order: the delay in ms, or -1
+// when the candidate failed or is invalid.
+//
+// All candidates share one temporary proxy-only instance, their tags moved
+// apart ("c<N>-..."). Creating an instance takes over Xray's process-wide
+// state; the running tunnel gets it back right away (see restoreGlobals),
+// so its xray.log and chained servers keep working. At most parallel
+// (1..6) probes run at a time, each limited by timeoutMs. Works whether or
+// not the controller is running.
+func (c *Controller) ProbeOutbounds(candidatesJSON string, url string, timeoutMs int32, parallel int32) (resultJSON string, err error) {
+	defer recoverInto(&err)
+
+	var candidates []json.RawMessage
+	if err := json.Unmarshal([]byte(candidatesJSON), &candidates); err != nil {
+		return "", fmt.Errorf("bad candidates: %w", err)
+	}
+	results := make([]int64, len(candidates))
+	roots := make([]string, len(candidates)) // "" = invalid candidate
+	groups := make([][]any, len(candidates))
+	for i, raw := range candidates {
+		results[i] = -1
+		obs, root, err := probeCandidate(raw, "c"+strconv.Itoa(i))
+		if err != nil {
+			continue
+		}
+		groups[i], roots[i] = obs, root
+	}
+	defer func() {
+		// Handshakes and the instance leave megabytes of garbage; the VPN
+		// process must stay small.
+		go releaseMemory()
+	}()
+	// After the probe instance is closed (deferred below): the tunnel's
+	// state again, without the probe's outbounds.
+	defer c.restoreGlobals(nil)
+
+	inst, err := c.newProbeInstance(groups)
+	if err != nil {
+		// Every candidate passed its own checks, yet the core refused them
+		// together: find the culprits one by one.
+		for i := range groups {
+			if groups[i] == nil {
+				continue
+			}
+			one, err := c.newProbeInstance([][]any{groups[i]})
+			if err != nil {
+				groups[i], roots[i] = nil, ""
+			} else if one != nil {
+				_ = one.Close()
+			}
+		}
+		if inst, err = c.newProbeInstance(groups); err != nil {
+			return "", err
+		}
+	}
+	if inst != nil {
+		defer inst.Close()
+		if err := inst.Start(); err != nil {
+			return "", fmt.Errorf("start failed: %w", err)
+		}
+		timeout := timeoutDuration(timeoutMs)
+		sem := make(chan struct{}, min(max(int(parallel), 1), maxProbeParallel))
+		var wg sync.WaitGroup
+		for i, tag := range roots {
+			if tag == "" {
+				continue
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				// recoverInto only covers the calling goroutine.
+				defer func() { _ = recover() }()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				if ms, err := measureDelayVia(inst, tag, url, timeout); err == nil {
+					results[i] = ms
+				}
+			}()
+		}
+		wg.Wait()
+	}
+	out, err := json.Marshal(results)
+	return string(out), err
+}
+
+// probeCandidate namespaces one candidate's outbounds and checks each of
+// them the way the core will, so a single bad candidate is reported as -1
+// instead of failing the whole batch.
+func probeCandidate(raw json.RawMessage, prefix string) ([]any, string, error) {
+	var outbounds []json.RawMessage
+	if err := json.Unmarshal(raw, &outbounds); err != nil {
+		return nil, "", err
+	}
+	obs, root, err := namespaceOutbounds(outbounds, prefix)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, ob := range obs {
+		var detour conf.OutboundDetourConfig
+		if err := json.Unmarshal(mustJSON(ob), &detour); err != nil {
+			return nil, "", err
+		}
+		if _, err := detour.Build(); err != nil {
+			return nil, "", err
+		}
+	}
+	return obs, root, nil
+}
+
+// newProbeInstance builds (but does not start) a silent proxy-only
+// instance from the given outbound groups, skipping nil ones. It returns
+// nil, nil when there is nothing to build.
+func (c *Controller) newProbeInstance(groups [][]any) (*core.Instance, error) {
+	var all []any
+	for _, g := range groups {
+		all = append(all, g...)
+	}
+	if len(all) == 0 {
+		return nil, nil
+	}
+	cfg, err := json.Marshal(map[string]any{
+		"log":       map[string]any{"loglevel": "none"},
+		"outbounds": all,
+	})
+	if err != nil {
+		return nil, err
+	}
+	inst, err := newInstance(string(cfg))
+	// Even a failed core.New may have taken the globals over already.
+	c.restoreGlobals(inst)
+	return inst, err
+}
+
+// restoreGlobals gives the running instance back the process-wide state
+// that every new instance takes over on creation: Xray's log handler
+// (app/log.New), else the tunnel's xray.log stays silent once the other
+// instance is closed, and the system dialer's DNS client and outbound
+// manager (core.New -> internet.InitSystemDialer), which resolve every
+// sockopt.dialerProxy: a chained tunnel would dial its hop in the other
+// instance. While probe is not nil its outbounds stay reachable as hops too.
+func (c *Controller) restoreGlobals(probe *core.Instance) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.instance == nil {
+		return
+	}
+	if lg, ok := c.instance.GetFeature((*applog.Instance)(nil)).(*applog.Instance); ok {
+		commonlog.RegisterHandler(lg)
+	}
+	dc, _ := c.instance.GetFeature(dns.ClientType()).(dns.Client)
+	om, _ := c.instance.GetFeature(xoutbound.ManagerType()).(xoutbound.Manager)
+	if dc == nil || om == nil {
+		return
+	}
+	if probe != nil {
+		if pom, ok := probe.GetFeature(xoutbound.ManagerType()).(xoutbound.Manager); ok {
+			om = &sharedOutbounds{Manager: om, probe: pom}
+		}
+	}
+	internet.InitSystemDialer(dc, om)
+}
+
+// sharedOutbounds resolves dialerProxy tags in the tunnel first, then in the
+// probe instance (their tags never collide: the probe's are "c<N>-...").
+type sharedOutbounds struct {
+	xoutbound.Manager
+	probe xoutbound.Manager
+}
+
+func (m *sharedOutbounds) GetHandler(tag string) xoutbound.Handler {
+	if h := m.Manager.GetHandler(tag); h != nil {
+		return h
+	}
+	return m.probe.GetHandler(tag)
+}
+
 // ValidateConfig checks that configJSON parses and that every referenced
 // resource (geo codes, keys, transports) is valid, without starting it.
 func ValidateConfig(configJSON string) (err error) {
@@ -212,14 +423,14 @@ func newInstance(configJSON string) (*core.Instance, error) {
 	return inst, nil
 }
 
-// dialThroughProxy opens a connection to addr ("host:port") via the proxy
-// outbound of inst, bypassing routing rules.
-func dialThroughProxy(ctx context.Context, inst *core.Instance, network, addr string) (net.Conn, error) {
+// dialVia opens a connection to addr ("host:port") through the outbound
+// tagged tag of inst, bypassing routing rules.
+func dialVia(ctx context.Context, inst *core.Instance, tag, network, addr string) (net.Conn, error) {
 	dest, err := net.ParseDestination(network + ":" + addr)
 	if err != nil {
 		return nil, err
 	}
-	ctx = session.SetForcedOutboundTagToContext(ctx, ProxyTag)
+	ctx = session.SetForcedOutboundTagToContext(ctx, tag)
 	return core.Dial(ctx, inst, dest)
 }
 
