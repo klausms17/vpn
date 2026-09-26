@@ -4,7 +4,10 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.TelephonyNetworkSpecifier
+import android.os.Build
 import android.os.SystemClock
+import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import com.klausms.vpn.BuildConfig
 import com.klausms.vpn.core.XrayCore
@@ -44,8 +47,14 @@ internal class BlockReporter(context: Context) {
         val base = httpsUrl(subscription.reportUrl) ?: return
         val id = BlockReport.shortUuid(subscription.url) ?: return
         if (failed.address.isBlank()) return
-        if (!throttle.claim(BlockReport.serverKey(failed.address, failed.port), SystemClock.elapsedRealtime())) return
-        val kind = networkKind(network)
+        val key = BlockReport.serverKey(failed.address, failed.port)
+        if (!throttle.claim(key, SystemClock.elapsedRealtime())) return
+        val caps = capabilities(network)
+        val kind = BlockReport.networkKind(
+            cellular = caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true,
+            wifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true,
+            ethernet = caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true,
+        )
         val url = BlockReport.url(
             base = base,
             shortUuid = id,
@@ -53,50 +62,64 @@ internal class BlockReporter(context: Context) {
             port = failed.port,
             protocol = failed.protocol,
             network = kind,
-            operator = if (kind == BlockReport.MOBILE) BlockReport.operator(operatorName()) else "",
+            operator = if (kind == BlockReport.MOBILE) BlockReport.operator(operatorName(caps)) else "",
             version = BuildConfig.VERSION_NAME,
         )
-        send(url, tunnel)
+        // Not delivered (or the panel could not take it now): the next
+        // switch away from this server may report it again.
+        if (!send(url, tunnel)) throttle.release(key)
     }
 
-    private fun send(url: String, tunnel: () -> Controller?) {
+    /** True when the panel got the report, or refused it for good (4xx). */
+    private fun send(url: String, tunnel: () -> Controller?): Boolean {
         try {
             XrayCore.fetch(url, via = null, timeoutMs = BlockReport.TIMEOUT_MS)
             AppLog.i("block report sent")
-            return
+            return true
         } catch (e: Exception) {
-            // The panel answered (e.g. 403): through the tunnel it would say the same.
-            if (e.message?.startsWith("HTTP ") == true) {
+            // The panel answered: through the tunnel it would say the same.
+            val status = BlockReport.httpStatus(e.message)
+            if (status != null) {
                 AppLog.w("block report refused: ${e.userMessage()}")
-                return
+                return status in 400..499
             }
             AppLog.w("block report failed directly: ${e.userMessage()}")
         }
-        val c = tunnel() ?: return
-        try {
+        val c = tunnel() ?: return false
+        return try {
             XrayCore.fetchThroughTunnel(c, url, headers = "", timeoutMs = BlockReport.TIMEOUT_MS)
             AppLog.i("block report sent through the tunnel")
+            true
         } catch (e: Exception) {
             AppLog.w("block report failed: ${e.userMessage()}")
+            BlockReport.httpStatus(e.message) in 400..499
         }
     }
 
-    private fun networkKind(network: Network?): String {
-        val caps = try {
-            network?.let { appContext.getSystemService(ConnectivityManager::class.java)?.getNetworkCapabilities(it) }
-        } catch (_: Exception) {
+    private fun capabilities(network: Network?): NetworkCapabilities? = try {
+        network?.let { appContext.getSystemService(ConnectivityManager::class.java)?.getNetworkCapabilities(it) }
+    } catch (_: Exception) {
+        null
+    }
+
+    /**
+     * The name of the mobile network the data goes through ("MTS RUS",
+     * "Билайн"); needs no permission. On a dual-SIM phone that is the data
+     * SIM, not the one for calls (what a plain TelephonyManager tells).
+     */
+    private fun operatorName(caps: NetworkCapabilities?): String? = try {
+        val specified = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            (caps?.networkSpecifier as? TelephonyNetworkSpecifier)?.subscriptionId
+        } else {
             null
         }
-        return BlockReport.networkKind(
-            cellular = caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true,
-            wifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true,
-            ethernet = caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true,
-        )
-    }
-
-    /** The mobile network's name ("MTS RUS", "Билайн"); needs no permission. */
-    private fun operatorName(): String? = try {
-        appContext.getSystemService(TelephonyManager::class.java)?.networkOperatorName
+        val id = specified?.takeIf { it != SubscriptionManager.INVALID_SUBSCRIPTION_ID }
+            ?: SubscriptionManager.getDefaultDataSubscriptionId()
+        if (id == SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+            null
+        } else {
+            appContext.getSystemService(TelephonyManager::class.java)?.createForSubscriptionId(id)?.networkOperatorName
+        }
     } catch (_: Exception) {
         null
     }
@@ -146,6 +169,12 @@ internal object BlockReport {
             .map { if (it in ' '..'~' || it in '\u0400'..'\u04FF') it else ' ' }
             .joinToString("").split(' ').filter { it.isNotEmpty() }.joinToString(" ")
             .take(OPERATOR_MAX).trim()
+
+    /** The status of an "HTTP 503 Service Unavailable" error from the core, or null for other errors. */
+    fun httpStatus(message: String?): Int? {
+        val m = Regex("""^HTTP (\d{3})\b""").find(message ?: return null) ?: return null
+        return m.groupValues[1].toInt()
+    }
 
     /** One report per server, whatever its protocol: the panel counts by address and port. */
     fun serverKey(host: String, port: Int): String = "${host.trim().lowercase(Locale.ROOT)}:$port"
@@ -209,5 +238,11 @@ internal class ReportThrottle(private val windowMs: Long) {
         if (key in sent) return false
         sent[key] = now
         return true
+    }
+
+    /** Forgets a claim whose report did not get through, so the next one may try. */
+    @Synchronized
+    fun release(key: String) {
+        sent.remove(key)
     }
 }

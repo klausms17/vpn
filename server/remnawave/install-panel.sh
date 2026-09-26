@@ -59,9 +59,9 @@ SNI_CANDIDATES="www.nvidia.com www.samsung.com www.amd.com dl.google.com www.cis
 # its own settings and which of them a user gets. The page itself (/api/sub)
 # needs no token.
 SUBPAGE_SCOPES='["system:metadata", "subscription-page-configs:list", "subscription-page-configs:get", "subscriptions:subpage-config"]'
-# The block report monitor: is this a real subscription, which servers are
-# there and are they connected.
-MONITOR_SCOPES='["users:by-short-uuid", "hosts:list", "nodes:list"]'
+# The block report monitor: which subscriptions are active (a report must
+# come from one), which servers are there and are they connected.
+MONITOR_SCOPES='["users:list", "hosts:list", "nodes:list"]'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
@@ -771,7 +771,8 @@ if ! token_ok "$SUBPAGE_TOKEN" /api/system/metadata || ! token_ok "$SUBPAGE_TOKE
 fi
 # The monitor faces the internet too: it only checks that a report comes
 # from a real subscription and looks up the servers.
-if ! token_ok "$MONITOR_TOKEN" /api/hosts || ! token_ok "$MONITOR_TOKEN" /api/nodes; then
+if ! token_ok "$MONITOR_TOKEN" "/api/users?start=0&size=1" || ! token_ok "$MONITOR_TOKEN" /api/hosts ||
+  ! token_ok "$MONITOR_TOKEN" /api/nodes; then
   say "Создаю API-токен для сигналов о блокировках"
   new_token klaus-monitor "$MONITOR_SCOPES"
   MONITOR_TOKEN="$TOKEN"

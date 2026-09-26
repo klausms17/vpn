@@ -2,11 +2,12 @@
 """Mock Telegram Bot API and GitHub REST API for run-local.sh.
 
   mock-apis.py --port 18090 --tg-token T --gh-token G --repo klausms17/vpn \
-      --tag TAG --bad-tag TAG2 --apk KlausVPN-1.0.99.apk
+      --tag TAG --bad-tag TAG2 --temp-tag TAG3 --apk KlausVPN-1.0.99.apk
 
 Telegram (/bot<token>/<method>, GET or POST, JSON or form): getMe,
 getUpdates (serves the messages queued with POST /_mock/tg/say
-{"chat_id": 1, "first_name": "…", "text": "…"}, long polling up to 3 s) and
+{"chat_id": 1, "first_name": "…", "text": "…"}, long polling up to 3 s; a
+negative offset keeps only the last updates, as in Telegram) and
 sendMessage (kept; GET /_mock/tg/sent lists them).
 
 GitHub: GET /repos/<repo>/releases/tags/<tag> (needs "Bearer G") lists the
@@ -14,7 +15,8 @@ APK and SHA256SUMS.txt; /repos/<repo>/releases/assets/<id> with
 "Accept: application/octet-stream" redirects to http://127.0.0.2:<port>/dl/,
 which, like GitHub's file storage, refuses requests that still carry the
 Authorization header. The release <bad-tag> has a SHA256SUMS.txt that does
-not match its APK.
+not match its APK; <temp-tag> is named like a CI build signed with the
+temporary key.
 """
 
 import argparse
@@ -40,6 +42,7 @@ def main():
     ap.add_argument("--repo", default="klausms17/vpn")
     ap.add_argument("--tag", required=True)
     ap.add_argument("--bad-tag", required=True)
+    ap.add_argument("--temp-tag", required=True)
     ap.add_argument("--apk", required=True)
     args = ap.parse_args()
 
@@ -55,7 +58,10 @@ def main():
         3: (name, apk),
         4: ("SHA256SUMS.txt", ("%s  %s\n" % (bad_sum, name)).encode()),
     }
-    releases = {args.tag: [1, 2], args.bad_tag: [3, 4]}
+    releases = {args.tag: [1, 2], args.bad_tag: [3, 4], args.temp_tag: [1, 2]}
+    version = name[len("KlausVPN-"):-len(".apk")]
+    titles = {args.tag: "Klaus VPN %s (main)" % version, args.bad_tag: "Klaus VPN %s (main)" % version,
+              args.temp_tag: "Klaus VPN %s (main) — временная подпись" % version}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *a):
@@ -122,8 +128,12 @@ def main():
                 deadline = time.time() + min(float(p.get("timeout") or 0), 3)
                 while True:
                     with LOCK:
-                        # Confirmed updates are gone for good, as in Telegram.
-                        UPDATES[:] = [u for u in UPDATES if u["update_id"] >= offset]
+                        # Confirmed updates are gone for good, as in Telegram;
+                        # offset -N forgets all but the last N.
+                        if offset < 0:
+                            UPDATES[:] = UPDATES[offset:]
+                        else:
+                            UPDATES[:] = [u for u in UPDATES if u["update_id"] >= offset]
                         if UPDATES or time.time() >= deadline:
                             return self.reply(200, {"ok": True, "result": list(UPDATES)})
                     time.sleep(0.2)
@@ -151,7 +161,7 @@ def main():
                 tag = urllib.parse.unquote(rest[len("tags/"):])
                 if tag not in releases:
                     return self.reply(404, {"message": "Not Found"})
-                return self.reply(200, {"tag_name": tag, "prerelease": True, "assets": [
+                return self.reply(200, {"tag_name": tag, "name": titles[tag], "prerelease": True, "assets": [
                     {"id": i, "name": assets[i][0], "size": len(assets[i][1]),
                      "url": "%s/releases/assets/%d" % (base, i),
                      "browser_download_url": "https://github.com/%s/releases/download/%s/%s" % (args.repo, tag, assets[i][0])}

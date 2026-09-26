@@ -48,7 +48,7 @@ VPN-серверы:
 
 Оповещения и приложение:
   telegram-setup [ТОКЕН]       оповещения в Telegram: токен бота от @BotFather, затем
-                               напишите боту любое сообщение
+                               откройте показанную ссылку и нажмите «Запустить»
   telegram-test                отправить проверочное сообщение
   publish-apk [--tag РЕЛИЗ]    выложить новую сборку приложения на адрес подписки
                                (нужен GITHUB_TOKEN; раз в час это делается само)
@@ -724,7 +724,7 @@ need_new_panel() {
 }
 
 cmd_telegram_setup() {
-  local token="${1:-}" bot chat="" who="" offset=0 deadline upd
+  local token="${1:-}" bot code chat="" who="" offset=0 deadline upd
   if [ -z "$token" ]; then
     [ -t 0 ] || die "укажите токен бота: klaus-panel telegram-setup ТОКЕН"
     read -r -s -p "Токен бота (его выдаёт @BotFather): " token
@@ -742,10 +742,22 @@ cmd_telegram_setup() {
     *) die "Telegram ответил $TG_CODE" ;;
   esac
   bot="$(jq -r '.result.username // empty' <<<"$TG_RESP")"
-  say "Бот @$bot. Откройте его в Telegram (https://t.me/$bot), нажмите «Запустить» или напишите ему что угодно. Жду до 10 минут…"
+  # Messages the bot got before (the owner's old ones, or anybody's: bots
+  # can be found by name) do not count: the queue is emptied first, and
+  # only a message with this one-time code is taken.
+  code="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+  [[ "$code" =~ ^[0-9a-f]{12}$ ]] || die "не удалось получить случайный код"
+  tg getUpdates '{"offset": -1, "timeout": 0}'
+  case "$TG_CODE" in
+    200) offset="$(jq -r '[.result[]?.update_id] | max | if . == null then 0 else . + 1 end' <<<"$TG_RESP" 2>/dev/null || echo 0)" ;;
+    409) die "этот бот уже подключён к другой программе (вебхук): создайте для оповещений отдельного бота" ;;
+  esac
+  [[ "$offset" =~ ^[0-9]+$ ]] || offset=0
+  say "Бот @$bot. Откройте ссылку https://t.me/$bot?start=$code и нажмите «Запустить» (или отправьте боту код $code)."
+  echo "Чтобы оповещения приходили в группу, откройте https://t.me/$bot?startgroup=$code и выберите группу. Жду до 10 минут…"
   deadline=$((SECONDS + 600))
   while [ -z "$chat" ]; do
-    [ "$SECONDS" -lt "$deadline" ] || die "сообщение боту так и не пришло; запустите команду ещё раз"
+    [ "$SECONDS" -lt "$deadline" ] || die "сообщение с кодом так и не пришло; запустите команду ещё раз"
     tg getUpdates "$(jq -nc --argjson o "$offset" '{offset: $o, timeout: 20, allowed_updates: ["message"]}')"
     case "$TG_CODE" in
       200) ;;
@@ -753,10 +765,12 @@ cmd_telegram_setup() {
       *) sleep 3; continue ;;
     esac
     offset="$(jq -r --argjson o "$offset" '[.result[].update_id] | max | if . == null then $o else . + 1 end' <<<"$TG_RESP")"
-    upd="$(jq -c '[.result[] | select(.message.chat.id != null)] | last // empty' <<<"$TG_RESP")"
+    upd="$(jq -c --arg c "$code" '[.result[] | select(.message.chat.id != null and ((.message.text // "") | contains($c)))] | last // empty' <<<"$TG_RESP")"
     if [ -n "$upd" ]; then
       chat="$(jq -r '.message.chat.id' <<<"$upd")"
       who="$(jq -r '.message.chat | .title // ([.first_name, .last_name, (if .username then "@" + .username else null end)] | map(select(. != null)) | join(" "))' <<<"$upd")"
+    elif [ "$(jq '[.result[] | select(.message.chat.id != null)] | length' <<<"$TG_RESP")" != "0" ]; then
+      echo "Пришло сообщение без кода — пропускаю. Откройте ссылку выше или отправьте боту код $code"
     fi
   done
   [[ "$chat" =~ ^-?[0-9]{1,20}$ ]] || die "странный номер чата: $chat"
@@ -819,7 +833,7 @@ gh_get() { # URL FILE [ACCEPT] [SECONDS]; sets GH_CODE. The token goes to curl
 cmd_publish_apk() {
   local tag="${RELEASE_TAG:-build-claude-compassionate-mayer-6jph8m}" repo="${GITHUB_REPO:-klausms17/vpn}"
   local gh="${GITHUB_API:-https://api.github.com}" quiet=0
-  local apk apk_url sums_url ver code sha cur_code=0 cur_sha="" cur_apk="" got staging f
+  local apk apk_url sums_url ver code sha cur_code=0 cur_sha="" cur_apk="" got staging
   while [ $# -gt 0 ]; do
     case "$1" in
       --tag) tag="${2:-}"; shift 2 ;;
@@ -848,6 +862,14 @@ cmd_publish_apk() {
     000) die "нет связи с $gh" ;;
     *) die "GitHub ответил $GH_CODE" ;;
   esac
+  # CI marks builds signed with a throwaway key (no signing key in its
+  # secrets): every one has another signature, so Android refuses to put
+  # it over the installed app. Friends are not offered such builds.
+  if jq -e '(.name // "") | contains("временная подпись")' "$TMPD/release.json" >/dev/null &&
+    [ "${ALLOW_TEMP_KEY:-0}" != "1" ]; then
+    [ "$quiet" = "1" ] && return 0
+    die "сборка в релизе $tag подписана временным ключом: приложения знакомых не смогут на неё обновиться. Добавьте постоянный ключ подписи (инструкция, раздел 9) и дождитесь новой сборки. Выложить всё равно: ALLOW_TEMP_KEY=1 klaus-panel publish-apk"
+  fi
   apk="$(jq -r 'first(.assets[]? | select(.name | test("^KlausVPN-[0-9A-Za-z._-]+\\.apk$")) | .name) // empty' "$TMPD/release.json")"
   apk_url="$(jq -r --arg n "$apk" 'first(.assets[]? | select(.name == $n) | .url) // empty' "$TMPD/release.json")"
   sums_url="$(jq -r 'first(.assets[]? | select(.name == "SHA256SUMS.txt") | .url) // empty' "$TMPD/release.json")"
@@ -890,24 +912,27 @@ cmd_publish_apk() {
     rm -rf "$staging"
     die "контрольная сумма $apk не совпала с SHA256SUMS.txt: файл повреждён или подменён. Ничего не опубликовано"
   fi
-  # The versioned file first, then the fixed name, then version.json: it
-  # never names a file that is not there yet.
+  # The versioned file first, then the fixed name, then the page's
+  # download button, then version.json: it never names a file that is not
+  # there yet, and it marks the publishing as done only when everything
+  # else is (if the panel is down, the next run does it all again).
   chmod 644 "$staging/$apk"
   mv -f "$staging/$apk" "$APP_DIR/$apk"
   ln -f "$APP_DIR/$apk" "$staging/KlausVPN.apk"
   mv -f "$staging/KlausVPN.apk" "$APP_DIR/KlausVPN.apk"
+  setup_subpage
   jq -n --argjson c "$code" --arg n "$ver" --arg a "https://$SUB_DOMAIN/app/$apk" --arg s "$sha" \
     '{versionCode: $c, versionName: $n, apk: $a, sha256: $s}' > "$staging/version.json"
   chmod 644 "$staging/version.json"
   mv -f "$staging/version.json" "$APP_DIR/version.json"
   rm -rf "$staging"
-  # Older builds go, except the previous one (a download may be running).
-  for f in "$APP_DIR"/KlausVPN-*.apk; do
-    [ -e "$f" ] || continue
-    case "${f##*/}" in "$apk" | "$cur_apk") ;; *) rm -f "$f" ;; esac
-  done
-  # The subscription page's download button appears with the first APK.
-  setup_subpage
+  # An app shows the update it found for up to 12 hours before it checks
+  # again, so a replaced build stays 13 hours (its file's time says when
+  # it was replaced), then goes.
+  if [[ "$cur_apk" =~ ^KlausVPN-[0-9A-Za-z._-]+\.apk$ ]] && [ "$cur_apk" != "$apk" ] && [ -f "$APP_DIR/$cur_apk" ]; then
+    touch "$APP_DIR/$cur_apk"
+  fi
+  find "$APP_DIR" -maxdepth 1 -type f -name 'KlausVPN-*.apk' ! -name "$apk" -mmin +780 -delete
   note "Опубликована версия $ver: https://$SUB_DOMAIN/app/KlausVPN.apk (приложения знакомых предложат обновиться)"
 }
 

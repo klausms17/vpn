@@ -110,4 +110,25 @@ class BlockReportTest {
         assertTrue(t.claim(BlockReport.serverKey("nl.example.com", 8443), now + 60_000))
         assertTrue(t.claim(key, now + BlockReport.THROTTLE_MS))
     }
+
+    @Test
+    fun aReportThatDidNotGetThroughMayBeSentAgain() {
+        val t = ReportThrottle(BlockReport.THROTTLE_MS)
+        val key = BlockReport.serverKey("nl.example.com", 443)
+        assertTrue(t.claim(key, 1_000L))
+        t.release(key)
+        assertTrue(t.claim(key, 2_000L))
+        assertFalse(t.claim(key, 3_000L))
+    }
+
+    @Test
+    fun theCoresHttpErrorsGiveTheirStatus() {
+        assertEquals(403, BlockReport.httpStatus("HTTP 403 Forbidden"))
+        assertEquals(503, BlockReport.httpStatus("HTTP 503 Service Unavailable"))
+        assertEquals(502, BlockReport.httpStatus("HTTP 502"))
+        assertNull(BlockReport.httpStatus("dial tcp: i/o timeout"))
+        assertNull(BlockReport.httpStatus("HTTP/2 stream error"))
+        assertNull(BlockReport.httpStatus("HTTP 50"))
+        assertNull(BlockReport.httpStatus(null))
+    }
 }

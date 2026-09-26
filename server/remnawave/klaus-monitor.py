@@ -17,8 +17,9 @@ REPORT_WINDOW_MIN minutes, one Russian alert goes to Telegram, then that
 server is quiet for REPORT_COOLDOWN_MIN minutes.
 
 Privacy: the client's IP is never logged or stored (requests are not logged
-at all), subscription ids live only in memory for the report window and are
-never logged or sent anywhere but to the panel's own API.
+at all). Subscription ids stay in memory (reports for the report window, the
+panel's list of active ones to check reports against) and are never logged
+or sent anywhere.
 
 Settings (environment, written to klaus-monitor.env by klaus-panel):
 PANEL_URL, PANEL_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
@@ -27,6 +28,7 @@ RATE_LIMIT_PER_HOUR, LISTEN_PORT.
 """
 
 import collections
+import http.client
 import http.server
 import json
 import os
@@ -58,13 +60,19 @@ COOLDOWN = env_int("REPORT_COOLDOWN_MIN", 180, 1, 7 * 24 * 60) * 60
 RATE_LIMIT = env_int("RATE_LIMIT_PER_HOUR", 30, 1, 10000)
 PORT = env_int("LISTEN_PORT", 8080, 1, 65535)
 
-KNOWN_TTL = 10 * 60  # how long a panel answer about a subscription is kept
+# The panel's list of active subscriptions is fetched whole, so an id it
+# does not know costs nothing: random ids cannot flood the panel or crowd
+# out real friends.
+ACTIVE_TTL = 10 * 60  # how long the list is trusted
+REFRESH_GAP = 60  # an unknown id fetches it again at most this often
+PAGE_SIZE = 500
+MAX_USERS = 100000
 HOSTS_TTL = 60  # the panel's server list
-LOOKUPS_PER_MIN = 60  # panel lookups of new ids: random ids cannot flood it
 MAX_TRACKED = 20000  # entries per table, whatever happens
 
 SHORT_UUID_RE = re.compile(r"^[A-Za-z0-9_-]{6,64}$")
 HOST_RE = re.compile(r"^[A-Za-z0-9.:\[\]_-]{1,253}$")
+PORT_RE = re.compile(r"^[0-9]{1,5}$")
 PROTO_RE = re.compile(r"^[A-Za-z0-9_-]{0,20}$")
 VERSION_RE = re.compile(r"^[A-Za-z0-9._+-]{0,40}$")
 
@@ -93,8 +101,17 @@ def panel_get(path):
         if e.code == 404:
             return None
         raise PanelError("panel API: HTTP %d" % e.code) from None
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as e:
         raise PanelError("panel API: %s" % type(e).__name__) from None
+
+
+def panel_response(path):
+    """The "response" object of a panel API answer; PanelError on anything else."""
+    data = panel_get(path)
+    response = data.get("response") if isinstance(data, dict) else None
+    if response is None:
+        raise PanelError("panel API: unexpected answer")
+    return response
 
 
 def telegram_send(text):
@@ -112,7 +129,7 @@ def telegram_send(text):
     except urllib.error.HTTPError as e:
         # Never the URL: it holds the bot token.
         log("telegram: HTTP %d" % e.code)
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, AttributeError) as e:
         log("telegram: %s" % type(e).__name__)
     return False
 
@@ -144,8 +161,10 @@ def duration(seconds):
 class State:
     def __init__(self):
         self.lock = threading.Lock()
-        self.known = {}  # shortUuid -> (is an active subscription, expires)
-        self.lookups = collections.deque()  # times of panel lookups, last minute
+        self.refresh = threading.Lock()  # one fetch of the user list at a time
+        self.active = frozenset()  # shortUuids of the panel's ACTIVE users
+        self.active_at = -ACTIVE_TTL  # when that list was fetched
+        self.tried_at = -REFRESH_GAP  # the last attempt, even a failed one
         self.rate = {}  # shortUuid -> deque of report times, last hour
         self.reports = {}  # (host, port) -> {shortUuid: (time, network label)}
         self.cooldown = {}  # (host, port) -> quiet until
@@ -153,10 +172,9 @@ class State:
         self.purged = time.monotonic()
 
     def purge(self, now):
-        if now - self.purged < 60 and all(len(t) < MAX_TRACKED for t in (self.known, self.rate, self.reports)):
+        if now - self.purged < 60 and all(len(t) < MAX_TRACKED for t in (self.rate, self.reports)):
             return
         self.purged = now
-        self.known = {s: v for s, v in self.known.items() if v[1] > now}
         for s in list(self.rate):
             q = self.rate[s]
             while q and q[0] <= now - 3600:
@@ -170,9 +188,7 @@ class State:
             else:
                 del self.reports[key]
         self.cooldown = {k: t for k, t in self.cooldown.items() if t > now}
-        # Last resort against a flood of distinct ids: forget, never grow.
-        if len(self.known) >= MAX_TRACKED:
-            self.known.clear()
+        # Last resort: forget, never grow.
         if len(self.rate) >= MAX_TRACKED:
             self.rate.clear()
         if len(self.reports) >= MAX_TRACKED:
@@ -182,29 +198,45 @@ class State:
 STATE = State()
 
 
+def active_subscriptions():
+    """The short ids of every ACTIVE user, from all pages of the panel's user list."""
+    ids, start = set(), 0
+    while True:
+        page = panel_response("/api/users?start=%d&size=%d" % (start, PAGE_SIZE))
+        users = page.get("users") if isinstance(page, dict) else None
+        total = page.get("total") if isinstance(page, dict) else None
+        if not isinstance(users, list) or not isinstance(total, int):
+            raise PanelError("panel API: unexpected user list")
+        for user in users:
+            # A disabled or expired friend cannot use any server anyway:
+            # his failures say nothing about blocking.
+            if isinstance(user, dict) and user.get("status") == "ACTIVE" and isinstance(user.get("shortUuid"), str):
+                ids.add(user["shortUuid"])
+        start += PAGE_SIZE
+        if not users or start >= total or start >= MAX_USERS:
+            return frozenset(ids)
+
+
 def subscription_ok(s):
     """True/False, or None when the panel cannot be asked right now."""
-    now = time.monotonic()
-    with STATE.lock:
-        cached = STATE.known.get(s)
-        if cached and cached[1] > now:
-            return cached[0]
-        while STATE.lookups and STATE.lookups[0] <= now - 60:
-            STATE.lookups.popleft()
-        if len(STATE.lookups) >= LOOKUPS_PER_MIN:
+    # Requests wait here while one of them fetches the list, then use it.
+    with STATE.refresh:
+        now = time.monotonic()
+        fresh = now - STATE.active_at < ACTIVE_TTL
+        if fresh and s in STATE.active:
+            return True
+        # Not in the list: a friend added since, or a made-up id. The list
+        # is fetched again at most once a minute, whatever arrives.
+        if now - STATE.tried_at < REFRESH_GAP:
+            return False if fresh else None
+        STATE.tried_at = now
+        try:
+            active = active_subscriptions()
+        except PanelError as e:
+            log(str(e))
             return None
-        STATE.lookups.append(now)
-    try:
-        user = panel_get("/api/users/by-short-uuid/" + urllib.parse.quote(s, safe=""))
-    except PanelError as e:
-        log(str(e))
-        return None
-    # A disabled or expired friend cannot use any server anyway: his
-    # failures say nothing about blocking.
-    ok = bool(user) and (user.get("response") or {}).get("status") == "ACTIVE"
-    with STATE.lock:
-        STATE.known[s] = (ok, time.monotonic() + KNOWN_TTL)
-    return ok
+        STATE.active, STATE.active_at = active, time.monotonic()
+        return s in active
 
 
 def panel_hosts():
@@ -213,8 +245,10 @@ def panel_hosts():
         fetched, hosts = STATE.hosts
         if now - fetched < HOSTS_TTL:
             return hosts
-    data = panel_get("/api/hosts") or {}
-    hosts = data.get("response") or []
+    hosts = panel_response("/api/hosts")
+    if not isinstance(hosts, list):
+        raise PanelError("panel API: unexpected host list")
+    hosts = [h for h in hosts if isinstance(h, dict)]
     with STATE.lock:
         STATE.hosts = (time.monotonic(), hosts)
     return hosts
@@ -237,8 +271,11 @@ def find_host(h, p):
 def alert_text(host, h, p, labels):
     node_names, state = [], "unknown"
     try:
-        nodes = {n.get("uuid"): n for n in (panel_get("/api/nodes") or {}).get("response") or []}
-        linked = [nodes[u] for u in host.get("nodes") or [] if u in nodes]
+        listed = panel_response("/api/nodes")
+        if not isinstance(listed, list):
+            raise PanelError("panel API: unexpected node list")
+        nodes = {n.get("uuid"): n for n in listed if isinstance(n, dict)}
+        linked = [nodes[u] for u in host.get("nodes") or [] if isinstance(u, str) and u in nodes]
         online = [n for n in linked if n.get("isConnected") and not n.get("isDisabled")]
         node_names = [n.get("name") for n in (online or linked) if n.get("name")]
         if online:
@@ -270,13 +307,16 @@ def alert_text(host, h, p, labels):
 
 
 def send_alert(key, host, labels):
-    name, text = alert_text(host, key[0], key[1], labels)
-    if not (TG_TOKEN and TG_CHAT):
-        log("alert for «%s» (%d people), Telegram is not set up: klaus-panel telegram-setup" % (name, len(labels)))
-        return
-    if telegram_send(text):
-        log("alert sent: «%s», %d people" % (name, len(labels)))
-        return
+    try:
+        name, text = alert_text(host, key[0], key[1], labels)
+        if not (TG_TOKEN and TG_CHAT):
+            log("alert for «%s» (%d people), Telegram is not set up: klaus-panel telegram-setup" % (name, len(labels)))
+            return
+        if telegram_send(text):
+            log("alert sent: «%s», %d people" % (name, len(labels)))
+            return
+    except Exception as e:  # whatever it was, the alert must not stay muted
+        log("alert failed: %s" % type(e).__name__)
     # Not delivered: the next report may try again.
     with STATE.lock:
         STATE.cooldown.pop(key, None)
@@ -289,7 +329,7 @@ def handle_report(query):
         return values[0].strip()
 
     s, h, p, k, n, o, v = (one(x) for x in "shpknov")
-    if not (SHORT_UUID_RE.match(s) and HOST_RE.match(h) and p.isdigit() and 0 < int(p) < 65536
+    if not (SHORT_UUID_RE.match(s) and HOST_RE.match(h) and PORT_RE.match(p) and 0 < int(p) < 65536
             and PROTO_RE.match(k) and VERSION_RE.match(v)):
         return 400, {"ok": False}
     known = subscription_ok(s)
@@ -355,7 +395,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if len(query) > 2048:
                 self.reply(400, {"ok": False})
                 return
-            self.reply(*handle_report(urllib.parse.parse_qs(query)))
+            try:
+                status, body = handle_report(urllib.parse.parse_qs(query))
+            except Exception as e:
+                # An answer all the same: the app then tries again later.
+                log("report failed: %s" % type(e).__name__)
+                status, body = 500, {"ok": False}
+            self.reply(status, body)
         else:
             self.reply(404, {"ok": False})
 

@@ -216,7 +216,7 @@ step "Mock Telegram and GitHub APIs on :$MOCK_PORT (a fake release with KlausVPN
 APK="$WORK/KlausVPN-$APK_VERSION.apk"
 head -c 3000000 /dev/urandom > "$APK"
 python3 "$HERE/mock-apis.py" --port "$MOCK_PORT" --tg-token "$TG_BOT_TOKEN" --gh-token "$GH_TEST_TOKEN" \
-  --tag "$RELEASE" --bad-tag klaus-bad-sum --apk "$APK" > "$WORK/mock.log" 2>&1 &
+  --tag "$RELEASE" --bad-tag klaus-bad-sum --temp-tag klaus-temp-key --apk "$APK" > "$WORK/mock.log" 2>&1 &
 MOCK_PID=$!
 retry 10 mock /_mock/tg/sent -o /dev/null || fail "mock APIs did not start"
 pass "mock APIs answer"
@@ -231,7 +231,7 @@ grep -q "Готово! Панель работает" "$WORK/install-1.log" || f
 grep -Eq '^Пароль: [A-Za-z0-9]{24,}$' "$WORK/admin.txt" || fail "admin password"
 pass "panel installed, admin saved to admin.txt (600)"
 
-step "klaus-panel telegram-setup: waits for a message to the bot, takes its chat, sends a test message"
+step "klaus-panel telegram-setup: waits for the one-time code, takes its chat, sends a test message"
 # The panel's containers reach the mock on the host through the bridge.
 GW="$(docker network inspect remnawave-network -f '{{(index .IPAM.Config 0).Gateway}}')"
 TG_API="http://$GW:$MOCK_PORT"
@@ -239,15 +239,31 @@ if TELEGRAM_API_BASE="$TG_API" kp telegram-setup 123456789:AAwrong-token-0000000
   fail "a wrong bot token was accepted"
 fi
 tail -n 1 "$WORK/tg-wrong.log"
+tg_say() { # CHAT TEXT: a message to the bot
+  mock /_mock/tg/say -X POST -H 'Content-Type: application/json' \
+    -d "$(jq -nc --argjson c "$1" --arg t "$2" '{chat_id: $c, first_name: "Someone", text: $t}')" >/dev/null
+}
+STRANGER=555000111
+# Somebody found the bot before: that message waits in its queue.
+tg_say "$STRANGER" "/start"
 TELEGRAM_API_BASE="$TG_API" kp telegram-setup "$TG_BOT_TOKEN" > "$WORK/tg-setup.log" 2>&1 &
 tg_pid=$!
 sleep 4
 kill -0 "$tg_pid" 2>/dev/null || { cat "$WORK/tg-setup.log"; fail "telegram-setup did not wait for a message"; }
 grep -q "@klaus_e2e_bot" "$WORK/tg-setup.log" || fail "the bot's name is not shown"
-mock /_mock/tg/say -X POST -H 'Content-Type: application/json' -d "{\"chat_id\": $TG_CHAT, \"first_name\": \"Klaus\", \"text\": \"привет\"}" >/dev/null
+TG_CODE="$(grep -o 'klaus_e2e_bot?start=[0-9a-f]*' "$WORK/tg-setup.log" | head -n 1 | cut -d= -f2)"
+[ "${#TG_CODE}" = "12" ] || { cat "$WORK/tg-setup.log"; fail "no one-time code shown"; }
+grep -q "klaus_e2e_bot?startgroup=$TG_CODE" "$WORK/tg-setup.log" || fail "no link for a group"
+# While it waits: a message without the code, then the owner's /start with it.
+tg_say "$STRANGER" "привет"
+sleep 4
+kill -0 "$tg_pid" 2>/dev/null || { cat "$WORK/tg-setup.log"; fail "telegram-setup took a message without the code"; }
+tg_say "$TG_CHAT" "/start $TG_CODE"
 wait "$tg_pid" || { cat "$WORK/tg-setup.log"; fail "telegram-setup failed"; }
 cat "$WORK/tg-setup.log"
+grep -q "без кода" "$WORK/tg-setup.log" || fail "the message without the code was not reported"
 grep -q "($TG_CHAT)" "$WORK/tg-setup.log" || fail "chat not taken from getUpdates"
+if grep -q "$STRANGER" "$WORK/tg-setup.log" "$WORK/opt/klaus-panel.env" "$WORK/opt/.env"; then fail "a stranger's chat was taken"; fi
 mock /_mock/tg/sent | jq -c '.[] | {chat_id, text: .text[0:60]}'
 [ "$(mock /_mock/tg/sent | jq --arg c "$TG_CHAT" '[.[] | select(.chat_id == $c and (.text | startswith("Klaus VPN: оповещения включены")))] | length')" = "1" ] ||
   fail "no test message to chat $TG_CHAT"
@@ -260,7 +276,7 @@ grep -qx "TELEGRAM_CHAT_ID=$TG_CHAT" "$WORK/opt/klaus-monitor.env" || fail "moni
 [ "$(docker exec remnawave printenv TELEGRAM_NOTIFY_NODES)" = "$TG_CHAT" ] || fail "panel not recreated with the chat"
 kp telegram-test
 [ "$(sent_count "Klaus VPN: проверка оповещений")" = "1" ] || fail "telegram-test"
-pass "chat $TG_CHAT taken from getUpdates, test messages sent, panel and monitor recreated with it"
+pass "old and code-less messages ignored, chat $TG_CHAT taken from /start CODE, test messages sent, panel and monitor recreated with it"
 
 step "install-panel.sh again (must change nothing)"
 caddy_started="$(docker inspect -f '{{.State.StartedAt}}' caddy)"
@@ -431,8 +447,25 @@ if kp publish-apk --tag klaus-bad-sum > "$WORK/publish-bad.log" 2>&1; then fail 
 cat "$WORK/publish-bad.log"
 grep -q "контрольная сумма" "$WORK/publish-bad.log" || fail "wrong refusal of a bad checksum"
 if compgen -G "$WORK/opt/app/*" >/dev/null || [ -e "$WORK/opt/.app-staging" ]; then fail "the refused APK was left behind"; fi
+if kp publish-apk --tag klaus-temp-key > "$WORK/publish-temp.log" 2>&1; then fail "a build signed with the temporary key was published"; fi
+cat "$WORK/publish-temp.log"
+grep -q "временным ключом" "$WORK/publish-temp.log" || fail "wrong refusal of a temporary-key build"
+if compgen -G "$WORK/opt/app/*" >/dev/null; then fail "the temporary-key build was published"; fi
+kp publish-apk --tag klaus-temp-key --quiet || fail "the timer's run of a temporary-key build failed"
+if compgen -G "$WORK/opt/app/*" >/dev/null; then fail "the timer published a temporary-key build"; fi
+# Builds replaced earlier: one 14 hours ago goes, one 2 hours ago stays
+# (an app may still offer it).
+mkdir -p "$WORK/opt/app"
+echo old > "$WORK/opt/app/KlausVPN-1.0.10.apk"
+echo recent > "$WORK/opt/app/KlausVPN-1.0.11.apk"
+touch -d '14 hours ago' "$WORK/opt/app/KlausVPN-1.0.10.apk"
+touch -d '2 hours ago' "$WORK/opt/app/KlausVPN-1.0.11.apk"
 kp publish-apk | tee "$WORK/publish-1.log"
 grep -q "Опубликована версия $APK_VERSION" "$WORK/publish-1.log" || fail "publish-apk"
+ls "$WORK/opt/app"
+[ ! -e "$WORK/opt/app/KlausVPN-1.0.10.apk" ] || fail "a build replaced 14 hours ago was kept"
+[ -e "$WORK/opt/app/KlausVPN-1.0.11.apk" ] || fail "a build replaced 2 hours ago was deleted"
+rm -f "$WORK/opt/app/KlausVPN-1.0.11.apk"
 code="$(sub_code app/version.json)"
 cat "$WORK/last.body"; echo
 [ "$code" = "200" ] || fail "version.json not served"
@@ -460,7 +493,7 @@ sub_get "$UA_BROWSER" "https://$SUB_DOMAIN/assets/.app-config-v2.json" -b "$WORK
 jq -e --arg a "https://$SUB_DOMAIN/app/KlausVPN.apk" \
   '[.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external" and .link == $a)] | length == 1' \
   "$WORK/b2.config.json" >/dev/null || fail "the page does not show the download button"
-pass "wrong checksum refused; KlausVPN.apk, KlausVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»"
+pass "wrong checksum and temporary key refused; replaced builds kept 13 h; KlausVPN.apk, KlausVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»"
 
 step "(c) the device is recorded (the limit itself is off)"
 USER_ID="$(api "/api/users/by-username/friend_1" | jq -r '.response.id')"
@@ -566,15 +599,23 @@ for i in $(seq 1 35); do
 done
 echo "friend_5's report no. $((first429 + 1)) within an hour -> 429"
 [ "$first429" = "30" ] || fail "rate limit (30 per hour) not applied"
+# Made-up ids cost the panel nothing and never crowd out a friend.
+codes=""
+for i in $(seq 1 80); do codes="$codes $(report "random$(printf '%08d' "$i")x" wifi)"; done
+echo "80 made-up ids ->$(tr ' ' '\n' <<<"$codes" | sort | uniq -c | awk '{printf " %s×%s", $2, $1}')"
+[ -z "$(tr ' ' '\n' <<<"$codes" | grep -v '^$' | grep -vx 403)" ] || fail "a made-up id was not refused with 403"
+code="$(report "$SHORT2" mobile "Tele2")"
+echo "friend_2 right after them -> $code"
+[ "$code" = "200" ] || fail "made-up ids crowded out a real friend"
 docker logs klaus-monitor > "$WORK/monitor.log" 2>&1
 docker logs caddy > "$WORK/caddy.log" 2>&1
 cat "$WORK/monitor.log"
-for secret in "$SHORT1" "$SHORT2" "$SHORT5" "unknown${SHORT1:7}" "$SPOOFED_IP" friend_; do
+for secret in "$SHORT1" "$SHORT2" "$SHORT5" "unknown${SHORT1:7}" random0000 "$SPOOFED_IP" friend_; do
   if grep -qF "$secret" "$WORK/monitor.log" "$WORK/caddy.log"; then fail "logs contain $secret"; fi
 done
 if grep -Eq '([0-9]{1,3}\.){3}[0-9]{1,3}' "$WORK/monitor.log"; then fail "the monitor's log contains an IP address"; fi
 if grep -Eq '"(remote_ip|client_ip|uri)"' "$WORK/caddy.log"; then fail "Caddy's log keeps request addresses or links"; fi
-pass "unknown friend 403, one friend twice no alert, two friends one alert (Russian, blocking hint), cooldown, rate limit 30/h; no IPs or ids in the logs"
+pass "unknown friend 403, one friend twice no alert, two friends one alert (Russian, blocking hint), cooldown, rate limit 30/h, 80 made-up ids do not block a friend; no IPs or ids in the logs"
 
 step "backup; a restore that stops early (a .ru domain given by mistake)"
 BACKUP_DIR="$WORK/backups" kp backup
