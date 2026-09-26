@@ -18,6 +18,11 @@ android {
         targetSdk = 37
         versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
         versionName = System.getenv("VERSION_NAME") ?: "1.0.0-dev"
+
+        // One APK for every phone (Android 8+, 64- and 32-bit ARM).
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     signingConfigs {
@@ -40,15 +45,6 @@ android {
         }
     }
 
-    splits {
-        abi {
-            isEnable = true
-            reset()
-            include("arm64-v8a", "armeabi-v7a", "x86_64")
-            isUniversalApk = true
-        }
-    }
-
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -62,9 +58,10 @@ android {
 
     packaging {
         jniLibs {
-            // Keep native libraries uncompressed and page aligned in the APK:
-            // faster start and required for 16 KB page devices.
-            useLegacyPackaging = false
+            // Compressed in the APK and extracted on install: the single APK
+            // carries two copies of the core, so this halves the download.
+            // The libraries themselves are 16 KB page aligned (see CI).
+            useLegacyPackaging = true
         }
     }
 

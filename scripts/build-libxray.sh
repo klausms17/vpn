@@ -15,7 +15,7 @@ mkdir -p "$root/app/libs"
 # -checklinkname=0: some Xray dependencies use go:linkname.
 # max-page-size: 16 KB page alignment required by new Android devices.
 gomobile bind -v \
-  -target=android/arm64,android/arm,android/amd64 \
+  -target=android/arm64,android/arm \
   -androidapi 26 \
   -trimpath \
   -ldflags='-s -w -buildid= -checklinkname=0 -extldflags=-Wl,-z,max-page-size=16384' \
