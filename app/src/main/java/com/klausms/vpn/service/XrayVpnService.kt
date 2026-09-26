@@ -159,6 +159,10 @@ class XrayVpnService : VpnService() {
     /** Counts starts; a retry planned for an older one is dropped. Used in the serial queue only. */
     private var startGeneration = 0
 
+    /** The newest reconnect; older ones still queued are skipped. */
+    @Volatile
+    private var lastReconnectId = 0
+
     // ------------------------------------------------------ failover state
 
     // Changes whenever the running core changes, stops or loses its network:
@@ -278,13 +282,17 @@ class XrayVpnService : VpnService() {
             }
             ACTION_RECONNECT -> {
                 enterForeground("Переподключение…", null)
+                lastReconnectId = startId
+                AppLog.i("reconnect asked (#$startId)")
                 enqueue {
-                    // A late "apply new settings" must not switch on a VPN
-                    // the user has turned off meanwhile.
-                    if (config == null && !RuntimeState.shouldRun(this)) {
-                        withContext(Dispatchers.Main) { stopIfLatest(startId) }
-                    } else {
-                        startTunnel(startId, userRequested = true)
+                    when {
+                        // A newer reconnect follows and brings the newest settings.
+                        startId != lastReconnectId -> Unit
+                        // A late "apply new settings" must not switch on a
+                        // VPN the user has turned off meanwhile.
+                        config == null && !RuntimeState.shouldRun(this) ->
+                            withContext(Dispatchers.Main) { stopIfLatest(startId) }
+                        else -> startTunnel(startId, userRequested = true)
                     }
                 }
             }
@@ -302,6 +310,7 @@ class XrayVpnService : VpnService() {
                     stopSelf()
                     return START_NOT_STICKY
                 }
+                if (intent == null) AppLog.i("restarted by the system after the process ended")
                 enterForeground("Подключение…", null)
                 // A null intent is our own restart after the process died;
                 // everything else (the app, tile, widget, Always-on) is a
@@ -324,7 +333,7 @@ class XrayVpnService : VpnService() {
     override fun onRevoke() {
         // Another VPN took over or the user revoked permission in settings.
         AppLog.i("VPN permission revoked by the system (another VPN app or the system settings)")
-        disconnect(userInitiated = true, lastStartId)
+        disconnect(userInitiated = true, lastStartId, message = "VPN отключила система или другое VPN-приложение")
     }
 
     override fun onDestroy() {
@@ -376,14 +385,20 @@ class XrayVpnService : VpnService() {
         val before = VpnStatusHolder.status.value
         // From here on the new interface has replaced the old one.
         var swapped = false
-        setStatus(VpnStatus(VpnState.CONNECTING, profileName = before.profileName))
+        // New settings for a running tunnel: it keeps working meanwhile, so
+        // it still shows as on (a tap on a "connecting" button would cancel).
+        if (restarting && before.state == VpnState.CONNECTED) {
+            setStatus(before.copy(message = "Применяем изменения…"))
+        } else {
+            setStatus(VpnStatus(VpnState.CONNECTING, profileName = before.profileName))
+        }
         try {
             val profiles = Stores.profiles(this).read()
             val profile = profileOverride?.let { id -> profiles.profiles.firstOrNull { it.id == id } }
                 ?: profiles.selected
                 ?: throw VpnStartException("Не выбран сервер. Добавьте ключ в приложении.")
             val settings = Stores.settings(this).read()
-            setStatus(VpnStatus(VpnState.CONNECTING, profile.id, profile.name))
+            if (VpnStatusHolder.status.value.state == VpnState.CONNECTING) setStatus(VpnStatus(VpnState.CONNECTING, profile.id, profile.name))
 
             GeoFiles.ensureInstalled(this)
             XrayCore.init(this)
@@ -439,7 +454,10 @@ class XrayVpnService : VpnService() {
             withContext(Dispatchers.Main) { startNetworkMonitor() }
             // Only a server whose core came up becomes the selection.
             if (profileOverride != null && failedId != null) saveSwitch(failedId, profile.id, expectedSelection)
-            setStatus(VpnStatus(VpnState.CONNECTED, profile.id, profile.name, message = notice, connectedSince = System.currentTimeMillis()))
+            // The session timer goes on when only the settings changed.
+            val since = before.connectedSince.takeIf { restarting && it > 0 && before.profileId == profile.id }
+                ?: System.currentTimeMillis()
+            setStatus(VpnStatus(VpnState.CONNECTED, profile.id, profile.name, message = notice, connectedSince = since))
             Notifications.clearError(this)
             AppLog.i("tunnel up: ${profile.protocol}/${profile.network}/${profile.security}, mode ${settings.mode.core}")
             publishConnected()
@@ -606,7 +624,8 @@ class XrayVpnService : VpnService() {
 
     // ------------------------------------------------------------------ stop
 
-    private fun disconnect(userInitiated: Boolean, startId: Int) {
+    /** [message]: why, when it was not the user (shown under "Отключено"). */
+    private fun disconnect(userInitiated: Boolean, startId: Int, message: String? = null) {
         if (userInitiated) RuntimeState.setShouldRun(this, false)
         setStatus(VpnStatus(VpnState.DISCONNECTING, profileName = VpnStatusHolder.status.value.profileName))
         enqueue {
@@ -616,7 +635,7 @@ class XrayVpnService : VpnService() {
                 setStatus(VpnStatus(VpnState.DISCONNECTING, profileName = VpnStatusHolder.status.value.profileName))
             }
             stopCore()
-            setStatus(VpnStatus(VpnState.DISCONNECTED))
+            setStatus(VpnStatus(VpnState.DISCONNECTED, message = message))
             AppLog.i("tunnel down")
             withContext(Dispatchers.Main) { stopIfLatest(startId) }
         }

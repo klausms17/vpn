@@ -3,6 +3,10 @@ package libxray
 import (
 	"fmt"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -92,5 +96,33 @@ func TestStopEndsRunningCallsAndStartsAgain(t *testing.T) {
 	}
 	if err := c.Stop(); err != nil {
 		t.Fatalf("second stop: %v", err)
+	}
+}
+
+// A panic that ends the process (as in a background goroutine of the
+// core) leaves its report in the crash log.
+func TestCrashLogKeepsTheReport(t *testing.T) {
+	if path := os.Getenv("KLAUS_CRASH_CHILD"); path != "" {
+		if err := SetCrashLog(path); err != nil {
+			fmt.Fprintln(os.Stderr, "SetCrashLog:", err)
+			os.Exit(3)
+		}
+		go func() { panic("boom in a core goroutine") }()
+		time.Sleep(5 * time.Second)
+		os.Exit(0)
+	}
+	path := filepath.Join(t.TempDir(), "go-crash.log")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestCrashLogKeepsTheReport$")
+	cmd.Env = append(os.Environ(), "KLAUS_CRASH_CHILD="+path)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("the child did not crash: %s", out)
+	}
+	data, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if !strings.Contains(string(data), "boom in a core goroutine") {
+		t.Fatalf("crash log lacks the panic: %q", data)
 	}
 }

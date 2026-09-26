@@ -4,10 +4,12 @@ import android.content.Context
 import com.klausms.vpn.BuildConfig
 import com.klausms.vpn.data.AppJson
 import com.klausms.vpn.data.GeoFiles
+import com.klausms.vpn.util.AppLog
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import libxray.Controller
 import libxray.Libxray
+import java.io.File
 
 /** A server as parsed by the core (see libxray/share.go Profile). */
 @Serializable
@@ -80,6 +82,12 @@ object XrayCore {
         synchronized(this) {
             if (!initialized) {
                 Libxray.initEnv(GeoFiles.activeDir(context).absolutePath)
+                // A crash of the core then leaves its report on the Logs screen.
+                try {
+                    Libxray.setCrashLog(File(AppLog.logDir(context), "go-crash.log").absolutePath)
+                } catch (e: Exception) {
+                    AppLog.w("crash log", e)
+                }
                 initialized = true
             }
         }

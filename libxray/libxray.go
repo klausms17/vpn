@@ -55,6 +55,38 @@ func InitEnv(assetDir string) {
 	_ = os.Setenv(envCert, assetDir)
 }
 
+// crashLog stays open for the life of the process: the runtime writes a
+// fatal error there as it dies.
+var crashLog struct {
+	sync.Mutex
+	file *os.File
+}
+
+// SetCrashLog makes a Go panic or fatal error that ends the process also
+// write its report to path (appended; kept to the last ~256 KB), so a VPN
+// that stopped by itself leaves a trace the user can send. Call once per
+// process.
+func SetCrashLog(path string) error {
+	crashLog.Lock()
+	defer crashLog.Unlock()
+	if crashLog.file != nil {
+		return nil
+	}
+	if st, err := os.Stat(path); err == nil && st.Size() > 256<<10 {
+		_ = os.Rename(path, path+".1")
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := debug.SetCrashOutput(f, debug.CrashOptions{}); err != nil {
+		f.Close()
+		return err
+	}
+	crashLog.file = f
+	return nil
+}
+
 // Version returns the Xray-core version compiled into the library.
 func Version() string {
 	return core.Version()

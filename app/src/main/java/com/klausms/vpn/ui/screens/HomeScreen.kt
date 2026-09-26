@@ -378,6 +378,8 @@ private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, now: Long
         val subline = when {
             state == VpnState.ERROR && !message.isNullOrBlank() -> message
             notice != null -> notice
+            // Switched off by the system or another VPN app, not by the user.
+            state == VpnState.DISCONNECTED && !message.isNullOrBlank() && hero != HeroState.NO_SERVER -> message
             hero == HeroState.NO_SERVER -> "Добавьте сервер, чтобы подключиться"
             state == VpnState.CONNECTED -> listOfNotNull(place, "соединение защищено").joinToString(" · ")
             state == VpnState.CONNECTING -> "Устанавливаем защищённое соединение…"

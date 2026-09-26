@@ -39,6 +39,7 @@ private fun readLogs(context: Context): String {
         "Приложение (VPN)" to listOf("app-vpn.log.1", "app-vpn.log"),
         "Приложение (интерфейс)" to listOf("app-ui.log.1", "app-ui.log"),
         "Ядро Xray" to listOf("xray.log.1", "xray.log"),
+        "Сбои ядра" to listOf("go-crash.log.1", "go-crash.log"),
     )
     return buildString {
         for ((title, files) in sections) {
