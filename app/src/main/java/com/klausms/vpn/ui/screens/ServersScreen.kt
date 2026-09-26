@@ -371,7 +371,7 @@ private fun SubscriptionHeader(sub: Subscription, onRefresh: () -> Unit, onDelet
                 Text(
                     usage?.text ?: "Подписка",
                     style = IosType.subhead,
-                    color = kc.label,
+                    color = if (usage?.expired == true) kc.red else kc.label,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -427,7 +427,15 @@ private fun RefreshButton(onClick: () -> Unit) {
     }
 }
 
-private class Usage(val text: String, val fraction: Float?)
+private class Usage(val text: String, val fraction: Float?, val expired: Boolean = false)
+
+/** "25 октября", with the year when it is not this one. */
+private fun russianDate(millis: Long): String {
+    val ru = Locale.forLanguageTag("ru")
+    val year = SimpleDateFormat("yyyy", ru)
+    val sameYear = year.format(Date(millis)) == year.format(Date())
+    return SimpleDateFormat(if (sameYear) "d MMMM" else "d MMMM yyyy", ru).format(Date(millis))
+}
 
 /** "upload=1; download=2; total=3; expire=4" -> "12,4 ГБ из 100 ГБ · до 25.10.2026". */
 private fun parseUserInfo(raw: String?): Usage? {
@@ -443,9 +451,10 @@ private fun parseUserInfo(raw: String?): Usage? {
     val expire = values["expire"] ?: 0
     val parts = mutableListOf<String>()
     if (total > 0) parts += "${formatBytes(used)} из ${formatBytes(total)}" else if (used > 0) parts += formatBytes(used)
-    if (expire > 0) parts += "до " + SimpleDateFormat("dd.MM.yyyy", Locale.US).format(Date(expire * 1000))
+    val expired = expire > 0 && expire * 1000 < System.currentTimeMillis()
+    if (expire > 0) parts += (if (expired) "истекла " else "до ") + russianDate(expire * 1000)
     if (parts.isEmpty()) return null
-    return Usage(parts.joinToString(" · "), if (total > 0) (used.toDouble() / total).toFloat() else null)
+    return Usage(parts.joinToString(" · "), if (total > 0) (used.toDouble() / total).toFloat() else null, expired)
 }
 
 @Composable

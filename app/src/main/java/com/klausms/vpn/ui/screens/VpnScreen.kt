@@ -210,7 +210,9 @@ private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, now: Long
     val showTimer = state == VpnState.CONNECTED && since > 0
     val timerHeight by animateDpAsState(if (showTimer) 54.dp else 0.dp, tween(450), label = "timer")
     Column(
-        Modifier.padding(top = 14.dp).height(108.dp).fillMaxWidth().padding(horizontal = 24.dp),
+        // At least the connected height, so the card does not jump between
+        // states; taller with big system fonts instead of cutting text.
+        Modifier.padding(top = 14.dp).heightIn(min = 108.dp).fillMaxWidth().padding(horizontal = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(

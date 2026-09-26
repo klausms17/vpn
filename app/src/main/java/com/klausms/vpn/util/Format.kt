@@ -4,14 +4,26 @@ import java.util.Locale
 
 fun formatSpeed(bytesPerSecond: Long): String = formatBytes(bytesPerSecond) + "/с"
 
+/** "512 Б", "12,4 ГБ", "100 ГБ": Russian decimal comma, no trailing ",0". */
 fun formatBytes(bytes: Long): String {
     val b = bytes.coerceAtLeast(0)
+    val k = 1024.0
     return when {
         b < 1024 -> "$b Б"
-        b < 1024 * 1024 -> String.format(Locale.US, "%.1f КБ", b / 1024.0)
-        b < 1024L * 1024 * 1024 -> String.format(Locale.US, "%.1f МБ", b / (1024.0 * 1024))
-        else -> String.format(Locale.US, "%.2f ГБ", b / (1024.0 * 1024 * 1024))
+        b < k * k -> amount(b / k, "КБ")
+        b < k * k * k -> amount(b / (k * k), "МБ")
+        b < k * k * k * k -> amount(b / (k * k * k), "ГБ")
+        else -> amount(b / (k * k * k * k), "ТБ")
     }
+}
+
+private fun amount(value: Double, unit: String): String {
+    val number = if (value >= 100) {
+        Math.round(value).toString()
+    } else {
+        String.format(Locale.US, "%.1f", value).removeSuffix(".0").replace('.', ',')
+    }
+    return "$number $unit"
 }
 
 fun formatDuration(seconds: Long): String {

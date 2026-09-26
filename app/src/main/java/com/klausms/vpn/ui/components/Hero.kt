@@ -103,7 +103,7 @@ fun HeroBackdrop(state: HeroState, heroCenterY: Float, pin: Offset?, modifier: M
     val connecting = state == HeroState.CONNECTING
     val green by animateFloatAsState(if (on) 1f else 0f, tween(700), label = "green")
     val amber by animateFloatAsState(if (connecting) 1f else 0f, tween(500), label = "amber")
-    val mapInk by animateColorAsState(if (on) Color(0x1A30D158) else Color(0x0FEBEBF5), tween(700), label = "mapInk")
+    val mapInk by animateColorAsState(if (on) Color(0x1A30D158) else Color(0x17EBEBF5), tween(700), label = "mapInk")
     val pinInk by animateColorAsState(
         when {
             on -> kc.green
