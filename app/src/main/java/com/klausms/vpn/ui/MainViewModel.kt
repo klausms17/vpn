@@ -2,20 +2,20 @@ package com.klausms.vpn.ui
 
 import android.app.Application
 import androidx.core.content.edit
-import androidx.core.net.toUri
-import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.klausms.vpn.App
 import com.klausms.vpn.core.ParsedProfile
-import com.klausms.vpn.core.SubscriptionParseResult
 import com.klausms.vpn.core.XrayCore
 import com.klausms.vpn.core.userMessage
 import com.klausms.vpn.data.AppSettings
+import com.klausms.vpn.data.Downloader
 import com.klausms.vpn.data.GeoFiles
 import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
-import com.klausms.vpn.data.Subscription
+import com.klausms.vpn.data.SubscriptionUpdater
+import com.klausms.vpn.data.pinWhereNeeded
+import com.klausms.vpn.data.toStored
 import com.klausms.vpn.service.VpnCommands
 import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.util.AppLog
@@ -33,7 +33,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
-import java.util.UUID
 
 sealed interface PingResult {
     data object Testing : PingResult
@@ -74,6 +73,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val messages = _messages.receiveAsFlow()
 
     private var reconnectJob: Job? = null
+    private var staleJob: Job? = null
+
+    private val updater = SubscriptionUpdater(app, repo)
+
+    /**
+     * Direct first (panels are usually reachable); then through the
+     * selected server in case the panel is blocked.
+     */
+    private val downloader = Downloader { url, headers ->
+        try {
+            XrayCore.fetch(url, null, headers)
+        } catch (direct: Exception) {
+            val via = profiles.value.selected?.outbounds ?: throw direct
+            AppLog.w("subscription direct download failed, retrying via proxy", direct)
+            XrayCore.fetch(url, via, headers)
+        }
+    }
 
     /**
      * Saving can fail (storage full). Report it instead of crashing; the
@@ -96,17 +112,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 AppLog.e("startup", e)
             }
         }
-        refreshStaleSubscriptions()
+        // The VPN process changed the servers (failover, subscription refresh).
+        viewModelScope.launch { vpn.profilesChanged.collect { repo.reload() } }
     }
 
     /**
-     * Subscriptions are refreshed when the app is opened and they are older
-     * than a day: never in the background, so no battery is spent on it.
+     * The app came on screen (also back from Recents): picks up what the VPN
+     * process saved meanwhile, then refreshes old subscriptions.
      */
-    private fun refreshStaleSubscriptions() = viewModelScope.launch {
+    fun onAppVisible() = viewModelScope.launch {
+        repo.reload()
+        if (staleJob?.isActive == true) return@launch
+        staleJob = viewModelScope.launch { refreshStaleSubscriptions() }
+    }
+
+    /**
+     * Subscriptions are refreshed when the app is opened and the last fresh
+     * list is older than an hour: never in the background, so no battery is
+     * spent on it.
+     */
+    private suspend fun refreshStaleSubscriptions() {
         val now = System.currentTimeMillis()
         for (sub in profiles.value.subscriptions) {
-            if (now - sub.updatedAt > 24 * 60 * 60 * 1000L) refreshSubscription(sub.id, quiet = true).join()
+            if (SubscriptionUpdater.isStale(sub, now)) refreshSubscription(sub.id, quiet = true).join()
         }
     }
 
@@ -251,130 +279,46 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    /** Links asking to skip TLS verification get their certificate pinned. */
-    private suspend fun pinWhereNeeded(list: List<ParsedProfile>, errors: MutableList<String>): List<ParsedProfile> =
-        withContext(Dispatchers.IO) {
-            list.mapNotNull { p ->
-                if (!p.needsCertPin) return@mapNotNull p
-                try {
-                    XrayCore.pinCertificate(p)
-                } catch (e: Exception) {
-                    errors += "${p.name}: не удалось получить сертификат сервера (${e.userMessage()})"
-                    null
-                }
-            }
-        }
-
-    private fun ParsedProfile.toStored(subscriptionId: String?) = StoredProfile(
-        id = UUID.randomUUID().toString(),
-        name = name.ifBlank { address },
-        protocol = protocol,
-        address = address,
-        port = port,
-        network = network,
-        security = security,
-        link = link,
-        outbounds = outbounds,
-        subscriptionId = subscriptionId,
-        createdAt = System.currentTimeMillis(),
-    )
-
-    private suspend fun downloadSubscription(url: String): Pair<SubscriptionParseResult, libxray.FetchResult> =
-        withContext(Dispatchers.IO) {
-            // Direct first (panels are usually reachable); then through the
-            // selected server in case the panel is blocked.
-            val result = try {
-                XrayCore.fetch(url, null)
-            } catch (direct: Exception) {
-                val via = profiles.value.selected?.outbounds ?: throw direct
-                AppLog.w("subscription direct download failed, retrying via proxy", direct)
-                XrayCore.fetch(url, via)
-            }
-            XrayCore.parseSubscription(result.body) to result
-        }
-
     private suspend fun addSubscription(url: String) {
         if (profiles.value.subscriptions.any { it.url == url }) {
             message("Эта подписка уже добавлена")
             return
         }
-        val (parsed, fetched) = downloadSubscription(url)
-        val errors = parsed.errors.toMutableList()
-        val ready = pinWhereNeeded(parsed.profiles, errors)
-        val sub = Subscription(
-            id = UUID.randomUUID().toString(),
-            name = decodeTitle(fetched.profileTitle) ?: url.toUri().host ?: "Подписка",
-            url = url,
-            updatedAt = System.currentTimeMillis(),
-            userInfo = fetched.userInfo.ifBlank { null },
+        val outcome = updater.add(url, downloader)
+        checkWhitelist(outcome.servers)
+        val name = outcome.subscription.name
+        message(
+            if (outcome.applied) {
+                "Подписка «$name»: серверов ${outcome.servers.size}"
+            } else {
+                "Подписка «$name» добавлена без серверов: ${outcome.subscription.notice ?: "сервер подписки их не прислал"}"
+            },
         )
-        val stored = ready.map { it.toStored(sub.id) }
-        repo.updateProfiles { s ->
-            s.copy(
-                profiles = s.profiles + stored,
-                subscriptions = s.subscriptions + sub,
-                selectedId = s.selectedId ?: stored.firstOrNull()?.id,
-            )
-        }
-        checkWhitelist(stored)
-        message("Подписка «${sub.name}»: серверов ${stored.size}")
     }
 
+    /**
+     * [quiet]: an automatic refresh, without messages. The old servers stay
+     * when the panel refuses or fails; the reason is saved on the subscription.
+     */
     fun refreshSubscription(id: String, quiet: Boolean = false) = viewModelScope.launch(saveErrors) {
-        val sub = profiles.value.subscriptions.firstOrNull { it.id == id } ?: return@launch
+        if (profiles.value.subscriptions.none { it.id == id }) return@launch
         if (!quiet) _busy.value = "Обновление подписки…"
         try {
-            val (parsed, fetched) = downloadSubscription(sub.url)
-            val errors = parsed.errors.toMutableList()
-            val ready = pinWhereNeeded(parsed.profiles, errors)
-            val oldSelected = profiles.value.selected
-            // Servers that are still in the subscription keep their ids, so
-            // the selection, ping results and the running tunnel's identity
-            // survive a refresh.
-            val unused = profiles.value.profiles.filter { it.subscriptionId == sub.id }.toMutableList()
-            val stored = ready.map { p ->
-                val fresh = p.toStored(sub.id)
-                val match = unused.firstOrNull { it.name == fresh.name && it.address == fresh.address && it.port == fresh.port }
-                    ?: unused.firstOrNull { it.address == fresh.address && it.port == fresh.port && it.protocol == fresh.protocol }
-                if (match == null) {
-                    fresh
-                } else {
-                    unused.remove(match)
-                    fresh.copy(id = match.id, createdAt = match.createdAt)
-                }
-            }
-            val next = repo.updateProfiles { s ->
-                // Deleted while it was downloading: do not bring it back.
-                if (s.subscriptions.none { it.id == sub.id }) return@updateProfiles s
-                val keepSelection = oldSelected?.takeIf { it.subscriptionId == sub.id }?.let { old ->
-                    stored.firstOrNull { it.name == old.name && it.address == old.address && it.port == old.port }
-                        ?: stored.firstOrNull { it.address == old.address && it.port == old.port }
-                }
-                val others = s.profiles.filterNot { it.subscriptionId == sub.id }
-                val selectedId = when {
-                    oldSelected?.subscriptionId != sub.id -> s.selectedId
-                    keepSelection != null -> keepSelection.id
-                    else -> stored.firstOrNull()?.id ?: others.firstOrNull()?.id
-                }
-                s.copy(
-                    profiles = others + stored,
-                    subscriptions = s.subscriptions.map {
-                        if (it.id == sub.id) it.copy(updatedAt = System.currentTimeMillis(), userInfo = fetched.userInfo.ifBlank { null }, lastError = null) else it
+            // A manual refresh also renews pinned certificates.
+            val outcome = updater.refresh(id, downloader, runningId = status.value.profileId, repin = !quiet) ?: return@launch
+            checkWhitelist(outcome.servers)
+            if (outcome.runningChanged) reconnectIfRunning()
+            if (!quiet) {
+                message(
+                    if (outcome.applied) {
+                        "Подписка обновлена: серверов ${outcome.servers.size}"
+                    } else {
+                        outcome.subscription.notice ?: "Сервер подписки не прислал серверов, оставлены прежние"
                     },
-                    selectedId = selectedId,
                 )
             }
-            if (next.subscriptions.none { it.id == sub.id }) return@launch
-            checkWhitelist(stored)
-            if (oldSelected != null && oldSelected.subscriptionId == sub.id && next.selected?.outbounds != oldSelected.outbounds) reconnectIfRunning()
-            if (!quiet) message("Подписка обновлена: серверов ${stored.size}")
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
-            try {
-                repo.updateProfiles { s -> s.copy(subscriptions = s.subscriptions.map { if (it.id == sub.id) it.copy(lastError = e.userMessage()) else it }) }
-            } catch (w: Exception) {
-                AppLog.e("save failed", w)
-            }
             if (!quiet) message("Не удалось обновить подписку: ${e.userMessage()}")
         } finally {
             if (!quiet) _busy.value = null
@@ -394,19 +338,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (selectedWasInside) {
             if (next.selected == null) stopVpn() else reconnectIfRunning()
         }
-    }
-
-    private fun decodeTitle(raw: String?): String? {
-        val t = raw?.trim().orEmpty()
-        if (t.isEmpty()) return null
-        if (t.startsWith("base64:")) {
-            return try {
-                String(Base64.decode(t.removePrefix("base64:"), Base64.DEFAULT)).trim().ifEmpty { null }
-            } catch (_: IllegalArgumentException) {
-                null
-            }
-        }
-        return t
     }
 
     // ------------------------------------------------------------- testing

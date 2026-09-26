@@ -16,7 +16,10 @@ data class VpnStatus(
     val state: VpnState = VpnState.DISCONNECTED,
     val profileId: String? = null,
     val profileName: String? = null,
-    /** Error text for [VpnState.ERROR]. */
+    /**
+     * Error text for [VpnState.ERROR]; for [VpnState.CONNECTED] a notice to
+     * show next to the status (e.g. the server was switched), usually null.
+     */
     val message: String? = null,
     /** Wall clock millis when the tunnel came up. */
     val connectedSince: Long = 0,

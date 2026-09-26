@@ -506,12 +506,44 @@ class XrayVpnService : VpnService() {
     private suspend fun publishConnected() {
         val s = VpnStatusHolder.status.value
         if (s.state != VpnState.CONNECTED) return
-        val text = if (lockdownConflict) {
-            "Включено «Блокировать соединения без VPN»: приложения без VPN (банки, Госуслуги) останутся без интернета"
-        } else {
-            s.profileName
+        val text = when {
+            lockdownConflict ->
+                "Включено «Блокировать соединения без VPN»: приложения без VPN (банки, Госуслуги) останутся без интернета"
+            // A notice such as "switched to another server".
+            !s.message.isNullOrBlank() -> s.message
+            else -> s.profileName
         }
         withContext(Dispatchers.Main) { enterForeground("Подключено", text) }
+    }
+
+    /**
+     * Shows [notice] (null clears it) while connected: in the app under the
+     * timer, in the widget and in the notification.
+     */
+    private suspend fun showNotice(notice: String?) {
+        val s = VpnStatusHolder.status.value
+        if (s.state != VpnState.CONNECTED || s.message == notice) return
+        setStatus(s.copy(message = notice))
+        publishConnected()
+    }
+
+    /** The saved servers or the selection changed here: the app (if open) and the widget reload them. */
+    private fun notifyProfilesChanged() {
+        VpnWidget.update(this)
+        scope.launch {
+            val n = callbacks.beginBroadcast()
+            try {
+                for (i in 0 until n) {
+                    try {
+                        callbacks.getBroadcastItem(i).onProfilesChanged()
+                    } catch (_: Exception) {
+                        // Dead callbacks are removed by RemoteCallbackList.
+                    }
+                }
+            } finally {
+                callbacks.finishBroadcast()
+            }
+        }
     }
 
     private fun setStatus(status: VpnStatus) {

@@ -167,7 +167,7 @@ fun VpnContent(
                     hero = hero,
                     since = status.connectedSince,
                     now = now,
-                    error = status.message,
+                    message = status.message,
                     place = Countries.name(code) ?: server?.let { Countries.stripFlags(it.name) },
                 )
             }
@@ -196,7 +196,7 @@ fun VpnContent(
 private const val MIN_CONTENT = 560f
 
 @Composable
-private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, now: Long, error: String?, place: String?) {
+private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, now: Long, message: String?, place: String?) {
     val statusColor by animateColorAsState(
         when (state) {
             VpnState.CONNECTED -> kc.green
@@ -236,8 +236,11 @@ private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, now: Long
                 )
             }
         }
+        // While connected the message is a notice, e.g. that the server was switched.
+        val notice = message?.takeIf { state == VpnState.CONNECTED && it.isNotBlank() }
         val subline = when {
-            state == VpnState.ERROR && !error.isNullOrBlank() -> error
+            state == VpnState.ERROR && !message.isNullOrBlank() -> message
+            notice != null -> notice
             hero == HeroState.NO_SERVER -> "Добавьте сервер, чтобы подключиться"
             state == VpnState.CONNECTED -> listOfNotNull(place, "соединение защищено").joinToString(" · ")
             state == VpnState.CONNECTING -> "Устанавливаем защищённое соединение…"
@@ -247,7 +250,11 @@ private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, now: Long
         Text(
             subline,
             style = IosType.subhead,
-            color = if (state == VpnState.ERROR) kc.red else kc.secondary,
+            color = when {
+                state == VpnState.ERROR -> kc.red
+                notice != null -> kc.orange
+                else -> kc.secondary
+            },
             textAlign = TextAlign.Center,
             maxLines = 3,
             overflow = TextOverflow.Ellipsis,

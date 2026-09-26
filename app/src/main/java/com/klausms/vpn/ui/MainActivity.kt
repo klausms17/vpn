@@ -101,7 +101,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         lifecycle.addObserver(object : DefaultLifecycleObserver {
             // Talk to the VPN process only while visible: no background work.
-            override fun onStart(owner: LifecycleOwner) = vm.vpn.bind()
+            override fun onStart(owner: LifecycleOwner) {
+                vm.vpn.bind()
+                vm.onAppVisible()
+            }
+
             override fun onStop(owner: LifecycleOwner) = vm.vpn.unbind()
         })
         sharedText = savedInstanceState?.getString(KEY_SHARED_TEXT)
@@ -170,15 +174,21 @@ class MainActivity : ComponentActivity() {
         if (showAdd) {
             AddKeySheet(onDismiss = { showAdd = false }, onAdd = { text -> showAdd = false; vm.import(text) })
         }
-        // Shared keys are confirmed on whatever screen is open.
+        // Shared keys and "add" links are confirmed on whatever screen is open.
         sharedText?.let { text ->
+            // Any web page can open a link: say where the subscription comes from.
+            val host = DeepLink.httpHost(text)
             AlertDialog(
                 onDismissRequest = { sharedText = null },
                 containerColor = kc.card,
-                title = { Text("Добавить из «Поделиться»?", style = IosType.headline, color = kc.label) },
+                title = { Text("Добавить ключи или подписку?", style = IosType.headline, color = kc.label) },
                 text = {
                     Text(
-                        "Приложение получило текст. Если в нём есть ключи или ссылка на подписку, они будут добавлены.",
+                        if (host != null) {
+                            "Подписка с адреса $host. Добавляйте только ссылки от тех, кому доверяете."
+                        } else {
+                            "Приложение получило текст. Если в нём есть ключи или ссылка на подписку, они будут добавлены."
+                        },
                         style = IosType.subhead,
                         color = kc.secondary,
                     )
@@ -207,6 +217,8 @@ class MainActivity : ComponentActivity() {
                 val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()?.trim()
                 if (!text.isNullOrEmpty()) sharedText = text.take(64 * 1024)
             }
+            // klausvpn://add/<link> from a subscription page or a messenger.
+            Intent.ACTION_VIEW -> DeepLink.payload(intent.dataString)?.let { sharedText = it }
             ACTION_CONNECT -> {
                 val state = vm.status.value.state
                 if (state != VpnState.CONNECTED && state != VpnState.CONNECTING) toggleVpn()

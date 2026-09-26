@@ -50,6 +50,19 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
             </intent-filter>
+            <!-- "Add to Klaus VPN" buttons on subscription pages:
+                 klausvpn://add/<link>, klausvpn://import/<link> and
+                 klausvpn://install-config?url=<link>. Like shared text, the
+                 link is only shown to the user for confirmation. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="klausvpn" />
+                <data android:host="add" />
+                <data android:host="import" />
+                <data android:host="install-config" />
+            </intent-filter>
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
             </intent-filter>
