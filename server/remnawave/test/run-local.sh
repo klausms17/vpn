@@ -6,11 +6,13 @@
 #
 #   install-panel.sh  panel, database, valkey, subscription page and Caddy
 #                     (with its internal CA instead of Let's Encrypt), run
-#                     twice to check that a re-run changes nothing
+#                     twice to check that a re-run changes nothing, then
+#                     with a new SUB_DOMAIN and SUPPORT_URL and back
 #   klaus-panel       add-node (panel -> node over the Docker bridge, friends
 #                     -> node on 127.0.0.1), add-user, disable/enable,
 #                     hwid-limit, backup
-#   install-node.sh   remnanode on the host network
+#   install-node.sh   remnanode on the host network, run again with only
+#                     PANEL_IP (as after a panel move)
 #
 # and then
 #   (a) the app's User-Agent gets a base64 list with a vless REALITY link,
@@ -19,8 +21,12 @@
 #   (d) the app's own Go core (libxray, via test/e2e) parses the
 #       subscription and fetches a page through the node,
 #   plus: a disabled friend is refused by the node, a disabled node leaves
-#   the subscription, the device limit works, and a backup restored into a
-#   fresh panel serves the same link.
+#   the subscription, the device limit works, a domain change reaches Caddy,
+#   the support link follows SUPPORT_URL (never the panel's placeholder),
+#   the node keeps its custom port on a re-run, and a backup restored into a
+#   fresh panel serves the same link, also after failed attempts (which
+#   leave no half-restored database, and a run without RESTORE refuses to
+#   build an empty panel over them).
 #
 # Everything is removed at the end (the images stay); KEEP=1 leaves it
 # running. Logs stay in $WORK.
@@ -40,6 +46,8 @@ WORK="${WORK:-$(mktemp -d /tmp/klausvpn-rw-test.XXXXXX)}"
 KEEP="${KEEP:-0}"
 PANEL_DOMAIN=panel.klaus.test
 SUB_DOMAIN=sub.klaus.test
+SUB_DOMAIN2=sub2.klaus.test # a domain change on a re-run
+SUPPORT=https://t.me/klaus_e2e
 NODE_PORT=42222
 VPN_PORT=44443
 TARGET=127.0.0.1:44080 # the site REALITY imitates: a local TLS 1.3 server
@@ -122,6 +130,21 @@ sub_get() { # UA URL [curl args] -> body; headers in $WORK/last.headers
   curl -sS --noproxy '*' --resolve "$SUB_DOMAIN:443:127.0.0.1" --cacert "$WORK/caddy-root.crt" \
     -A "$ua" -D "$WORK/last.headers" "$@" "$url"
 }
+https_get() { # NAME [curl args] -> body of https://NAME/ through Caddy
+  local name="$1"
+  shift
+  curl -fsS --noproxy '*' --resolve "$name:443:127.0.0.1" --cacert "$WORK/caddy-root.crt" "$@" "https://$name/"
+}
+support_links() { # -> {header, page}: the support link in subscriptions and on the page
+  local u
+  u="$(api /api/subscription-page-configs | jq -r 'first((.response.configs[] | select(.uuid == "00000000-0000-0000-0000-000000000000")), .response.configs[0]) | .uuid')"
+  # Through files: the page settings are too long for a jq argument.
+  api /api/subscription-settings > "$WORK/settings.json"
+  api "/api/subscription-page-configs/$u" > "$WORK/page-config.json"
+  jq -nc --slurpfile s "$WORK/settings.json" --slurpfile p "$WORK/page-config.json" \
+    '{header: $s[0].response.customResponseHeaders["support-url"], page: $p[0].response.config.brandingSettings.supportUrl}'
+}
+db_volume() { docker volume inspect remnawave-db-data >/dev/null 2>&1; }
 install_panel() { # RW_DIR ADMIN_FILE [VAR=value...]
   local dir="$1" admin="$2"
   shift 2
@@ -159,9 +182,11 @@ grep -Eq '^Пароль: [A-Za-z0-9]{24,}$' "$WORK/admin.txt" || fail "admin pas
 pass "panel installed, admin saved to admin.txt (600)"
 
 step "install-panel.sh again (must change nothing)"
+caddy_started="$(docker inspect -f '{{.State.StartedAt}}' caddy)"
 install_panel "$WORK/opt" "$WORK/admin.txt" 2>&1 | tee "$WORK/install-2.log"
 grep -q "Готово! Панель работает" "$WORK/install-2.log" || fail "re-run failed"
-if grep -E "Создаю|Обновляю" "$WORK/install-2.log"; then fail "re-run created or changed something"; fi
+if grep -E "Создаю|Обновляю|Перезапускаю Caddy" "$WORK/install-2.log"; then fail "re-run created or changed something"; fi
+[ "$(docker inspect -f '{{.State.StartedAt}}' caddy)" = "$caddy_started" ] || fail "re-run restarted Caddy for nothing"
 counts="$(jq -n --argjson p "$(api /api/config-profiles)" --argjson s "$(api /api/internal-squads)" \
   --argjson r "$(api /api/subscription-settings)" '{
     profiles: [$p.response.configProfiles[] | select(.name == "KlausVPN")] | length,
@@ -185,6 +210,35 @@ fi
 echo "https://scanner.example/ -> $(cat "$WORK/scanner.err")"
 pass "Caddy serves the panel on its domain and refuses other names"
 
+step "support link without SUPPORT_URL: no header, the page's button leads to a note"
+support_links | tee "$WORK/support-0.json"
+jq -e --arg p "https://$SUB_DOMAIN/" '.header == null and .page == $p' "$WORK/support-0.json" >/dev/null ||
+  fail "placeholder support link left"
+https_get "$SUB_DOMAIN" -D "$WORK/root.headers" | tee "$WORK/root.txt"; echo
+grep -qi '^content-type: text/plain; charset=utf-8' "$WORK/root.headers" || fail "note is not utf-8 text"
+grep -q "кто дал вам ссылку" "$WORK/root.txt" || fail "no note at https://$SUB_DOMAIN/"
+pass "no support-url header, the page's support button opens the note on https://$SUB_DOMAIN/"
+
+step "install-panel.sh with a new SUB_DOMAIN and SUPPORT_URL: Caddy serves the new name"
+install_panel "$WORK/opt" "$WORK/admin.txt" SUB_DOMAIN="$SUB_DOMAIN2" SUPPORT_URL="$SUPPORT" 2>&1 | tee "$WORK/install-3.log"
+grep -q "Готово! Панель работает" "$WORK/install-3.log" || fail "re-run with a new SUB_DOMAIN failed"
+grep -q "адрес подписок меняется: $SUB_DOMAIN → $SUB_DOMAIN2" "$WORK/install-3.log" || fail "no warning about the old links"
+https_get "$SUB_DOMAIN2" -o /dev/null || fail "Caddy does not serve the new $SUB_DOMAIN2"
+if https_get "$SUB_DOMAIN" -o /dev/null 2>/dev/null; then fail "Caddy still serves the old $SUB_DOMAIN"; fi
+grep -qx "SUB_PUBLIC_DOMAIN=$SUB_DOMAIN2" "$WORK/opt/.env" || fail "panel .env not updated"
+support_links | tee "$WORK/support-1.json"
+jq -e --arg s "$SUPPORT" '.header == $s and .page == $s' "$WORK/support-1.json" >/dev/null || fail "SUPPORT_URL not applied"
+pass "https://$SUB_DOMAIN2 served with a certificate, the old name is not; SUPPORT_URL in the header and on the page"
+
+step "install-panel.sh back to $SUB_DOMAIN with SUPPORT_URL removed (settings converge)"
+install_panel "$WORK/opt" "$WORK/admin.txt" SUB_DOMAIN="$SUB_DOMAIN" SUPPORT_URL= 2>&1 | tee "$WORK/install-4.log"
+grep -q "Готово! Панель работает" "$WORK/install-4.log" || fail "re-run back to $SUB_DOMAIN failed"
+https_get "$SUB_DOMAIN" -o /dev/null || fail "Caddy does not serve $SUB_DOMAIN again"
+if https_get "$SUB_DOMAIN2" -o /dev/null 2>/dev/null; then fail "Caddy still serves $SUB_DOMAIN2"; fi
+support_links | tee "$WORK/support-2.json"
+cmp -s "$WORK/support-0.json" "$WORK/support-2.json" || fail "support link did not return to the state without SUPPORT_URL"
+pass "back on $SUB_DOMAIN; support link as without SUPPORT_URL again"
+
 step "klaus-panel add-node + install-node.sh"
 GW="$(docker network inspect remnawave-network -f '{{(index .IPAM.Config 0).Gateway}}')"
 kp add-node test-node "$GW" DE --title "Германия" --host 127.0.0.1 --node-port "$NODE_PORT" > "$WORK/add-node.log"
@@ -198,6 +252,17 @@ node_up() { grep -q "на связи" <<<"$(kp list-nodes)"; }
 retry 45 node_up || { kp list-nodes; fail "node did not connect"; }
 kp list-nodes
 pass "node connected"
+
+step "install-node.sh again with only PANEL_IP (after a panel move): NODE_PORT $NODE_PORT stays"
+env NODE_DIR="$WORK/node" SKIP_SYSTEM=1 PANEL_IP=127.0.0.1 bash "$RWS/install-node.sh" 2>&1 | tee "$WORK/install-node-2.log"
+grep -q "Готово! Сервер запущен" "$WORK/install-node-2.log" || fail "node re-run failed"
+grep -E "^(NODE|VPN)_PORT=" "$WORK/node/.env"
+grep -qx "NODE_PORT=$NODE_PORT" "$WORK/node/.env" || fail "NODE_PORT reset"
+grep -qx "VPN_PORT=$VPN_PORT" "$WORK/node/.env" || fail "VPN_PORT reset"
+grep -q "порты $VPN_PORT и $NODE_PORT" "$WORK/install-node-2.log" || fail "re-run talks about other ports"
+if compgen -G "$WORK/node/.env.bak-*" >/dev/null; then fail "node .env rewritten"; fi
+retry 45 node_up || { kp list-nodes; fail "node lost after the re-run"; }
+pass "node .env unchanged (NODE_PORT=$NODE_PORT, VPN_PORT=$VPN_PORT), still connected"
 
 step "klaus-panel add-user"
 kp add-user friend_1 --devices 2 | tee "$WORK/add-user.log"
@@ -214,6 +279,8 @@ base64 -d "$WORK/a.body" > "$WORK/a.links" || fail "body is not base64"
 cat "$WORK/a.links"; echo
 grep -q "^HTTP/[0-9.]* 200" "$WORK/last.headers" || fail "status"
 grep -qi '^profile-title: Klaus VPN' "$WORK/last.headers" || fail "profile-title"
+if grep -i '^support-url' "$WORK/last.headers"; then fail "support-url header without SUPPORT_URL"; fi
+if grep -qi 'dummy\.docs\.rw' "$WORK/last.headers"; then fail "placeholder in the headers"; fi
 grep -Eq "^vless://[0-9a-f-]+@127\.0\.0\.1:$VPN_PORT\?.*security=reality.*pbk=.*#%D0%93%D0%B5%D1%80%D0%BC%D0%B0%D0%BD%D0%B8%D1%8F$" "$WORK/a.links" ||
   fail "no vless reality link named Германия"
 pass "base64 list with a vless REALITY link"
@@ -231,6 +298,9 @@ jq -e '.platforms.android.apps[0].name == "Klaus VPN" and
   ([.platforms.android.apps[0].blocks[].buttons[] | select(.type == "subscriptionLink" and .link == "klausvpn://add/{{SUBSCRIPTION_LINK}}")] | length == 1) and
   ([.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external" and .link == "https://example.com/KlausVPN.apk")] | length == 1) and
   ([.platforms.android.apps[].name] | index("Happ") != null)' "$WORK/b.config.json" >/dev/null || fail "Klaus VPN button"
+jq -r '"support button: \(.brandingSettings.supportUrl)"' "$WORK/b.config.json"
+jq -e --arg p "https://$SUB_DOMAIN/" '.brandingSettings.supportUrl == $p' "$WORK/b.config.json" >/dev/null || fail "page support link"
+if grep -q 'dummy\.docs\.rw' "$WORK/b.html" "$WORK/b.config.json"; then fail "placeholder support link on the page"; fi
 echo "the page turns the button into: klausvpn://add/$SUB"
 pass "HTML page; Klaus VPN first with klausvpn://add/{{SUBSCRIPTION_LINK}} and the APK button, default apps kept"
 
@@ -291,16 +361,60 @@ grep -q "@127.0.0.1:$VPN_PORT" <<<"$(sub_get "$UA_APP" "$SUB2" -H "X-Hwid: bbbbb
   fail "limit off"
 pass "limit 1: known device served, second refused, no X-Hwid flagged; off again"
 
-step "backup, then restore into a fresh panel"
+step "backup; a restore that stops early (a .ru domain given by mistake)"
 BACKUP_DIR="$WORK/backups" kp backup
 BACKUP="$(ls "$WORK"/backups/*.tar.gz)"
 tar -tzf "$BACKUP" | sort | tr '\n' ' '; echo
 docker compose --project-directory "$WORK/opt" down -v >/dev/null 2>&1
 CONF="$WORK/opt2/klaus-panel.env"
+if install_panel "$WORK/opt2" "$WORK/admin2.txt" RESTORE="$BACKUP" PANEL_DOMAIN=panel.klaus.ru > "$WORK/install-restore-1.log" 2>&1; then
+  fail "restore with a .ru domain went through"
+fi
+tail -n 1 "$WORK/install-restore-1.log"
+[ -f "$WORK/opt2/.env" ] || fail "the stopped restore should have left its settings"
+pass "stopped before the database, settings already in place"
+
+step "the restore again, now with a broken database dump: stops in pg_restore"
+mkdir -p "$WORK/broken"
+tar -C "$WORK/broken" -xzf "$BACKUP"
+size="$(stat -c %s "$WORK/broken/remnawave-db.dump")"
+head -c "$((size / 2))" "$WORK/broken/remnawave-db.dump" > "$WORK/broken/half" && mv "$WORK/broken/half" "$WORK/broken/remnawave-db.dump"
+tar -C "$WORK/broken" -czf "$WORK/broken.tar.gz" .
+if install_panel "$WORK/opt2" "$WORK/admin2.txt" RESTORE="$WORK/broken.tar.gz" > "$WORK/install-restore-2.log" 2>&1; then
+  fail "restore of a broken dump went through"
+fi
+grep -E "Восстанавливаю базу|pg_restore|Ошибка" "$WORK/install-restore-2.log" | tail -n 4
+grep -q "не удалось восстановить базу" "$WORK/install-restore-2.log" || fail "not stopped in pg_restore"
+if db_volume; then fail "the half-restored database was left behind"; fi
+pass "the retry of a stopped restore is accepted; the failed one removes its half-restored database"
+
+step "install-panel.sh without RESTORE refuses to build an empty panel"
+if install_panel "$WORK/opt2" "$WORK/admin2.txt" > "$WORK/install-norestore.log" 2>&1; then
+  fail "a run without RESTORE went through"
+fi
+tail -n 1 "$WORK/install-norestore.log"
+grep -q "перенос панели из резервной копии не закончен" "$WORK/install-norestore.log" || fail "wrong refusal"
+if db_volume || grep -q "Создаю администратора" "$WORK/install-norestore.log"; then fail "an empty panel was started"; fi
+pass "refused, nothing started"
+
+step "the same restore command once more (over a leftover database, as if killed in pg_restore)"
+docker run --rm -v remnawave-db-data:/d caddy:2 touch /d/leftover
 install_panel "$WORK/opt2" "$WORK/admin2.txt" RESTORE="$BACKUP" 2>&1 | tee "$WORK/install-restore.log"
 grep -q "Готово! Панель работает" "$WORK/install-restore.log" || fail "restore failed"
+if grep -q "Создаю администратора" "$WORK/install-restore.log"; then fail "restore made a new admin"; fi
+[ ! -e "$WORK/opt2/.restore-unfinished" ] || fail "restore marker left behind"
+docker run --rm -v remnawave-db-data:/d caddy:2 test ! -e /d/leftover || fail "the leftover database was reused"
 retry 45 node_up || { kp list-nodes; fail "node did not reconnect to the restored panel"; }
 kp list-users
 retry 10 "$WORK/e2e" check -sub "$SUB" -resolve "$SUB_DOMAIN:127.0.0.1" -cacert "$WORK/caddy-root.crt" \
   -hwid "$HWID" -url "http://$WEB/" -expect "$TOKEN" || fail "old link after restore"
 pass "restored panel: same link, node reconnected by itself, traffic flows"
+
+step "RESTORE over the working panel is refused"
+if install_panel "$WORK/opt2" "$WORK/admin2.txt" RESTORE="$BACKUP" > "$WORK/install-restore-3.log" 2>&1; then
+  fail "restore over a working panel went through"
+fi
+tail -n 1 "$WORK/install-restore-3.log"
+grep -q "восстанавливать можно только на новый сервер" "$WORK/install-restore-3.log" || fail "wrong refusal"
+kp list-users >/dev/null || fail "panel broken by the refused restore"
+pass "refused, the panel keeps working"

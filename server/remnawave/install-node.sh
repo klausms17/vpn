@@ -11,30 +11,40 @@
 #   SECRET_KEY   key from "klaus-panel add-node" (required the first time;
 #                a re-run keeps the one already installed)
 #   NODE_PORT    port the panel uses to control this server (default 2222;
-#                only PANEL_IP may connect to it)
-#   VPN_PORT     port the VPN itself listens on (default 443)
+#                only PANEL_IP may connect to it). Must match the port the
+#                panel has for this server (add-node --node-port); a re-run
+#                keeps the one already installed
+#   VPN_PORT     the VPN port set on the panel (REALITY_PORT, default 443),
+#                only checked and opened in ufw here; "klaus-panel add-node"
+#                prints it when it is not 443. A re-run keeps it too
 #   MIGRATE=1    this VPS runs the old install.sh Xray: switch it off and
 #                hand port 443 to the new server (the old keys stop working)
 #
 # Re-running with a new SECRET_KEY replaces the old one; it also updates
-# the node to the latest version.
+# the node to the latest version. After a panel move only PANEL_IP is needed.
 #
 # For the local test harness only (server/remnawave/test): NODE_DIR and
 # SKIP_SYSTEM=1 (only writes the compose file and starts the container).
 set -euo pipefail
 
 NODE_DIR="${NODE_DIR:-/opt/remnanode}"
-NODE_PORT="${NODE_PORT:-2222}"
-VPN_PORT="${VPN_PORT:-443}"
+NODE_PORT="${NODE_PORT:-}"
+VPN_PORT="${VPN_PORT:-}"
 MIGRATE="${MIGRATE:-0}"
 SKIP_SYSTEM="${SKIP_SYSTEM:-0}"
 PANEL_IP="${PANEL_IP:-}"
 SECRET_KEY="${SECRET_KEY:-}"
 FW_TABLE=klausvpn_node
-# A re-run (e.g. the panel moved to a new IP) keeps the installed key.
-if [ -z "$SECRET_KEY" ] && [ -f "$NODE_DIR/.env" ]; then
-  SECRET_KEY="$(sed -n 's/^SECRET_KEY=//p' "$NODE_DIR/.env" | tail -n 1)"
+# A re-run (e.g. the panel moved to a new IP) keeps the installed key and
+# ports: the panel still has them.
+if [ -f "$NODE_DIR/.env" ]; then
+  installed() { sed -n "s/^$1=//p" "$NODE_DIR/.env" | tail -n 1; }
+  [ -n "$SECRET_KEY" ] || SECRET_KEY="$(installed SECRET_KEY)"
+  [ -n "$NODE_PORT" ] || NODE_PORT="$(installed NODE_PORT)"
+  [ -n "$VPN_PORT" ] || VPN_PORT="$(installed VPN_PORT)"
 fi
+NODE_PORT="${NODE_PORT:-2222}"
+VPN_PORT="${VPN_PORT:-443}"
 
 say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mВнимание:\033[0m %s\n' "$*" >&2; }
@@ -110,7 +120,13 @@ if [ "$SKIP_SYSTEM" != "1" ] && command -v ss >/dev/null; then
     owner="$(ss -Hltnp "sport = :$p" 2>/dev/null | grep -o 'users:(("[^"]*"' | head -n 1 | sed 's/users:(("//' || true)"
     # remnanode's own processes (on host network) hold the ports on a re-run.
     if [ -n "$owner" ] && ! grep -qx remnanode <<<"$(docker ps --format '{{.Names}}' 2>/dev/null)"; then
-      die "порт $p уже занят программой «$owner». Освободите его или выберите другой (VPN_PORT/NODE_PORT)"
+      # Both ports are set on the panel: changing them only here would
+      # leave the panel and friends' apps knocking on the old ones.
+      if [ "$p" = "$VPN_PORT" ]; then
+        die "порт $p уже занят программой «$owner». Освободите его: порт VPN задаётся на панели сразу для всех серверов (REALITY_PORT в install-panel.sh), здесь его не поменять"
+      else
+        die "порт $p уже занят программой «$owner». Освободите его или смените порт управления этого сервера в веб-панели (Nodes → сервер → порт) и запустите снова с NODE_PORT=новый-порт"
+      fi
     fi
   done
 fi
@@ -148,6 +164,8 @@ put_file "$NODE_DIR/.env" <<EOF
 # Written by Klaus VPN install-node.sh; re-running the script rewrites it.
 NODE_PORT=$NODE_PORT
 SECRET_KEY=$SECRET_KEY
+# Not used by the node (the panel sets its VPN port); kept for re-runs.
+VPN_PORT=$VPN_PORT
 EOF
 
 # As remnawave/node docker-compose-prod.yml, with the key in .env and
