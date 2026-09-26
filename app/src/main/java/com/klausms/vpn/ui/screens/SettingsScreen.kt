@@ -5,16 +5,14 @@ import android.content.Intent
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,13 +31,12 @@ import com.klausms.vpn.ui.MainViewModel
 import com.klausms.vpn.ui.components.IconTile
 import com.klausms.vpn.ui.components.InsetGroup
 import com.klausms.vpn.ui.components.IosSwitch
-import com.klausms.vpn.ui.components.LargeTitle
 import com.klausms.vpn.ui.components.ListRow
 import com.klausms.vpn.ui.components.RowDivider
-import com.klausms.vpn.ui.components.ScrollEdge
 import com.klausms.vpn.ui.components.SectionFooter
 import com.klausms.vpn.ui.components.SectionHeader
-import com.klausms.vpn.ui.components.tabBarClearance
+import com.klausms.vpn.ui.components.NavBar
+import com.klausms.vpn.ui.components.navBarClearance
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
 import com.klausms.vpn.util.AppLog
@@ -59,7 +56,7 @@ private val TileGray = Color(0xFF636366)
  * the network changes, IPv6 kept inside the tunnel) are not settings.
  */
 @Composable
-fun SettingsScreen(vm: MainViewModel, onNavigate: (String) -> Unit) {
+fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit, onNavigate: (String) -> Unit) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val geoVersion by vm.geoVersion.collectAsStateWithLifecycle()
     SettingsContent(
@@ -67,6 +64,7 @@ fun SettingsScreen(vm: MainViewModel, onNavigate: (String) -> Unit) {
         geoVersion = geoVersion,
         onRussianApps = { v -> vm.updateSettings { it.copy(bypassRussianApps = v) } },
         onUpdateGeo = { vm.updateGeo() },
+        onBack = onBack,
         onNavigate = onNavigate,
     )
 }
@@ -77,6 +75,7 @@ fun SettingsContent(
     geoVersion: Long,
     onRussianApps: (Boolean) -> Unit,
     onUpdateGeo: () -> Unit,
+    onBack: () -> Unit,
     onNavigate: (String) -> Unit,
 ) {
     val context = LocalContext.current
@@ -87,11 +86,9 @@ fun SettingsContent(
         onPauseOrDispose { }
     }
 
-    val list = rememberLazyListState()
-    val collapsed by remember { derivedStateOf { list.firstVisibleItemIndex > 0 } }
-    Box(Modifier.fillMaxSize().background(kc.page)) {
-        LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(bottom = tabBarClearance() + 16.dp)) {
-            item { LargeTitle("Настройки") }
+    Column(Modifier.fillMaxSize().background(kc.page)) {
+        NavBar("Настройки", onBack)
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = navBarClearance() + 24.dp)) {
 
             item { SectionHeader("Приложения без VPN") }
             item {
@@ -188,7 +185,6 @@ fun SettingsContent(
                 }
             }
         }
-        ScrollEdge("Настройки", collapsed)
     }
 
     if (confirmGeo) {

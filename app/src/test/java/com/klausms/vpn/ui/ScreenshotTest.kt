@@ -12,27 +12,24 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.unit.Density
-import com.klausms.vpn.R
 import com.klausms.vpn.data.AppSettings
 import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.Subscription
 import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.service.VpnStatus
-import com.klausms.vpn.ui.components.TabBar
-import com.klausms.vpn.ui.components.TabItem
 import com.klausms.vpn.ui.screens.ServerActions
-import com.klausms.vpn.ui.screens.ServersContent
+import com.klausms.vpn.ui.screens.HomeContent
 import com.klausms.vpn.ui.screens.SettingsContent
-import com.klausms.vpn.ui.screens.VpnContent
 import com.klausms.vpn.ui.theme.KlausTheme
 import com.klausms.vpn.widget.VpnWidget
 import kotlinx.serialization.json.JsonArray
@@ -88,52 +85,40 @@ class ScreenshotTest {
         "us" to PingResult.Failed("timeout"),
         "ru" to PingResult.Testing,
     )
-    private val tabs = listOf(
-        TabItem("vpn", "VPN", R.drawable.ic_tab_vpn),
-        TabItem("servers", "Серверы", R.drawable.ic_tab_servers),
-        TabItem("settings", "Настройки", R.drawable.ic_tab_settings),
-    )
+    private val whitelist = mapOf("ru.example.com" to 1)
     private val noServerActions = ServerActions({}, {}, {}, { _, _ -> }, {}, {}, {})
 
     // ------------------------------------------------------------ screens
 
-    @Test fun vpnOff() = vpn("vpn-off", VpnStatus(VpnState.DISCONNECTED))
+    @Test fun homeOff() = home("home-off", VpnStatus(VpnState.DISCONNECTED))
 
-    @Test fun vpnConnected() = vpn("vpn-connected", connected())
+    @Test fun homeConnected() = home("home-connected", connected())
 
-    @Test fun vpnConnecting() = vpn("vpn-connecting", VpnStatus(VpnState.CONNECTING, profileId = "nl"))
+    @Test fun homeConnecting() = home("home-connecting", VpnStatus(VpnState.CONNECTING, profileId = "nl"))
 
-    @Test fun vpnError() = vpn(
-        "vpn-error",
+    @Test fun homeError() = home(
+        "home-error",
         VpnStatus(VpnState.ERROR, message = "Сервер не отвечает. Проверьте ключ или выберите другой сервер."),
     )
 
-    @Test fun vpnNoServers() = vpn("vpn-no-servers", VpnStatus(), ProfilesState())
+    @Test fun homeNoServers() = home("home-no-servers", VpnStatus(), ProfilesState())
 
     @Test
     @Config(qualifiers = "w360dp-h720dp-xxhdpi")
-    fun vpnConnectedSmallPhone() = vpn("vpn-connected-small-phone", connected())
+    fun homeConnectedSmallPhone() = home("home-connected-small-phone", connected())
 
-    @Test fun vpnConnectedLargeFont() = vpn("vpn-connected-font-130", connected(), fontScale = 1.3f)
+    @Test fun homeConnectedLargeFont() = home("home-connected-font-130", connected(), fontScale = 1.3f)
 
-    @Test fun servers() = shot("servers", "servers") {
-        ServersContent(profiles, pings, mapOf("ru.example.com" to 1), noServerActions, onAdd = {})
-    }
+    /** Scrolled down to the servers: the map fades, a small title appears. */
+    @Test fun homeScrolled() = home("home-scrolled", connected(), scrollTo = 4)
 
-    @Test fun serversEmpty() = shot("servers-empty", "servers") {
-        ServersContent(ProfilesState(), emptyMap(), emptyMap(), noServerActions, onAdd = {})
-    }
-
-    @Test fun serversLargeFont() = shot("servers-font-130", "servers", fontScale = 1.3f) {
-        ServersContent(profiles, pings, mapOf("ru.example.com" to 1), noServerActions, onAdd = {})
-    }
-
-    @Test fun settings() = shot("settings", "settings") {
+    @Test fun settings() = shot("settings") {
         SettingsContent(
             settings = AppSettings(excludedApps = setOf("ru.sberbankmobile", "ru.gosuslugi")),
             geoVersion = 1_790_000_000L,
             onRussianApps = {},
             onUpdateGeo = {},
+            onBack = {},
             onNavigate = {},
         )
     }
@@ -143,12 +128,27 @@ class ScreenshotTest {
         connectedSince = System.currentTimeMillis() - (1 * 3600 + 23 * 60 + 45) * 1000L,
     )
 
-    private fun vpn(name: String, status: VpnStatus, state: ProfilesState = profiles, fontScale: Float = 1f) =
-        shot(name, "vpn", fontScale) {
-            VpnContent(status, state, pings, onToggle = {}, onOpenServers = {}, onAddServer = {}, onPing = {})
-        }
+    private fun home(
+        name: String,
+        status: VpnStatus,
+        state: ProfilesState = profiles,
+        fontScale: Float = 1f,
+        scrollTo: Int? = null,
+    ) = shot(name, fontScale, scrollTo) {
+        HomeContent(
+            status = status,
+            profiles = state,
+            pings = pings,
+            whitelist = whitelist,
+            actions = noServerActions,
+            onToggle = {},
+            onAdd = {},
+            onOpenSettings = {},
+            onPing = {},
+        )
+    }
 
-    private fun shot(name: String, tab: String, fontScale: Float = 1f, content: @Composable () -> Unit) {
+    private fun shot(name: String, fontScale: Float = 1f, scrollTo: Int? = null, content: @Composable () -> Unit) {
         // Manual clock: the session timer ticks forever and would never idle.
         compose.mainClock.autoAdvance = false
         compose.setContent {
@@ -156,14 +156,13 @@ class ScreenshotTest {
             val density = LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density, density.fontScale * fontScale)) {
                 KlausTheme {
-                    Box(Modifier.fillMaxSize()) {
-                        content()
-                        TabBar(tabs, tab, onSelect = {}, modifier = Modifier.align(Alignment.BottomCenter))
-                    }
+                    Box(Modifier.fillMaxSize()) { content() }
                 }
             }
         }
-        repeat(4) { compose.mainClock.advanceTimeBy(500) }
+        repeat(2) { compose.mainClock.advanceTimeBy(500) }
+        if (scrollTo != null) compose.onNode(hasScrollToIndexAction()).performScrollToIndex(scrollTo)
+        repeat(2) { compose.mainClock.advanceTimeBy(500) }
         val bitmap = try {
             compose.onRoot().captureToImage().asAndroidBitmap()
         } catch (e: Throwable) {

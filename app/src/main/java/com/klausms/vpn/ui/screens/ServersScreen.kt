@@ -16,9 +16,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -28,7 +28,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,28 +45,22 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.klausms.vpn.R
 import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.Subscription
-import com.klausms.vpn.ui.MainViewModel
 import com.klausms.vpn.ui.PingResult
 import com.klausms.vpn.ui.components.CircleFlag
 import com.klausms.vpn.ui.components.Countries
-import com.klausms.vpn.ui.components.GlassIconButton
 import com.klausms.vpn.ui.components.IosIcon
-import com.klausms.vpn.ui.components.LargeTitle
 import com.klausms.vpn.ui.components.PrimaryButton
 import com.klausms.vpn.ui.components.RowDivider
-import com.klausms.vpn.ui.components.ScrollEdge
 import com.klausms.vpn.ui.components.SectionFooter
 import com.klausms.vpn.ui.components.SectionHeader
 import com.klausms.vpn.ui.components.SignalBars
 import com.klausms.vpn.ui.components.groupRow
 import com.klausms.vpn.ui.components.pressScale
 import com.klausms.vpn.ui.components.tap
-import com.klausms.vpn.ui.components.tabBarClearance
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
 import com.klausms.vpn.util.formatBytes
@@ -76,7 +69,7 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
-/** What the Servers tab can ask for. */
+/** What the server list can ask for. */
 class ServerActions(
     val select: (String) -> Unit,
     val ping: (String) -> Unit,
@@ -87,128 +80,115 @@ class ServerActions(
     val deleteSubscription: (String) -> Unit,
 )
 
-/** The Servers tab: own keys and subscriptions, pick one, check latency. */
-@Composable
-fun ServersScreen(vm: MainViewModel, onAdd: () -> Unit) {
-    val profiles by vm.profiles.collectAsStateWithLifecycle()
-    val pings by vm.pings.collectAsStateWithLifecycle()
-    val whitelist by vm.whitelist.collectAsStateWithLifecycle()
-    val actions = remember(vm) {
-        ServerActions(
-            select = { vm.select(it) },
-            ping = { vm.ping(listOf(it)) },
-            pingAll = { vm.pingAll() },
-            rename = { id, name -> vm.rename(id, name) },
-            delete = { vm.delete(it) },
-            refreshSubscription = { vm.refreshSubscription(it) },
-            deleteSubscription = { vm.deleteSubscription(it) },
-        )
-    }
-    ServersContent(profiles, pings, whitelist, actions, onAdd)
-}
-
-@Composable
-fun ServersContent(
+/**
+ * The server list of the main screen as lazy items: own keys and
+ * subscriptions, tap to pick, long press for more. One lazy item per
+ * server, so big subscriptions stay smooth.
+ */
+fun LazyListScope.serverSections(
     profiles: ProfilesState,
     pings: Map<String, PingResult>,
     whitelist: Map<String, Int>,
     actions: ServerActions,
+    onRename: (StoredProfile) -> Unit,
     onAdd: () -> Unit,
 ) {
-    var renameTarget by remember { mutableStateOf<StoredProfile?>(null) }
-
     val subIds = profiles.subscriptions.map { it.id }.toSet()
     // Servers whose subscription is gone are treated as own keys.
     val own = profiles.profiles.filter { it.subscriptionId == null || it.subscriptionId !in subIds }
 
-    val list = rememberLazyListState()
-    val collapsed by remember { derivedStateOf { list.firstVisibleItemIndex > 0 } }
-    Box(Modifier.fillMaxSize().background(kc.page)) {
-        LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(bottom = tabBarClearance() + 16.dp)) {
-            item {
-                LargeTitle("Серверы") {
-                    if (profiles.profiles.isNotEmpty()) {
-                        GlassIconButton(R.drawable.ic_gauge_ios, "Проверить все серверы", onClick = actions.pingAll)
-                    }
-                    GlassIconButton(R.drawable.ic_plus_ios, "Добавить сервер", onClick = onAdd, fill = kc.cta, iconSize = 18.dp)
-                }
-            }
-            if (profiles.profiles.isEmpty()) {
-                item { EmptyServers(onAdd) }
-            }
-            // One lazy item per server: big subscriptions stay smooth.
-            if (own.isNotEmpty()) {
-                item(key = "own-header") { SectionHeader("Мои ключи") }
-                itemsIndexed(own, key = { _, p -> p.id }) { i, p ->
-                    Column(Modifier.groupRow(first = i == 0, last = i == own.lastIndex).background(kc.card)) {
-                        if (i > 0) RowDivider(start = FLAG_TEXT_START)
-                        ServerRow(
-                            profile = p,
-                            selected = p.id == profiles.selectedId,
-                            ping = pings[p.id],
-                            whitelisted = whitelist[p.address] == 1,
-                            canDelete = true,
-                            actions = actions,
-                            onRename = { renameTarget = p },
-                        )
-                    }
-                }
-            }
-            for (sub in profiles.subscriptions) {
-                val servers = profiles.profiles.filter { it.subscriptionId == sub.id }
-                item(key = "h-${sub.id}") { SectionHeader(sub.name) }
-                item(key = "g-${sub.id}") {
-                    Column(Modifier.groupRow(first = true, last = servers.isEmpty()).background(kc.card)) {
-                        SubscriptionHeader(sub, onRefresh = { actions.refreshSubscription(sub.id) }, onDelete = { actions.deleteSubscription(sub.id) })
-                    }
-                }
-                itemsIndexed(servers, key = { _, p -> "${sub.id}/${p.id}" }) { i, p ->
-                    Column(Modifier.groupRow(first = false, last = i == servers.lastIndex).background(kc.card)) {
-                        RowDivider(start = if (i == 0) 16.dp else FLAG_TEXT_START)
-                        ServerRow(
-                            profile = p,
-                            selected = p.id == profiles.selectedId,
-                            ping = pings[p.id],
-                            whitelisted = whitelist[p.address] == 1,
-                            canDelete = false,
-                            actions = actions,
-                            onRename = { renameTarget = p },
-                        )
-                    }
-                }
-                item(key = "f-${sub.id}") {
-                    SectionFooter(sub.lastError?.let { "Не удалось обновить: $it" } ?: updatedText(sub.updatedAt))
-                }
-            }
-            if (profiles.profiles.any { whitelist[it.address] == 1 }) {
-                item(key = "whitelist-note") {
-                    SectionFooter("Серверы с пометкой «белый список» работают, даже когда мобильный интернет ограничен.")
-                }
-            }
-        }
-        ScrollEdge("Серверы", collapsed)
+    item(key = "servers-title") {
+        ServersTitle(showPingAll = profiles.profiles.isNotEmpty(), onPingAll = actions.pingAll)
     }
-
-    renameTarget?.let { target ->
-        // The whole name, flags included: the flag sets the country and the map pin.
-        RenameDialog(target.name, onDismiss = { renameTarget = null }) { name ->
-            actions.rename(target.id, name)
-            renameTarget = null
+    if (profiles.profiles.isEmpty()) {
+        item(key = "servers-empty") { EmptyServers(onAdd) }
+        return
+    }
+    if (own.isNotEmpty()) {
+        // A heading only when there is more than one group.
+        if (profiles.subscriptions.isNotEmpty()) item(key = "own-header") { SectionHeader("Мои ключи") }
+        itemsIndexed(own, key = { _, p -> p.id }) { i, p ->
+            Column(Modifier.groupRow(first = i == 0, last = i == own.lastIndex).background(kc.card)) {
+                if (i > 0) RowDivider(start = FLAG_TEXT_START)
+                ServerRow(
+                    profile = p,
+                    selected = p.id == profiles.selectedId,
+                    ping = pings[p.id],
+                    whitelisted = whitelist[p.address] == 1,
+                    canDelete = true,
+                    actions = actions,
+                    onRename = { onRename(p) },
+                )
+            }
         }
+    }
+    for (sub in profiles.subscriptions) {
+        val servers = profiles.profiles.filter { it.subscriptionId == sub.id }
+        item(key = "h-${sub.id}") { SectionHeader(sub.name) }
+        item(key = "g-${sub.id}") {
+            Column(Modifier.groupRow(first = true, last = servers.isEmpty()).background(kc.card)) {
+                SubscriptionHeader(sub, onRefresh = { actions.refreshSubscription(sub.id) }, onDelete = { actions.deleteSubscription(sub.id) })
+            }
+        }
+        itemsIndexed(servers, key = { _, p -> "${sub.id}/${p.id}" }) { i, p ->
+            Column(Modifier.groupRow(first = false, last = i == servers.lastIndex).background(kc.card)) {
+                RowDivider(start = if (i == 0) 16.dp else FLAG_TEXT_START)
+                ServerRow(
+                    profile = p,
+                    selected = p.id == profiles.selectedId,
+                    ping = pings[p.id],
+                    whitelisted = whitelist[p.address] == 1,
+                    canDelete = false,
+                    actions = actions,
+                    onRename = { onRename(p) },
+                )
+            }
+        }
+        item(key = "f-${sub.id}") {
+            SectionFooter(sub.lastError?.let { "Не удалось обновить: $it" } ?: updatedText(sub.updatedAt))
+        }
+    }
+    if (profiles.profiles.any { whitelist[it.address] == 1 }) {
+        item(key = "whitelist-note") {
+            SectionFooter("Серверы с пометкой «белый список» работают, даже когда мобильный интернет ограничен.")
+        }
+    }
+}
+
+/** "Серверы" with the check-all button. */
+@Composable
+private fun ServersTitle(showPingAll: Boolean, onPingAll: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 36.dp, end = 20.dp, top = 12.dp, bottom = 2.dp)
+            .heightIn(min = 44.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Серверы", style = IosType.title3, color = kc.label, modifier = Modifier.weight(1f))
+        if (showPingAll) RoundIconButton(R.drawable.ic_gauge_ios, "Проверить все серверы", onPingAll)
     }
 }
 
 @Composable
 private fun EmptyServers(onAdd: () -> Unit) {
-    Column(Modifier.padding(horizontal = 20.dp, vertical = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("Пока нет ни одного сервера", style = IosType.title3, color = kc.label)
-        Spacer(Modifier.height(8.dp))
+    Column(
+        Modifier
+            .padding(horizontal = 20.dp, vertical = 8.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(26.dp))
+            .background(kc.card)
+            .padding(20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("Пока нет ни одного сервера", style = IosType.headline, color = kc.label)
+        Spacer(Modifier.height(6.dp))
         Text(
             "Вставьте ключ (vless://…) или ссылку на подписку. Можно также «Поделиться» ключом из мессенджера в это приложение.",
             style = IosType.subhead,
             color = kc.secondary,
         )
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(16.dp))
         PrimaryButton("Добавить сервер", onClick = onAdd, icon = R.drawable.ic_plus_ios)
     }
 }
@@ -389,7 +369,7 @@ private fun SubscriptionHeader(sub: Subscription, onRefresh: () -> Unit, onDelet
                 }
             }
             Spacer(Modifier.width(8.dp))
-            RefreshButton(onRefresh)
+            RoundIconButton(R.drawable.ic_refresh_ios, "Обновить подписку", onRefresh)
         }
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }, containerColor = kc.cardPressed) {
             MenuItem("Обновить", R.drawable.ic_refresh_ios) { menu = false; onRefresh() }
@@ -409,7 +389,7 @@ private fun SubscriptionHeader(sub: Subscription, onRefresh: () -> Unit, onDelet
 
 /** A 34 dp filled circle inside a 44 dp touch target, as in the mockup. */
 @Composable
-private fun RefreshButton(onClick: () -> Unit) {
+private fun RoundIconButton(icon: Int, description: String, onClick: () -> Unit) {
     val source = remember { MutableInteractionSource() }
     val scale = pressScale(source)
     Box(
@@ -418,11 +398,11 @@ private fun RefreshButton(onClick: () -> Unit) {
             .scale(scale)
             .clip(CircleShape)
             .tap(source, onClick = onClick)
-            .semantics { contentDescription = "Обновить подписку" },
+            .semantics { contentDescription = description },
         contentAlignment = Alignment.Center,
     ) {
         Box(Modifier.size(34.dp).clip(CircleShape).background(kc.fill), contentAlignment = Alignment.Center) {
-            IosIcon(R.drawable.ic_refresh_ios, kc.green, Modifier.size(17.dp))
+            IosIcon(icon, kc.green, Modifier.size(17.dp))
         }
     }
 }
@@ -458,7 +438,7 @@ private fun parseUserInfo(raw: String?): Usage? {
 }
 
 @Composable
-private fun RenameDialog(current: String, onDismiss: () -> Unit, onRename: (String) -> Unit) {
+internal fun RenameDialog(current: String, onDismiss: () -> Unit, onRename: (String) -> Unit) {
     var text by rememberSaveable { mutableStateOf(current) }
     AlertDialog(
         onDismissRequest = onDismiss,

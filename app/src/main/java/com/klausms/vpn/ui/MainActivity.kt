@@ -41,19 +41,15 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.klausms.vpn.R
 import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.ui.components.BusyPill
 import com.klausms.vpn.ui.components.GlassToast
-import com.klausms.vpn.ui.components.TabBar
-import com.klausms.vpn.ui.components.TabItem
 import com.klausms.vpn.ui.screens.AddKeySheet
 import com.klausms.vpn.ui.screens.AppsScreen
+import com.klausms.vpn.ui.screens.HomeScreen
 import com.klausms.vpn.ui.screens.LicensesScreen
 import com.klausms.vpn.ui.screens.LogsScreen
-import com.klausms.vpn.ui.screens.ServersScreen
 import com.klausms.vpn.ui.screens.SettingsScreen
-import com.klausms.vpn.ui.screens.VpnScreen
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.KlausTheme
 import com.klausms.vpn.ui.theme.kc
@@ -68,12 +64,6 @@ class MainActivity : ComponentActivity() {
         const val ACTION_CONNECT = "com.klausms.vpn.ui.CONNECT"
 
         private const val KEY_SHARED_TEXT = "shared_text"
-
-        private val tabs = listOf(
-            TabItem("vpn", "VPN", R.drawable.ic_tab_vpn),
-            TabItem("servers", "Серверы", R.drawable.ic_tab_servers),
-            TabItem("settings", "Настройки", R.drawable.ic_tab_settings),
-        )
     }
 
     private val vm: MainViewModel by viewModels()
@@ -119,43 +109,32 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun AppShell() {
-        var tab by rememberSaveable { mutableStateOf("vpn") }
-        // A screen pushed over the tabs: "apps", "logs", "licenses".
-        var pushed by rememberSaveable { mutableStateOf<String?>(null) }
+        // Screens pushed over the main one, e.g. "settings/apps"; "" is home.
+        var route by rememberSaveable { mutableStateOf("") }
+        val top = route.substringAfterLast('/')
+        val push: (String) -> Unit = { screen -> route = if (route.isEmpty()) screen else "$route/$screen" }
+        val back: () -> Unit = { route = route.substringBeforeLast('/', "") }
         var showAdd by rememberSaveable { mutableStateOf(false) }
         val busy by vm.busy.collectAsStateWithLifecycle()
         val toasts = remember { SnackbarHostState() }
         LaunchedEffect(Unit) { vm.messages.collect { toasts.showSnackbar(it) } }
 
-        BackHandler(enabled = pushed != null || tab != "vpn") {
-            if (pushed != null) pushed = null else tab = "vpn"
-        }
+        BackHandler(enabled = route.isNotEmpty(), onBack = back)
 
         Box(Modifier.fillMaxSize().background(kc.page)) {
-            when (pushed) {
-                "apps" -> AppsScreen(vm = vm, includeMode = false, onBack = { pushed = null })
-                "logs" -> LogsScreen(vm = vm, onBack = { pushed = null })
+            when (top) {
+                "settings" -> SettingsScreen(vm = vm, onBack = back, onNavigate = push)
+                "apps" -> AppsScreen(vm = vm, includeMode = false, onBack = back)
+                "logs" -> LogsScreen(vm = vm, onBack = back)
                 "licenses" -> {
                     val coreVersion by vm.coreVersion.collectAsStateWithLifecycle()
-                    LicensesScreen(coreVersion, onBack = { pushed = null })
+                    LicensesScreen(coreVersion, onBack = back)
                 }
-                else -> when (tab) {
-                    "servers" -> ServersScreen(vm = vm, onAdd = { showAdd = true })
-                    "settings" -> SettingsScreen(vm = vm, onNavigate = { pushed = it })
-                    else -> VpnScreen(
-                        vm = vm,
-                        onToggle = ::toggleVpn,
-                        onOpenServers = { tab = "servers" },
-                        onAddServer = { showAdd = true },
-                    )
-                }
-            }
-            if (pushed == null) {
-                TabBar(
-                    items = tabs,
-                    selected = tab,
-                    onSelect = { tab = it },
-                    modifier = Modifier.align(Alignment.BottomCenter),
+                else -> HomeScreen(
+                    vm = vm,
+                    onToggle = ::toggleVpn,
+                    onAdd = { showAdd = true },
+                    onOpenSettings = { push("settings") },
                 )
             }
             Column(

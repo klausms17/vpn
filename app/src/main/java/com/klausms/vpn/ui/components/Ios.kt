@@ -584,67 +584,6 @@ fun GlassToast(text: String) {
     }
 }
 
-/** Height of the floating tab bar with its margins (content padding). */
-val TabBarSpace = 98.dp
-
-/** Space to leave under content for the tab bar and the system navigation bar. */
-@Composable
-fun tabBarClearance(): Dp = TabBarSpace + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-
 /** Space to leave under content for the system navigation bar. */
 @Composable
 fun navBarClearance(): Dp = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-
-// ---------------------------------------------------------------- tab bar
-
-data class TabItem(val key: String, val title: String, @DrawableRes val icon: Int)
-
-/** Floating Liquid Glass capsule with the app's three tabs. */
-@Composable
-fun TabBar(items: List<TabItem>, selected: String, onSelect: (String) -> Unit, modifier: Modifier = Modifier) {
-    Row(
-        modifier
-            .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(start = 20.dp, end = 20.dp, bottom = 20.dp)
-            .fillMaxWidth()
-            .height(62.dp)
-            // Opaque, same tone as the glass over black: without a
-            // backdrop blur, rows scrolled under the bar must not show through.
-            .glass(RoundedCornerShape(31.dp), fill = Color(0xFF202022), elevation = 16.dp)
-            .padding(4.dp),
-    ) {
-        for (item in items) {
-            val isSelected = item.key == selected
-            val source = remember { MutableInteractionSource() }
-            val pressed by source.collectIsPressedAsState()
-            val bg by animateColorAsState(
-                when {
-                    isSelected -> Color(0x24FFFFFF)
-                    pressed -> Color(0x14FFFFFF)
-                    else -> Color.Transparent
-                },
-                label = "tab",
-            )
-            val tint = if (isSelected) kc.green else kc.label
-            Column(
-                Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .clip(RoundedCornerShape(27.dp))
-                    .background(bg)
-                    .tap(source, role = Role.Tab) { onSelect(item.key) }
-                    .semantics {
-                        contentDescription = item.title
-                        // this.: the function's own parameter is also named "selected".
-                        this.selected = isSelected
-                    },
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-            ) {
-                IosIcon(item.icon, tint, Modifier.size(25.dp))
-                Spacer(Modifier.height(1.dp))
-                Text(item.title, style = IosType.tab, color = tint, maxLines = 1)
-            }
-        }
-    }
-}

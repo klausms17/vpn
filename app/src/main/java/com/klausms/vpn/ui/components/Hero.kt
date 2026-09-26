@@ -93,10 +93,18 @@ private suspend fun loadLand(context: Context): Path = withContext(Dispatchers.D
 /**
  * The atmosphere behind the main screen: a faint map of Europe, a green
  * glow while connected (amber while connecting) and a pin on the server's
- * country. [heroCenterY] is where the connect disc is, in pixels.
+ * country. [centerY] is where the connect disc is, in pixels (NaN until it
+ * is laid out); [alpha] fades the whole backdrop, e.g. while scrolling away.
+ * Both are read only while drawing, so scrolling never recomposes.
  */
 @Composable
-fun HeroBackdrop(state: HeroState, heroCenterY: Float, pin: Offset?, modifier: Modifier = Modifier) {
+fun HeroBackdrop(
+    state: HeroState,
+    centerY: () -> Float,
+    pin: Offset?,
+    modifier: Modifier = Modifier,
+    alpha: () -> Float = { 1f },
+) {
     val context = LocalContext.current
     val land by produceState<Path?>(null) { value = loadLand(context) }
     val on = state == HeroState.ON
@@ -114,7 +122,9 @@ fun HeroBackdrop(state: HeroState, heroCenterY: Float, pin: Offset?, modifier: M
         label = "pin",
     )
 
-    Canvas(modifier.fillMaxSize()) {
+    Canvas(modifier.fillMaxSize().graphicsLayer { this.alpha = alpha() }) {
+        val heroCenterY = centerY()
+        if (heroCenterY.isNaN()) return@Canvas
         val s = size.width / BOARD_W
         val top = heroCenterY - HERO_Y * s
         // Ambient light around the hero.
