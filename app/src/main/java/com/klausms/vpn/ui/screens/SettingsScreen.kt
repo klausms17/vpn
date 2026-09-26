@@ -8,7 +8,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
@@ -63,11 +62,9 @@ private val TileGray = Color(0xFF636366)
 fun SettingsScreen(vm: MainViewModel, onNavigate: (String) -> Unit) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val geoVersion by vm.geoVersion.collectAsStateWithLifecycle()
-    val coreVersion by vm.coreVersion.collectAsStateWithLifecycle()
     SettingsContent(
         settings = settings,
         geoVersion = geoVersion,
-        coreVersion = coreVersion,
         onRussianApps = { v -> vm.updateSettings { it.copy(bypassRussianApps = v) } },
         onUpdateGeo = { vm.updateGeo() },
         onNavigate = onNavigate,
@@ -78,7 +75,6 @@ fun SettingsScreen(vm: MainViewModel, onNavigate: (String) -> Unit) {
 fun SettingsContent(
     settings: AppSettings,
     geoVersion: Long,
-    coreVersion: String,
     onRussianApps: (Boolean) -> Unit,
     onUpdateGeo: () -> Unit,
     onNavigate: (String) -> Unit,
@@ -101,31 +97,28 @@ fun SettingsContent(
             item {
                 InsetGroup {
                     ListRow(
-                        title = "Российские приложения",
+                        title = "Российские сервисы",
                         leading = { IconTile(R.drawable.ic_split_ios, TileBlue) },
                         trailing = {
                             IosSwitch(
                                 checked = settings.bypassRussianApps,
                                 onCheckedChange = onRussianApps,
-                                description = "Российские приложения без VPN",
+                                description = "Российские сервисы без VPN",
                             )
                         },
                         onClick = { onRussianApps(!settings.bypassRussianApps) },
                     )
-                }
-            }
-            item { SectionFooter("Банки, Госуслуги, маркетплейсы и операторы работают напрямую и не видят VPN.") }
-            item {
-                InsetGroup(Modifier.androidPaddingTop()) {
+                    RowDivider(start = 57.dp)
                     ListRow(
-                        title = "Выбрать приложения",
-                        value = "Выбрано: ${settings.excludedApps.size}",
+                        title = "Другие приложения",
+                        value = settings.excludedApps.size.takeIf { it > 0 }?.toString(),
                         chevron = true,
                         leading = { IconTile(R.drawable.ic_grid_ios, TileIndigo) },
                         onClick = { onNavigate("apps") },
                     )
                 }
             }
+            item { SectionFooter("Банки, Госуслуги, маркетплейсы и операторы работают напрямую и не видят VPN.") }
 
             item { SectionHeader("Надёжность") }
             item {
@@ -136,63 +129,54 @@ fun SettingsContent(
                         leading = { IconTile(R.drawable.ic_power_ios, TileGreen) },
                         onClick = { openSystem(context, Intent(Settings.ACTION_VPN_SETTINGS)) },
                     )
-                }
-            }
-            item {
-                SectionFooter(
-                    "Включите «Постоянная VPN» — VPN сам запустится после перезагрузки телефона. " +
-                        "«Блокировать соединения без VPN» не включайте: банки и Госуслуги останутся без интернета.",
-                )
-            }
-            item {
-                InsetGroup(Modifier.androidPaddingTop()) {
+                    RowDivider(start = 57.dp)
                     ListRow(
                         title = "Работа в фоне",
-                        value = if (batteryUnrestricted) "Разрешено" else "Нужно разрешить",
-                        valueColor = if (batteryUnrestricted) kc.green else kc.orange,
+                        value = if (batteryUnrestricted) "Разрешено" else "Разрешить",
+                        valueColor = if (batteryUnrestricted) kc.secondary else kc.orange,
                         chevron = true,
                         leading = { IconTile(R.drawable.ic_battery_ios, TileOrange) },
                         onClick = { requestUnrestrictedBattery(context) },
                     )
                 }
             }
-            if (!batteryUnrestricted) {
-                item { SectionFooter("Без этого Xiaomi, Huawei, Samsung и другие могут выключать VPN в фоне.") }
+            item {
+                SectionFooter(
+                    buildString {
+                        if (!batteryUnrestricted) append("Разрешите работу в фоне, иначе телефон может выключать VPN. ")
+                        append("В «Постоянном VPN» включите «Постоянная VPN» — VPN сам запустится после перезагрузки. ")
+                        append("«Блокировать соединения без VPN» не включайте: банки и Госуслуги останутся без интернета.")
+                    },
+                )
             }
 
             item { SectionHeader("Если что-то не работает") }
             item {
                 InsetGroup {
                     ListRow(
-                        title = "Журнал",
+                        title = "Сообщить о проблеме",
                         chevron = true,
                         leading = { IconTile(R.drawable.ic_list_ios, TileGray) },
                         onClick = { onNavigate("logs") },
                     )
                     RowDivider(start = 57.dp)
-                    val date = if (geoVersion > 0) "от " + SimpleDateFormat("dd.MM.yyyy", Locale.US).format(Date(geoVersion * 1000)) else null
                     ListRow(
-                        title = "Обновить списки сайтов",
-                        value = date,
+                        title = "Обновить списки",
+                        subtitle = listsDate(geoVersion)?.let { "Обновлены $it" },
                         leading = { IconTile(R.drawable.ic_refresh_ios, TileBlue) },
                         onClick = { confirmGeo = true },
                     )
                 }
             }
+            item { SectionFooter("Если российский сайт не открывается или открывается через VPN, обновите списки.") }
 
             item { SectionHeader("О приложении") }
             item {
                 InsetGroup {
                     ListRow(
-                        title = "Klaus VPN",
+                        title = "Версия",
                         value = BuildConfig.VERSION_NAME,
                         leading = { IconTile(R.drawable.ic_tab_vpn, TileGreen) },
-                    )
-                    RowDivider(start = 57.dp)
-                    ListRow(
-                        title = "Ядро Xray",
-                        value = coreVersion.ifBlank { "—" },
-                        leading = { IconTile(R.drawable.ic_chip_ios, TileGray) },
                     )
                     RowDivider(start = 57.dp)
                     ListRow(
@@ -225,8 +209,14 @@ fun SettingsContent(
     }
 }
 
-/** Space between two groups that belong to one section. */
-private fun Modifier.androidPaddingTop(): Modifier = this.then(Modifier.padding(top = 16.dp))
+/** "24 сентября", with the year when it is not this one. */
+private fun listsDate(epochSeconds: Long): String? {
+    if (epochSeconds <= 0) return null
+    val date = Date(epochSeconds * 1000)
+    val ru = Locale.forLanguageTag("ru")
+    val thisYear = SimpleDateFormat("yyyy", ru).format(Date()) == SimpleDateFormat("yyyy", ru).format(date)
+    return SimpleDateFormat(if (thisYear) "d MMMM" else "d MMMM yyyy", ru).format(date)
+}
 
 private fun isIgnoringBatteryOptimizations(context: Context): Boolean =
     context.getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(context.packageName) == true

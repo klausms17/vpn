@@ -38,7 +38,7 @@ private fun readOfl(context: Context): String =
     context.assets.open("licenses/inter-OFL.txt").bufferedReader().use { it.readText() }
 
 @Composable
-fun LicensesScreen(onBack: () -> Unit) {
+fun LicensesScreen(coreVersion: String, onBack: () -> Unit) {
     val context = LocalContext.current
     val ofl by produceState("") { value = withContext(Dispatchers.IO) { runCatching { readOfl(context) }.getOrDefault("") } }
     Column(Modifier.fillMaxSize().background(kc.page)) {
@@ -49,7 +49,9 @@ fun LicensesScreen(onBack: () -> Unit) {
                 InsetGroup {
                     components.forEachIndexed { i, (name, license, site) ->
                         if (i > 0) RowDivider()
-                        ListRow(title = name, subtitle = "$license · $site")
+                        // The core's version is shown here, not among the settings.
+                        val title = if (i == 0 && coreVersion.isNotBlank()) "$name $coreVersion" else name
+                        ListRow(title = title, subtitle = "$license · $site")
                     }
                 }
             }

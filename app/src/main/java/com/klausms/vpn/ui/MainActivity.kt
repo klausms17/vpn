@@ -135,7 +135,10 @@ class MainActivity : ComponentActivity() {
             when (pushed) {
                 "apps" -> AppsScreen(vm = vm, includeMode = false, onBack = { pushed = null })
                 "logs" -> LogsScreen(vm = vm, onBack = { pushed = null })
-                "licenses" -> LicensesScreen(onBack = { pushed = null })
+                "licenses" -> {
+                    val coreVersion by vm.coreVersion.collectAsStateWithLifecycle()
+                    LicensesScreen(coreVersion, onBack = { pushed = null })
+                }
                 else -> when (tab) {
                     "servers" -> ServersScreen(vm = vm, onAdd = { showAdd = true })
                     "settings" -> SettingsScreen(vm = vm, onNavigate = { pushed = it })

@@ -180,6 +180,11 @@ fun ServersContent(
                     SectionFooter(sub.lastError?.let { "Не удалось обновить: $it" } ?: updatedText(sub.updatedAt))
                 }
             }
+            if (profiles.profiles.any { whitelist[it.address] == 1 }) {
+                item(key = "whitelist-note") {
+                    SectionFooter("Серверы с пометкой «белый список» работают, даже когда мобильный интернет ограничен.")
+                }
+            }
         }
         ScrollEdge("Серверы", collapsed)
     }

@@ -132,7 +132,6 @@ class ScreenshotTest {
         SettingsContent(
             settings = AppSettings(excludedApps = setOf("ru.sberbankmobile", "ru.gosuslugi")),
             geoVersion = 1_790_000_000L,
-            coreVersion = "26.9.9",
             onRussianApps = {},
             onUpdateGeo = {},
             onNavigate = {},
