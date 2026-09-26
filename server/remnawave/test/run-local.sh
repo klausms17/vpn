@@ -13,9 +13,14 @@
 #                     hwid-limit, backup
 #   install-node.sh   remnanode on the host network, run again with only
 #                     PANEL_IP (as after a panel move)
+#   telegram-setup    against a mock Telegram API (test/mock-apis.py): the
+#                     chat is taken from getUpdates, a test message goes out,
+#                     the panel's own node messages arrive too
+#   publish-apk       against a mock GitHub API with a fake release
 #
 # and then
-#   (a) the app's User-Agent gets a base64 list with a vless REALITY link,
+#   (a) the app's User-Agent gets a base64 list with a vless REALITY link
+#       and the klaus-report-url / klaus-app-url headers,
 #   (b) a browser gets the page; its Klaus VPN button is klausvpn://add/…,
 #   (c) the device from X-Hwid is recorded in the panel,
 #   (d) the app's own Go core (libxray, via test/e2e) parses the
@@ -23,19 +28,24 @@
 #   plus: a disabled friend is refused by the node, a disabled node leaves
 #   the subscription, the device limit works, a domain change reaches Caddy,
 #   the support link follows SUPPORT_URL (never the panel's placeholder),
-#   the node keeps its custom port on a re-run, and a backup restored into a
-#   fresh panel serves the same link, also after failed attempts (which
-#   leave no half-restored database, and a run without RESTORE refuses to
-#   build an empty panel over them).
+#   the node keeps its custom port on a re-run, the APK is published with a
+#   verified checksum (a wrong one is refused) on https://SUB/app/ with
+#   version.json and the page's download button, block reports (unknown
+#   friend refused, one friend twice is no alert, two friends are exactly
+#   one Russian alert, then quiet; rate limit; no IPs or ids in the logs),
+#   and a backup restored into a fresh panel serves the same link, the app
+#   and the monitor, also after failed attempts (which leave no
+#   half-restored database, and a run without RESTORE refuses to build an
+#   empty panel over them).
 #
 # Everything is removed at the end (the images stay); KEEP=1 leaves it
 # running. Logs stay in $WORK.
 #
 # Needs root (it adds 11.11.11.11 to lo for the test page: the profile
-# blocks private addresses), Docker with compose, go, jq, curl, openssl,
-# iproute2, the free ports 80, 443, 3000, 3001, 3010, 6767, 42222, 44443,
-# 44080 and no real Remnawave on this machine. Missing images are pulled
-# from mirror.gcr.io (Docker Hub limits anonymous pulls).
+# blocks private addresses), Docker with compose, go, python3, jq, curl,
+# openssl, iproute2, the free ports 80, 443, 3000, 3001, 3010, 6767, 42222,
+# 44443, 44080, 18090 and no real Remnawave on this machine. Missing images
+# are pulled from mirror.gcr.io (Docker Hub limits anonymous pulls).
 #
 #   sudo bash server/remnawave/test/run-local.sh
 set -euo pipefail
@@ -57,7 +67,16 @@ TOKEN="klaus-e2e-$RANDOM$RANDOM"
 HWID=5f2a9c1e7b3d4e6f8a0b1c2d3e4f5a6b
 UA_APP='KlausVPN/1.0.99 (Android)'
 UA_BROWSER='Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36'
-IMAGES="remnawave/backend:3 postgres:18.4 valkey/valkey:9-alpine remnawave/subscription-page:latest caddy:2 remnawave/node:latest"
+IMAGES="remnawave/backend:3 postgres:18.4 valkey/valkey:9-alpine remnawave/subscription-page:latest caddy:2 remnawave/node:latest python:3-alpine"
+MOCK_PORT=18090 # mock Telegram and GitHub APIs
+TG_BOT_TOKEN=123456789:AAklaus-e2e-bot-token-0123456789abcdef
+TG_CHAT=4242
+GH_TEST_TOKEN=github_pat_klaus_e2e_0123456789
+RELEASE=build-claude-compassionate-mayer-6jph8m
+APK_VERSION=1.0.99
+SPOOFED_IP=203.0.113.77 # a client IP that must never reach the monitor's log
+# This machine's own tokens must never reach the panel under test.
+unset GITHUB_TOKEN GH_TOKEN TELEGRAM_API_BASE
 
 step() { printf '\n\033[1;36m### %s\033[0m\n' "$*"; }
 pass() { printf '\033[1;32mPASS\033[0m %s\n' "$*"; }
@@ -65,10 +84,10 @@ fail() { printf '\033[1;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- checks
 [ "$(id -u)" -eq 0 ] || fail "run as root"
-for c in docker go jq curl openssl ip base64; do command -v "$c" >/dev/null || fail "missing $c"; done
+for c in docker go python3 jq curl openssl ip base64 sha256sum; do command -v "$c" >/dev/null || fail "missing $c"; done
 docker info >/dev/null 2>&1 || fail "docker is not running"
 if [ -e /opt/remnawave ] || [ -e /opt/remnanode ]; then fail "this machine has a real Remnawave setup; not touching it"; fi
-for c in remnawave remnawave-db remnawave-redis remnawave-subscription-page caddy remnanode; do
+for c in remnawave remnawave-db remnawave-redis remnawave-subscription-page caddy remnanode klaus-monitor; do
   docker inspect "$c" >/dev/null 2>&1 && fail "container $c already exists"
 done
 for img in $IMAGES; do
@@ -84,6 +103,7 @@ echo "work dir: $WORK"
 
 # ---------------------------------------------------------------- teardown
 SERVE_PID=""
+MOCK_PID=""
 teardown() {
   local rc=$?
   if [ "$KEEP" = "1" ]; then
@@ -95,6 +115,7 @@ teardown() {
   done
   if [ -f "$WORK/node/docker-compose.yml" ]; then docker compose --project-directory "$WORK/node" down >/dev/null 2>&1 || true; fi
   if [ -n "$SERVE_PID" ]; then kill "$SERVE_PID" 2>/dev/null || true; fi
+  if [ -n "$MOCK_PID" ]; then kill "$MOCK_PID" 2>/dev/null || true; fi
   ip addr del "$WEB_IP/32" dev lo 2>/dev/null || true
   echo
   if [ "$rc" -eq 0 ]; then echo "ALL CHECKS PASSED (containers removed, images kept; logs in $WORK)"; else echo "FAILED (logs in $WORK)"; fi
@@ -116,7 +137,16 @@ limits_override() { # DIR SERVICE...
 }
 
 # ---------------------------------------------------------------- helpers
-kp() { KLAUS_PANEL_CONF="$CONF" bash "$RWS/klaus-panel" "$@"; }
+# The mock APIs are local: no proxy of this machine in between.
+kp() { no_proxy='*' NO_PROXY='*' KLAUS_PANEL_CONF="$CONF" bash "$RWS/klaus-panel" "$@"; }
+mock() { # PATH [curl args]: the mock APIs' own test endpoints
+  local path="$1"
+  shift
+  curl -fsS --noproxy '*' "$@" "http://127.0.0.1:$MOCK_PORT$path"
+}
+sent_count() { # TEXT_PREFIX -> how many Telegram messages start with it
+  mock /_mock/tg/sent | jq --arg p "$1" '[.[] | select(.text | startswith($p))] | length'
+}
 api() { # PATH -> body (read-only calls with the CLI token)
   local tok
   # shellcheck disable=SC1090
@@ -135,6 +165,17 @@ https_get() { # NAME [curl args] -> body of https://NAME/ through Caddy
   shift
   curl -fsS --noproxy '*' --resolve "$name:443:127.0.0.1" --cacert "$WORK/caddy-root.crt" "$@" "https://$name/"
 }
+sub_code() { # PATH [curl args] -> HTTP status of https://SUB_DOMAIN/PATH (body in $WORK/last.body)
+  local path="$1"
+  shift
+  curl -sS --noproxy '*' --resolve "$SUB_DOMAIN:443:127.0.0.1" --cacert "$WORK/caddy-root.crt" \
+    -o "$WORK/last.body" -w '%{http_code}' "$@" "https://$SUB_DOMAIN/$path"
+}
+report() { # SHORT_UUID NETWORK [OPERATOR] -> HTTP status of a block report, as the app sends it
+  sub_code klaus/report -A "$UA_APP" -H "X-Forwarded-For: $SPOOFED_IP" --get \
+    --data-urlencode "s=$1" --data-urlencode "h=127.0.0.1" --data-urlencode "p=$VPN_PORT" \
+    --data-urlencode "k=vless" --data-urlencode "n=$2" --data-urlencode "o=${3:-}" --data-urlencode "v=$APK_VERSION"
+}
 support_links() { # -> {header, page}: the support link in subscriptions and on the page
   local u
   u="$(api /api/subscription-page-configs | jq -r 'first((.response.configs[] | select(.uuid == "00000000-0000-0000-0000-000000000000")), .response.configs[0]) | .uuid')"
@@ -148,7 +189,7 @@ db_volume() { docker volume inspect remnawave-db-data >/dev/null 2>&1; }
 install_panel() { # RW_DIR ADMIN_FILE [VAR=value...]
   local dir="$1" admin="$2"
   shift 2
-  limits_override "$dir" remnawave remnawave-db remnawave-redis remnawave-subscription-page caddy
+  limits_override "$dir" remnawave remnawave-db remnawave-redis remnawave-subscription-page caddy klaus-monitor
   env RW_DIR="$dir" ADMIN_FILE="$admin" SKIP_SYSTEM=1 CADDY_TLS=internal PANEL_IP=127.0.0.1 "$@" \
     bash "$RWS/install-panel.sh"
 }
@@ -171,6 +212,15 @@ SERVE_PID=$!
 retry 10 curl -fsS --noproxy '*' -o /dev/null "http://$WEB/" 2>/dev/null || fail "test page did not start"
 pass "test page answers"
 
+step "Mock Telegram and GitHub APIs on :$MOCK_PORT (a fake release with KlausVPN-$APK_VERSION.apk)"
+APK="$WORK/KlausVPN-$APK_VERSION.apk"
+head -c 3000000 /dev/urandom > "$APK"
+python3 "$HERE/mock-apis.py" --port "$MOCK_PORT" --tg-token "$TG_BOT_TOKEN" --gh-token "$GH_TEST_TOKEN" \
+  --tag "$RELEASE" --bad-tag klaus-bad-sum --apk "$APK" > "$WORK/mock.log" 2>&1 &
+MOCK_PID=$!
+retry 10 mock /_mock/tg/sent -o /dev/null || fail "mock APIs did not start"
+pass "mock APIs answer"
+
 step "install-panel.sh (fresh)"
 CONF="$WORK/opt/klaus-panel.env"
 install_panel "$WORK/opt" "$WORK/admin.txt" PANEL_DOMAIN="$PANEL_DOMAIN" SUB_DOMAIN="$SUB_DOMAIN" \
@@ -181,12 +231,51 @@ grep -q "Готово! Панель работает" "$WORK/install-1.log" || f
 grep -Eq '^Пароль: [A-Za-z0-9]{24,}$' "$WORK/admin.txt" || fail "admin password"
 pass "panel installed, admin saved to admin.txt (600)"
 
+step "klaus-panel telegram-setup: waits for a message to the bot, takes its chat, sends a test message"
+# The panel's containers reach the mock on the host through the bridge.
+GW="$(docker network inspect remnawave-network -f '{{(index .IPAM.Config 0).Gateway}}')"
+TG_API="http://$GW:$MOCK_PORT"
+if TELEGRAM_API_BASE="$TG_API" kp telegram-setup 123456789:AAwrong-token-000000000000000000000 > "$WORK/tg-wrong.log" 2>&1; then
+  fail "a wrong bot token was accepted"
+fi
+tail -n 1 "$WORK/tg-wrong.log"
+TELEGRAM_API_BASE="$TG_API" kp telegram-setup "$TG_BOT_TOKEN" > "$WORK/tg-setup.log" 2>&1 &
+tg_pid=$!
+sleep 4
+kill -0 "$tg_pid" 2>/dev/null || { cat "$WORK/tg-setup.log"; fail "telegram-setup did not wait for a message"; }
+grep -q "@klaus_e2e_bot" "$WORK/tg-setup.log" || fail "the bot's name is not shown"
+mock /_mock/tg/say -X POST -H 'Content-Type: application/json' -d "{\"chat_id\": $TG_CHAT, \"first_name\": \"Klaus\", \"text\": \"привет\"}" >/dev/null
+wait "$tg_pid" || { cat "$WORK/tg-setup.log"; fail "telegram-setup failed"; }
+cat "$WORK/tg-setup.log"
+grep -q "($TG_CHAT)" "$WORK/tg-setup.log" || fail "chat not taken from getUpdates"
+mock /_mock/tg/sent | jq -c '.[] | {chat_id, text: .text[0:60]}'
+[ "$(mock /_mock/tg/sent | jq --arg c "$TG_CHAT" '[.[] | select(.chat_id == $c and (.text | startswith("Klaus VPN: оповещения включены")))] | length')" = "1" ] ||
+  fail "no test message to chat $TG_CHAT"
+grep -E '^(IS_TELEGRAM_NOTIFICATIONS_ENABLED|TELEGRAM_BOT_API_ROOT|TELEGRAM_NOTIFY_NODES)=' "$WORK/opt/.env"
+grep -qx "IS_TELEGRAM_NOTIFICATIONS_ENABLED=true" "$WORK/opt/.env" || fail "panel notifications not enabled"
+grep -qx "TELEGRAM_NOTIFY_NODES=$TG_CHAT" "$WORK/opt/.env" || fail "panel does not notify the chat"
+grep -qx "TELEGRAM_BOT_API_ROOT=$TG_API" "$WORK/opt/.env" || fail "panel does not use the mock"
+grep -qx "TELEGRAM_CHAT_ID=$TG_CHAT" "$WORK/opt/klaus-monitor.env" || fail "monitor settings"
+[ "$(docker exec klaus-monitor printenv TELEGRAM_CHAT_ID)" = "$TG_CHAT" ] || fail "monitor not recreated with the chat"
+[ "$(docker exec remnawave printenv TELEGRAM_NOTIFY_NODES)" = "$TG_CHAT" ] || fail "panel not recreated with the chat"
+kp telegram-test
+[ "$(sent_count "Klaus VPN: проверка оповещений")" = "1" ] || fail "telegram-test"
+pass "chat $TG_CHAT taken from getUpdates, test messages sent, panel and monitor recreated with it"
+
 step "install-panel.sh again (must change nothing)"
 caddy_started="$(docker inspect -f '{{.State.StartedAt}}' caddy)"
+panel_started="$(docker inspect -f '{{.State.StartedAt}}' remnawave)"
+monitor_started="$(docker inspect -f '{{.State.StartedAt}}' klaus-monitor)"
+baks_before="$(find "$WORK/opt" -maxdepth 1 -name '*.bak-*' | sort)"
+cp "$WORK/opt/klaus-monitor.env" "$WORK/monitor.env.before"
 install_panel "$WORK/opt" "$WORK/admin.txt" 2>&1 | tee "$WORK/install-2.log"
 grep -q "Готово! Панель работает" "$WORK/install-2.log" || fail "re-run failed"
-if grep -E "Создаю|Обновляю|Перезапускаю Caddy" "$WORK/install-2.log"; then fail "re-run created or changed something"; fi
+if grep -E "Создаю|Обновляю|Перезапускаю" "$WORK/install-2.log"; then fail "re-run created or changed something"; fi
 [ "$(docker inspect -f '{{.State.StartedAt}}' caddy)" = "$caddy_started" ] || fail "re-run restarted Caddy for nothing"
+[ "$(docker inspect -f '{{.State.StartedAt}}' remnawave)" = "$panel_started" ] || fail "re-run restarted the panel (Telegram lines of .env not kept?)"
+[ "$(docker inspect -f '{{.State.StartedAt}}' klaus-monitor)" = "$monitor_started" ] || fail "re-run restarted the monitor"
+[ "$(find "$WORK/opt" -maxdepth 1 -name '*.bak-*' | sort)" = "$baks_before" ] || fail "re-run rewrote settings files"
+cmp -s "$WORK/opt/klaus-monitor.env" "$WORK/monitor.env.before" || fail "re-run changed the monitor settings"
 counts="$(jq -n --argjson p "$(api /api/config-profiles)" --argjson s "$(api /api/internal-squads)" \
   --argjson r "$(api /api/subscription-settings)" '{
     profiles: [$p.response.configProfiles[] | select(.name == "KlausVPN")] | length,
@@ -196,8 +285,17 @@ echo "$counts"
 jq -e '.profiles == 1 and .squads == 1 and ([.rules[] | select(. == "Klaus VPN")] | length) == 1
   and .rules[0] == "Browser Subscription" and .rules[1] == "Klaus VPN" and .rules[-1] == "Fallback Base64"' <<<"$counts" >/dev/null ||
   fail "duplicates or wrong rule order"
-pass "re-run is idempotent; rule order: browser, Klaus VPN, …, fallback"
+pass "re-run is idempotent (also after telegram-setup); rule order: browser, Klaus VPN, …, fallback"
 docker exec caddy cat /data/caddy/pki/authorities/local/root.crt > "$WORK/caddy-root.crt"
+
+step "Caddy: the monitor on /klaus/, nothing published on /app/ yet"
+code="$(sub_code klaus/health)"
+echo "https://$SUB_DOMAIN/klaus/health -> $code $(cat "$WORK/last.body")"
+[ "$code" = "200" ] || fail "monitor health"
+code="$(sub_code app/version.json)"
+echo "https://$SUB_DOMAIN/app/version.json -> $code"
+[ "$code" = "404" ] || fail "version.json before publishing"
+pass "/klaus/health answers, /app/ is empty"
 
 step "Caddy: the panel on its domain, nothing for other names"
 code="$(curl -sS --noproxy '*' --resolve "$PANEL_DOMAIN:443:127.0.0.1" --cacert "$WORK/caddy-root.crt" \
@@ -240,7 +338,6 @@ cmp -s "$WORK/support-0.json" "$WORK/support-2.json" || fail "support link did n
 pass "back on $SUB_DOMAIN; support link as without SUPPORT_URL again"
 
 step "klaus-panel add-node + install-node.sh"
-GW="$(docker network inspect remnawave-network -f '{{(index .IPAM.Config 0).Gateway}}')"
 kp add-node test-node "$GW" DE --title "Германия" --host 127.0.0.1 --node-port "$NODE_PORT" > "$WORK/add-node.log"
 sed -E "s/SECRET_KEY='[^']+'/SECRET_KEY='…'/" "$WORK/add-node.log"
 SECRET_KEY="$(grep -o "SECRET_KEY='[^']*'" "$WORK/add-node.log" | sed "s/^SECRET_KEY='//; s/'$//")"
@@ -252,6 +349,13 @@ node_up() { grep -q "на связи" <<<"$(kp list-nodes)"; }
 retry 45 node_up || { kp list-nodes; fail "node did not connect"; }
 kp list-nodes
 pass "node connected"
+
+step "the panel's own Telegram messages about servers reach the chat"
+panel_msgs() { mock /_mock/tg/sent | jq --arg c "$TG_CHAT" '[.[] | select(.chat_id == $c and (.text | test("#node")))]'; }
+has_node_msg() { [ "$(panel_msgs | jq 'length')" -gt 0 ]; }
+retry 20 has_node_msg || fail "no node message from the panel"
+panel_msgs | jq -r '.[].text' | grep -o '#node[A-Za-z]*' | sort | uniq -c
+pass "Remnawave sends its node notifications to chat $TG_CHAT"
 
 step "install-node.sh again with only PANEL_IP (after a panel move): NODE_PORT $NODE_PORT stays"
 env NODE_DIR="$WORK/node" SKIP_SYSTEM=1 PANEL_IP=127.0.0.1 bash "$RWS/install-node.sh" 2>&1 | tee "$WORK/install-node-2.log"
@@ -279,11 +383,14 @@ base64 -d "$WORK/a.body" > "$WORK/a.links" || fail "body is not base64"
 cat "$WORK/a.links"; echo
 grep -q "^HTTP/[0-9.]* 200" "$WORK/last.headers" || fail "status"
 grep -qi '^profile-title: Klaus VPN' "$WORK/last.headers" || fail "profile-title"
+grep -iE '^klaus-(report|app)-url' "$WORK/last.headers"
+grep -qi "^klaus-report-url: https://$SUB_DOMAIN/klaus/report" "$WORK/last.headers" || fail "klaus-report-url"
+grep -qi "^klaus-app-url: https://$SUB_DOMAIN/app/version.json" "$WORK/last.headers" || fail "klaus-app-url"
 if grep -i '^support-url' "$WORK/last.headers"; then fail "support-url header without SUPPORT_URL"; fi
 if grep -qi 'dummy\.docs\.rw' "$WORK/last.headers"; then fail "placeholder in the headers"; fi
 grep -Eq "^vless://[0-9a-f-]+@127\.0\.0\.1:$VPN_PORT\?.*security=reality.*pbk=.*#%D0%93%D0%B5%D1%80%D0%BC%D0%B0%D0%BD%D0%B8%D1%8F$" "$WORK/a.links" ||
   fail "no vless reality link named Германия"
-pass "base64 list with a vless REALITY link"
+pass "base64 list with a vless REALITY link; report and app URLs in the headers"
 
 step "(b) a browser gets the page with the Klaus VPN button"
 sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' -c "$WORK/cookies" > "$WORK/b.html"
@@ -303,6 +410,57 @@ jq -e --arg p "https://$SUB_DOMAIN/" '.brandingSettings.supportUrl == $p' "$WORK
 if grep -q 'dummy\.docs\.rw' "$WORK/b.html" "$WORK/b.config.json"; then fail "placeholder support link on the page"; fi
 echo "the page turns the button into: klausvpn://add/$SUB"
 pass "HTML page; Klaus VPN first with klausvpn://add/{{SUBSCRIPTION_LINK}} and the APK button, default apps kept"
+
+step "publish-apk: from the GitHub release to https://$SUB_DOMAIN/app/ (checksum verified)"
+page_apk_buttons() { # -> the Klaus VPN block's download buttons in the panel's page settings
+  local u
+  u="$(api /api/subscription-page-configs | jq -r 'first((.response.configs[] | select(.uuid == "00000000-0000-0000-0000-000000000000")), .response.configs[0]) | .uuid')"
+  api "/api/subscription-page-configs/$u" > "$WORK/page-config.json"
+  jq -c '[.response.config.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external") | {link, text: .text.ru}]' "$WORK/page-config.json"
+}
+if kp publish-apk > "$WORK/publish-0.log" 2>&1; then fail "publish-apk without GITHUB_TOKEN went through"; fi
+tail -n 1 "$WORK/publish-0.log"
+grep -q "нет GITHUB_TOKEN" "$WORK/publish-0.log" || fail "wrong refusal without a token"
+# The owner adds the token later (and drops APK_URL: the app comes from here now).
+install_panel "$WORK/opt" "$WORK/admin.txt" GITHUB_TOKEN="$GH_TEST_TOKEN" GITHUB_API="http://127.0.0.1:$MOCK_PORT" APK_URL= \
+  2>&1 | tee "$WORK/install-5.log"
+grep -q "Готово! Панель работает" "$WORK/install-5.log" || fail "re-run with GITHUB_TOKEN failed"
+echo "download buttons without APK_URL, nothing published: $(page_apk_buttons)"
+[ "$(page_apk_buttons)" = "[]" ] || fail "download button without an APK"
+if kp publish-apk --tag klaus-bad-sum > "$WORK/publish-bad.log" 2>&1; then fail "an APK with a wrong checksum was published"; fi
+cat "$WORK/publish-bad.log"
+grep -q "контрольная сумма" "$WORK/publish-bad.log" || fail "wrong refusal of a bad checksum"
+if compgen -G "$WORK/opt/app/*" >/dev/null || [ -e "$WORK/opt/.app-staging" ]; then fail "the refused APK was left behind"; fi
+kp publish-apk | tee "$WORK/publish-1.log"
+grep -q "Опубликована версия $APK_VERSION" "$WORK/publish-1.log" || fail "publish-apk"
+code="$(sub_code app/version.json)"
+cat "$WORK/last.body"; echo
+[ "$code" = "200" ] || fail "version.json not served"
+jq -e --arg sub "$SUB_DOMAIN" --arg v "$APK_VERSION" --arg sha "$(sha256sum "$APK" | cut -d' ' -f1)" \
+  '.versionCode == 99 and .versionName == $v and .apk == "https://\($sub)/app/KlausVPN-\($v).apk" and .sha256 == $sha' \
+  "$WORK/last.body" >/dev/null || fail "version.json content"
+for f in KlausVPN.apk "KlausVPN-$APK_VERSION.apk"; do
+  code="$(sub_code "app/$f" -D "$WORK/apk.headers")"
+  echo "https://$SUB_DOMAIN/app/$f -> $code, $(grep -i '^content-type' "$WORK/apk.headers" | tr -d '\r'), sha256 $(sha256sum < "$WORK/last.body" | cut -c1-16)…"
+  [ "$code" = "200" ] || fail "$f not served"
+  cmp -s "$WORK/last.body" "$APK" || fail "$f differs from the release"
+  grep -qi '^content-type: application/vnd.android.package-archive' "$WORK/apk.headers" || fail "$f content type"
+done
+# The page restarts with its download button.
+page_up() { sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' -f -o /dev/null 2>/dev/null; }
+retry 30 page_up || fail "subscription page did not come back"
+kp publish-apk | tee "$WORK/publish-2.log"
+grep -q "уже опубликована" "$WORK/publish-2.log" || fail "the same build downloaded again"
+echo "download buttons now: $(page_apk_buttons)"
+[ "$(page_apk_buttons)" = "[{\"link\":\"https://$SUB_DOMAIN/app/KlausVPN.apk\",\"text\":\"Скачать приложение\"}]" ] ||
+  fail "no download button for the published APK"
+# What a friend's browser gets.
+sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' -c "$WORK/cookies2" -o /dev/null
+sub_get "$UA_BROWSER" "https://$SUB_DOMAIN/assets/.app-config-v2.json" -b "$WORK/cookies2" > "$WORK/b2.config.json"
+jq -e --arg a "https://$SUB_DOMAIN/app/KlausVPN.apk" \
+  '[.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external" and .link == $a)] | length == 1' \
+  "$WORK/b2.config.json" >/dev/null || fail "the page does not show the download button"
+pass "wrong checksum refused; KlausVPN.apk, KlausVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»"
 
 step "(c) the device is recorded (the limit itself is off)"
 USER_ID="$(api "/api/users/by-username/friend_1" | jq -r '.response.id')"
@@ -361,6 +519,63 @@ grep -q "@127.0.0.1:$VPN_PORT" <<<"$(sub_get "$UA_APP" "$SUB2" -H "X-Hwid: bbbbb
   fail "limit off"
 pass "limit 1: known device served, second refused, no X-Hwid flagged; off again"
 
+step "block reports from friends' apps -> one Telegram alert"
+SHORT1="${SUB##*/}"
+SHORT2="${SUB2##*/}"
+kp add-user friend_5 > "$WORK/add-user-5.log"
+SUB5="$(grep -o "https://$SUB_DOMAIN/[A-Za-z0-9_-]*" "$WORK/add-user-5.log" | head -n 1)"
+SHORT5="${SUB5##*/}"
+ALERT="Klaus VPN: сервер"
+code="$(report "unknown${SHORT1:7}" wifi)"
+echo "unknown subscription -> $code"
+[ "$code" = "403" ] || fail "an unknown subscription was not refused"
+code="$(sub_code "klaus/report?s=$SHORT1&h=127.0.0.1&p=0")"
+echo "malformed report -> $code"
+[ "$code" = "400" ] || fail "a malformed report was accepted"
+for i in 1 2; do
+  code="$(report "$SHORT1" mobile "МТС")"
+  echo "friend_1 (МТС) report $i -> $code"
+  [ "$code" = "200" ] || fail "report refused"
+done
+sleep 3
+[ "$(sent_count "$ALERT")" = "0" ] || fail "one friend alone raised an alert"
+echo "one friend twice: no alert"
+code="$(report "$SHORT2" wifi)"
+echo "friend_2 (Wi-Fi) report -> $code"
+[ "$code" = "200" ] || fail "report refused"
+has_alert() { [ "$(sent_count "$ALERT")" -ge 1 ]; }
+retry 10 has_alert || { docker logs klaus-monitor; fail "no alert after two friends"; }
+mock /_mock/tg/sent | jq -r --arg p "$ALERT" '.[] | select(.text | startswith($p)) | "to \(.chat_id):\n\(.text)"' | tee "$WORK/alert.txt"
+[ "$(sent_count "$ALERT")" = "1" ] || fail "more than one alert"
+for want in "«Германия»" "у 2 человек" "МТС ×1" "Wi-Fi ×1" "похоже на блокировку" \
+  "klaus-panel add-node" "klaus-panel disable-node test-node"; do
+  grep -qF "$want" "$WORK/alert.txt" || fail "alert text lacks: $want"
+done
+grep -q "^to $TG_CHAT:" "$WORK/alert.txt" || fail "alert went to another chat"
+code="$(report "$SHORT5" mobile "Билайн")"
+echo "friend_5 (Билайн) report -> $code"
+[ "$code" = "200" ] || fail "report refused"
+sleep 3
+[ "$(sent_count "$ALERT")" = "1" ] || fail "the cooldown did not hold back a second alert"
+echo "a third friend within the cooldown: still one alert"
+first429=""
+for i in $(seq 1 35); do
+  code="$(report "$SHORT5" other)"
+  if [ "$code" = "429" ]; then first429="$i"; break; fi
+  [ "$code" = "200" ] || fail "report $i -> $code"
+done
+echo "friend_5's report no. $((first429 + 1)) within an hour -> 429"
+[ "$first429" = "30" ] || fail "rate limit (30 per hour) not applied"
+docker logs klaus-monitor > "$WORK/monitor.log" 2>&1
+docker logs caddy > "$WORK/caddy.log" 2>&1
+cat "$WORK/monitor.log"
+for secret in "$SHORT1" "$SHORT2" "$SHORT5" "unknown${SHORT1:7}" "$SPOOFED_IP" friend_; do
+  if grep -qF "$secret" "$WORK/monitor.log" "$WORK/caddy.log"; then fail "logs contain $secret"; fi
+done
+if grep -Eq '([0-9]{1,3}\.){3}[0-9]{1,3}' "$WORK/monitor.log"; then fail "the monitor's log contains an IP address"; fi
+if grep -Eq '"(remote_ip|client_ip|uri)"' "$WORK/caddy.log"; then fail "Caddy's log keeps request addresses or links"; fi
+pass "unknown friend 403, one friend twice no alert, two friends one alert (Russian, blocking hint), cooldown, rate limit 30/h; no IPs or ids in the logs"
+
 step "backup; a restore that stops early (a .ru domain given by mistake)"
 BACKUP_DIR="$WORK/backups" kp backup
 BACKUP="$(ls "$WORK"/backups/*.tar.gz)"
@@ -408,7 +623,18 @@ retry 45 node_up || { kp list-nodes; fail "node did not reconnect to the restore
 kp list-users
 retry 10 "$WORK/e2e" check -sub "$SUB" -resolve "$SUB_DOMAIN:127.0.0.1" -cacert "$WORK/caddy-root.crt" \
   -hwid "$HWID" -url "http://$WEB/" -expect "$TOKEN" || fail "old link after restore"
-pass "restored panel: same link, node reconnected by itself, traffic flows"
+code="$(sub_code app/version.json)"
+{ [ "$code" = "200" ] && jq -e '.versionCode == 99' "$WORK/last.body" >/dev/null; } || fail "published app not restored"
+sub_code app/KlausVPN.apk >/dev/null
+cmp -s "$WORK/last.body" "$APK" || fail "restored APK differs"
+grep -qx "TELEGRAM_NOTIFY_NODES=$TG_CHAT" "$WORK/opt2/.env" || fail "Telegram settings not restored"
+monitor_up() { [ "$(sub_code klaus/health)" = "200" ]; }
+retry 20 monitor_up || fail "monitor not running after restore"
+# The restored monitor token works: a known friend is accepted.
+code="$(report "$SHORT2" wifi)"
+echo "report after restore -> $code"
+[ "$code" = "200" ] || fail "restored monitor refuses a known friend"
+pass "restored panel: same link, node reconnected by itself, traffic flows; app, Telegram and monitor back"
 
 step "RESTORE over the working panel is refused"
 if install_panel "$WORK/opt2" "$WORK/admin2.txt" RESTORE="$BACKUP" > "$WORK/install-restore-3.log" 2>&1; then

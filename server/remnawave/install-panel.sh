@@ -3,15 +3,26 @@
 # (automatic HTTPS), for handing out personal subscription links to friends.
 #
 # Run as root on a fresh Ubuntu 22.04+/Debian 12+ VPS abroad (2 CPU, 4 GB).
-# Both domains must already point at this server. Copy this file and
-# klaus-panel into one folder, then:
+# Both domains must already point at this server. Copy this file,
+# klaus-panel and klaus-monitor.py into one folder, then:
 #
 #   sudo PANEL_DOMAIN=panel.example.com SUB_DOMAIN=sub.example.com bash install-panel.sh
 #
 # Options (environment variables, written AFTER sudo):
 #   PANEL_DOMAIN   admin panel address (required)
 #   SUB_DOMAIN     subscription page address given to friends (required)
-#   APK_URL        https link to the Klaus VPN APK (adds a download button)
+#   APK_URL        https link to the Klaus VPN APK (adds a download button;
+#                  without it the button appears once "klaus-panel
+#                  publish-apk" has put the app on https://SUB_DOMAIN/app/)
+#   GITHUB_TOKEN   read-only GitHub token for the app's releases: the panel
+#                  then publishes every new build by itself (hourly)
+#   GITHUB_REPO    repository with the releases (default klausms17/vpn)
+#   RELEASE_TAG    release whose APK is published (default: the test builds
+#                  of the current branch, build-claude-compassionate-mayer-6jph8m)
+#   REPORT_THRESHOLD, REPORT_WINDOW_MIN, REPORT_COOLDOWN_MIN
+#                  Telegram alert when this many different friends' apps
+#                  (default 2) reported the same server within this many
+#                  minutes (default 20); then quiet for (default 180) minutes
 #   SUPPORT_URL    https link friends can use to reach you (e.g. https://t.me/you);
 #                  without it the page's support button only says to ask you
 #   ADMIN_USER     panel login (default admin); the password is generated
@@ -28,9 +39,12 @@
 # Variables given again (a new domain, SUPPORT_URL=… or SUPPORT_URL= to
 # remove it) replace the saved ones.
 #
+# Telegram alerts are switched on afterwards: klaus-panel telegram-setup.
+#
 # For the local test harness only (server/remnawave/test): RW_DIR, ADMIN_FILE,
-# SKIP_SYSTEM=1 (no apt/Docker/firewall/sysctl changes), CADDY_TLS=internal,
-# REALITY_TARGET=host:port, REALITY_PORT.
+# SKIP_SYSTEM=1 (no apt/Docker/firewall/sysctl/systemd changes),
+# CADDY_TLS=internal, REALITY_TARGET=host:port, REALITY_PORT, GITHUB_API,
+# TELEGRAM_API_BASE (mock APIs).
 set -euo pipefail
 
 RW_DIR="${RW_DIR:-/opt/remnawave}"
@@ -45,6 +59,9 @@ SNI_CANDIDATES="www.nvidia.com www.samsung.com www.amd.com dl.google.com www.cis
 # its own settings and which of them a user gets. The page itself (/api/sub)
 # needs no token.
 SUBPAGE_SCOPES='["system:metadata", "subscription-page-configs:list", "subscription-page-configs:get", "subscriptions:subpage-config"]'
+# The block report monitor: is this a real subscription, which servers are
+# there and are they connected.
+MONITOR_SCOPES='["users:by-short-uuid", "hosts:list", "nodes:list"]'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
@@ -53,7 +70,9 @@ warn() { printf '\033[1;33mВнимание:\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31mОшибка:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "запустите от root (sudo … bash install-panel.sh)"
-[ -f "$HERE/klaus-panel" ] || die "рядом со скриптом нет файла klaus-panel: скопируйте оба файла в одну папку"
+for f in klaus-panel klaus-monitor.py; do
+  [ -f "$HERE/$f" ] || die "рядом со скриптом нет файла $f: скопируйте install-panel.sh, klaus-panel и klaus-monitor.py в одну папку"
+done
 
 # ---------------------------------------------------------------- restore
 # A backup brings back the settings files here and the database below.
@@ -100,6 +119,12 @@ if [ -n "$RESTORE" ]; then
     if [ -f "$RESTORE_DIR/$f" ]; then install -m 600 "$RESTORE_DIR/$f" "$RW_DIR/$f"; fi
   done
   if [ -f "$RESTORE_DIR/admin.txt" ] && [ ! -f "$ADMIN_FILE" ]; then install -m 600 "$RESTORE_DIR/admin.txt" "$ADMIN_FILE"; fi
+  # The published app (klaus-panel publish-apk), so friends' update check
+  # and the download button work right away.
+  if [ -d "$RESTORE_DIR/app" ]; then
+    mkdir -p "$RW_DIR/app"
+    cp -a "$RESTORE_DIR/app/." "$RW_DIR/app/"
+  fi
 fi
 
 # Settings from a previous run are the defaults for this one; variables
@@ -121,6 +146,25 @@ REALITY_PORT="${REALITY_PORT:-$(conf_get REALITY_PORT)}"
 REALITY_PORT="${REALITY_PORT:-443}"
 PANEL_IP="${PANEL_IP:-}"
 API_TOKEN="$(conf_get API_TOKEN)"
+MONITOR_TOKEN="$(conf_get MONITOR_TOKEN)"
+# Set by "klaus-panel telegram-setup".
+TELEGRAM_BOT_TOKEN="$(conf_get TELEGRAM_BOT_TOKEN)"
+TELEGRAM_CHAT_ID="$(conf_get TELEGRAM_CHAT_ID)"
+TELEGRAM_API_BASE="${TELEGRAM_API_BASE:-$(conf_get TELEGRAM_API_BASE)}"
+TELEGRAM_API_BASE="${TELEGRAM_API_BASE:-https://api.telegram.org}"
+GITHUB_TOKEN="${GITHUB_TOKEN-$(conf_get GITHUB_TOKEN)}"
+GITHUB_REPO="${GITHUB_REPO:-$(conf_get GITHUB_REPO)}"
+GITHUB_REPO="${GITHUB_REPO:-klausms17/vpn}"
+RELEASE_TAG="${RELEASE_TAG:-$(conf_get RELEASE_TAG)}"
+RELEASE_TAG="${RELEASE_TAG:-build-claude-compassionate-mayer-6jph8m}"
+GITHUB_API="${GITHUB_API:-$(conf_get GITHUB_API)}"
+GITHUB_API="${GITHUB_API:-https://api.github.com}"
+REPORT_THRESHOLD="${REPORT_THRESHOLD:-$(conf_get REPORT_THRESHOLD)}"
+REPORT_THRESHOLD="${REPORT_THRESHOLD:-2}"
+REPORT_WINDOW_MIN="${REPORT_WINDOW_MIN:-$(conf_get REPORT_WINDOW_MIN)}"
+REPORT_WINDOW_MIN="${REPORT_WINDOW_MIN:-20}"
+REPORT_COOLDOWN_MIN="${REPORT_COOLDOWN_MIN:-$(conf_get REPORT_COOLDOWN_MIN)}"
+REPORT_COOLDOWN_MIN="${REPORT_COOLDOWN_MIN:-180}"
 
 # ---------------------------------------------------------------- checks
 norm_domain() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's#^[a-z]*://##' -e 's#/.*$##' -e 's/\.$//'; }
@@ -142,6 +186,15 @@ done
 case "$APK_URL" in "" | https://*) ;; *) die "APK_URL должен начинаться с https://" ;; esac
 case "$SUPPORT_URL" in "" | https://* | http://*) ;; *) die "SUPPORT_URL должен быть ссылкой https://…" ;; esac
 case "$REALITY_PORT" in *[!0-9]* | "") die "REALITY_PORT должен быть числом" ;; esac
+for v in REPORT_THRESHOLD REPORT_WINDOW_MIN REPORT_COOLDOWN_MIN; do
+  case "${!v}" in *[!0-9]* | "" | 0) die "$v должен быть числом больше нуля" ;; esac
+done
+[[ "$GITHUB_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "GITHUB_REPO — в виде владелец/репозиторий, например klausms17/vpn"
+[[ "$RELEASE_TAG" =~ ^[A-Za-z0-9._/-]+$ ]] || die "странный RELEASE_TAG: $RELEASE_TAG"
+[[ "$GITHUB_TOKEN" =~ ^[A-Za-z0-9_]*$ ]] || die "GITHUB_TOKEN: токен GitHub состоит из латинских букв, цифр и _"
+for u in "$GITHUB_API" "$TELEGRAM_API_BASE"; do
+  [[ "$u" =~ ^https?://[A-Za-z0-9.:_-]+(/[A-Za-z0-9._/-]*)?$ ]] || die "странный адрес $u"
+done
 SAVED_SUB="$(norm_domain "$(conf_get SUB_DOMAIN)")"
 if [ -n "$SAVED_SUB" ] && [ "$SAVED_SUB" != "$SUB_DOMAIN" ]; then
   warn "адрес подписок меняется: $SAVED_SUB → $SUB_DOMAIN. Ссылки на $SAVED_SUB, которые уже есть у знакомых, перестанут работать: отправьте им новые (klaus-panel link ИМЯ)"
@@ -284,8 +337,24 @@ if [ -z "$POSTGRES_PASSWORD" ]; then
   POSTGRES_PASSWORD="$(openssl rand -hex 24)"
 fi
 { [ -z "$METRICS_PASS" ] || [ "$METRICS_PASS" = "admin" ]; } && METRICS_PASS="$(openssl rand -hex 32)"
+# A panel set up by hand may already send its messages to Telegram: keep
+# its bot and chat (the placeholders of Remnawave's sample .env are no bot).
+if [ "$ADOPT" = "1" ] && [ -z "$TELEGRAM_BOT_TOKEN" ] && [ "$(env_get IS_TELEGRAM_NOTIFICATIONS_ENABLED "$OLD_ENV")" = "true" ]; then
+  t="$(env_get TELEGRAM_BOT_TOKEN "$OLD_ENV")"
+  c="$(env_get TELEGRAM_NOTIFY_NODES "$OLD_ENV")"
+  if [[ "$t" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] && [[ "$c" =~ ^-?[0-9]+(:[0-9]+)?$ ]]; then
+    TELEGRAM_BOT_TOKEN="$t"
+    TELEGRAM_CHAT_ID="$c"
+  fi
+fi
 
 if [ "$ADOPT" = "1" ]; then say "Беру под управление существующую установку (прежние файлы: *.bak-$STAMP)"; fi
+
+# The panel's own Telegram messages: servers lost and back (the chat and
+# bot come from "klaus-panel telegram-setup", which edits these lines in
+# place, so they must stay exactly as written here).
+TELEGRAM_ENABLED=false
+if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then TELEGRAM_ENABLED=true; fi
 
 say "Записываю настройки в $RW_DIR"
 put_file "$RW_DIR/.env" <<EOF
@@ -296,7 +365,10 @@ API_INSTANCES=1
 DATABASE_URL="postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@remnawave-db:5432/$POSTGRES_DB"
 REDIS_SOCKET=/var/run/valkey/valkey.sock
 APP_SECRET=$APP_SECRET
-IS_TELEGRAM_NOTIFICATIONS_ENABLED=false
+IS_TELEGRAM_NOTIFICATIONS_ENABLED=$TELEGRAM_ENABLED
+TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
+TELEGRAM_BOT_API_ROOT=$TELEGRAM_API_BASE
+TELEGRAM_NOTIFY_NODES=$TELEGRAM_CHAT_ID
 PANEL_DOMAIN=$PANEL_DOMAIN
 FRONT_END_DOMAIN=$PANEL_DOMAIN
 SUB_PUBLIC_DOMAIN=$SUB_DOMAIN
@@ -413,6 +485,31 @@ services:
     depends_on:
       - remnawave
 
+  # Block reports from friends' apps -> Telegram (klaus-monitor.py). Only
+  # Caddy reaches it (/klaus/ on the subscription address).
+  klaus-monitor:
+    image: python:3-alpine
+    container_name: klaus-monitor
+    hostname: klaus-monitor
+    <<: [*common, *logging]
+    env_file: klaus-monitor.env
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+    command: ['python3', '-u', '/app/klaus-monitor.py']
+    volumes:
+      - ./klaus-monitor.py:/app/klaus-monitor.py:ro
+    user: '65534:65534'
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ['CMD', 'python3', '-c', 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/klaus/health", timeout=3)']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   caddy:
     image: caddy:2
     container_name: caddy
@@ -423,6 +520,7 @@ services:
       - 0.0.0.0:443:443
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./app:/srv/app:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on:
@@ -456,9 +554,27 @@ tls_line=""
 # X-Forwarded-For/-Proto headers the panel insists on. Connections for any
 # other name (IP scanners) are refused during the TLS handshake. The bare
 # subscription address is where the page's support button leads when there
-# is no SUPPORT_URL (the page itself only drops such requests).
+# is no SUPPORT_URL (the page itself only drops such requests). /app/ is the
+# app published by "klaus-panel publish-apk", /klaus/ the block reports.
+# No access log, and the error log (a request that failed, e.g. while the
+# page restarts) keeps neither the address nor the link of the friend.
 put_file "$RW_DIR/Caddyfile" <<EOF
 # Written by Klaus VPN install-panel.sh; re-running the script rewrites it.
+{
+	log default {
+		format filter {
+			wrap json
+			fields {
+				request>remote_ip delete
+				request>remote_port delete
+				request>client_ip delete
+				request>uri delete
+				request>headers delete
+			}
+		}
+	}
+}
+
 https://$PANEL_DOMAIN {
 $tls_line
 	encode
@@ -471,6 +587,16 @@ $tls_line
 	handle / {
 		header Content-Type "text/plain; charset=utf-8"
 		respond "Klaus VPN: с вопросами обращайтесь к тому, кто дал вам ссылку на подписку." 200
+	}
+	handle /klaus/* {
+		reverse_proxy klaus-monitor:8080
+	}
+	handle_path /app/* {
+		root * /srv/app
+		header Cache-Control "no-cache"
+		@apk path *.apk
+		header @apk Content-Type "application/vnd.android.package-archive"
+		file_server
 	}
 	handle {
 		reverse_proxy remnawave-subscription-page:3010
@@ -485,12 +611,18 @@ EOF
 chmod 644 "$RW_DIR/Caddyfile"
 
 # The subscription page needs an API token to start; until the panel has
-# issued one it stays stopped (the file is completed below).
+# issued one it stays stopped (the file is completed below). The same for
+# the monitor ("klaus-panel setup" writes its settings).
 [ -f "$RW_DIR/subscription.env" ] || : > "$RW_DIR/subscription.env"
+[ -f "$RW_DIR/klaus-monitor.env" ] || : > "$RW_DIR/klaus-monitor.env"
+put_file "$RW_DIR/klaus-monitor.py" < "$HERE/klaus-monitor.py"
+# Read by the monitor's unprivileged user.
+chmod 644 "$RW_DIR/klaus-monitor.py"
+mkdir -p "$RW_DIR/app"
 
 # Containers left from a setup made by hand (e.g. the Caddy example from the
 # Remnawave docs) would block ours by name.
-for c in caddy remnawave-subscription-page; do
+for c in caddy remnawave-subscription-page klaus-monitor; do
   project="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$c" 2>/dev/null || true)"
   if docker inspect "$c" >/dev/null 2>&1 && [ "$project" != "remnawave" ]; then
     [ "$FORCE" = "1" ] || die "уже есть контейнер $c не из этой установки; FORCE=1 заменит его"
@@ -637,6 +769,13 @@ if ! token_ok "$SUBPAGE_TOKEN" /api/system/metadata || ! token_ok "$SUBPAGE_TOKE
   new_token subpage "$SUBPAGE_SCOPES"
   SUBPAGE_TOKEN="$TOKEN"
 fi
+# The monitor faces the internet too: it only checks that a report comes
+# from a real subscription and looks up the servers.
+if ! token_ok "$MONITOR_TOKEN" /api/hosts || ! token_ok "$MONITOR_TOKEN" /api/nodes; then
+  say "Создаю API-токен для сигналов о блокировках"
+  new_token klaus-monitor "$MONITOR_SCOPES"
+  MONITOR_TOKEN="$TOKEN"
+fi
 
 put_file "$RW_DIR/subscription.env" <<EOF
 # Written by Klaus VPN install-panel.sh; re-running the script rewrites it.
@@ -662,6 +801,17 @@ SUPPORT_URL=$(q "$SUPPORT_URL")
 REALITY_SNI=$(q "$REALITY_SNI")
 REALITY_TARGET=$(q "$REALITY_TARGET")
 REALITY_PORT=$(q "$REALITY_PORT")
+MONITOR_TOKEN=$(q "$MONITOR_TOKEN")
+TELEGRAM_BOT_TOKEN=$(q "$TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID=$(q "$TELEGRAM_CHAT_ID")
+TELEGRAM_API_BASE=$(q "$TELEGRAM_API_BASE")
+REPORT_THRESHOLD=$(q "$REPORT_THRESHOLD")
+REPORT_WINDOW_MIN=$(q "$REPORT_WINDOW_MIN")
+REPORT_COOLDOWN_MIN=$(q "$REPORT_COOLDOWN_MIN")
+GITHUB_TOKEN=$(q "$GITHUB_TOKEN")
+GITHUB_REPO=$(q "$GITHUB_REPO")
+RELEASE_TAG=$(q "$RELEASE_TAG")
+GITHUB_API=$(q "$GITHUB_API")
 EOF
 
 KP="$HERE/klaus-panel"
@@ -683,13 +833,66 @@ if ! docker exec caddy cat /etc/caddy/Caddyfile 2>/dev/null | cmp -s - "$RW_DIR/
   say "Перезапускаю Caddy с новыми настройками"
   docker restart caddy >/dev/null || die "не удалось перезапустить Caddy"
 fi
+# The same for the monitor's script (a new version of klaus-monitor.py).
+if ! docker exec klaus-monitor cat /app/klaus-monitor.py 2>/dev/null | cmp -s - "$RW_DIR/klaus-monitor.py"; then
+  say "Перезапускаю монитор блокировок с новой версией"
+  docker restart klaus-monitor >/dev/null || die "не удалось перезапустить klaus-monitor"
+fi
 for i in $(seq 1 60); do
   [ "$(docker inspect -f '{{.State.Health.Status}}' remnawave-subscription-page 2>/dev/null)" = "healthy" ] && break
   [ "$i" -eq 60 ] && { docker compose logs --tail 40 remnawave-subscription-page >&2 || true; die "страница подписки не запустилась (журнал выше)"; }
   sleep 3
 done
+# Friends' VPN does not depend on it: only a warning.
+for i in $(seq 1 20); do
+  [ "$(docker inspect -f '{{.State.Health.Status}}' klaus-monitor 2>/dev/null)" = "healthy" ] && break
+  if [ "$i" -eq 20 ]; then
+    docker compose logs --tail 20 klaus-monitor >&2 || true
+    warn "монитор блокировок (klaus-monitor) не запустился, журнал выше; VPN знакомых от него не зависит"
+  fi
+  sleep 3
+done
 
 if [ "$SKIP_SYSTEM" != "1" ]; then
+  # New app builds reach the subscription address by themselves (quietly,
+  # and only while GITHUB_TOKEN is set).
+  units_changed=0
+  put_unit() { # NAME: stdin -> /etc/systemd/system/NAME when it differs
+    local dst="/etc/systemd/system/$1" tmp
+    tmp="$(mktemp)"
+    cat > "$tmp"
+    if [ -f "$dst" ] && cmp -s "$dst" "$tmp"; then rm -f "$tmp"; return 0; fi
+    install -m 644 "$tmp" "$dst"
+    rm -f "$tmp"
+    units_changed=1
+  }
+  put_unit klaus-panel-apk.service <<EOF
+# Written by Klaus VPN install-panel.sh
+[Unit]
+Description=Klaus VPN: publish a new app build on https://$SUB_DOMAIN/app/
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=KLAUS_PANEL_CONF=$CONF
+ExecStart=/usr/local/bin/klaus-panel publish-apk --quiet
+EOF
+  put_unit klaus-panel-apk.timer <<'EOF'
+# Written by Klaus VPN install-panel.sh
+[Unit]
+Description=Klaus VPN: look for a new app build every hour
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  if [ "$units_changed" = "1" ]; then systemctl daemon-reload; fi
+  systemctl enable --now klaus-panel-apk.timer >/dev/null 2>&1 || warn "не удалось включить таймер klaus-panel-apk.timer"
   if command -v ufw >/dev/null && grep -q "Status: active" <<<"$(ufw status)"; then
     say "Открываю порты 80 и 443 в ufw"
     ufw allow 80/tcp >/dev/null
@@ -721,7 +924,17 @@ echo "Дальше:"
 echo "  1. Купите VPS для VPN-сервера и выполните:  klaus-panel add-node Имя IP-адрес DE"
 echo "     команда покажет, что запустить на этом VPS;"
 echo "  2. Для каждого знакомого:  klaus-panel add-user Имя"
-echo "  3. Резервная копия:  klaus-panel backup"
+if [ -z "$TELEGRAM_CHAT_ID" ]; then
+  echo "  3. Оповещения в Telegram о сбоях и блокировках:  klaus-panel telegram-setup ТОКЕН-БОТА"
+else
+  echo "  3. Оповещения в Telegram включены (проверка: klaus-panel telegram-test)"
+fi
+if [ -z "$GITHUB_TOKEN" ]; then
+  echo "  4. Раздача приложения с этого сервера: запустите ещё раз с GITHUB_TOKEN=… (инструкция, раздел 12)"
+else
+  echo "  4. Новые сборки приложения публикуются сами; сейчас:  klaus-panel publish-apk"
+fi
+echo "  5. Резервная копия:  klaus-panel backup"
 echo
 echo "Все команды: klaus-panel help"
 if [ -n "$RESTORE_DIR" ]; then

@@ -15,6 +15,9 @@ RULE_NAME="Klaus VPN"
 APP_NAME="Klaus VPN"
 NEVER="2099-12-31T00:00:00.000Z" # the panel needs an expiry date
 BACKUP_DIR="${BACKUP_DIR:-/root/remnawave-backups}"
+# A Telegram API address given on the command line wins over the saved one
+# (the local test's mock); telegram-setup saves it.
+TELEGRAM_API_BASE_ENV="${TELEGRAM_API_BASE:-}"
 
 say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mВнимание:\033[0m %s\n' "$*" >&2; }
@@ -43,6 +46,13 @@ VPN-серверы:
   disable-node ИМЯ             убрать сервер из подписок (например, заблокирован)
   enable-node ИМЯ              вернуть сервер
 
+Оповещения и приложение:
+  telegram-setup [ТОКЕН]       оповещения в Telegram: токен бота от @BotFather, затем
+                               напишите боту любое сообщение
+  telegram-test                отправить проверочное сообщение
+  publish-apk [--tag РЕЛИЗ]    выложить новую сборку приложения на адрес подписки
+                               (нужен GITHUB_TOKEN; раз в час это делается само)
+
 Прочее:
   hwid-limit N [--yes]         включить лимит устройств (N на человека); off — выключить
   backup                       резервная копия базы и настроек в /root/remnawave-backups
@@ -55,6 +65,53 @@ load_conf() {
   . "$CONF"
   : "${API_URL:?}" "${API_TOKEN:?}" "${RW_DIR:?}"
   command -v jq >/dev/null || die "нужна программа jq (apt install jq)"
+  TELEGRAM_API_BASE="${TELEGRAM_API_BASE_ENV:-${TELEGRAM_API_BASE:-https://api.telegram.org}}"
+  APP_DIR="$RW_DIR/app"
+}
+
+# ---------------------------------------------------------------- files
+# Replace a file only when its content changes (stdin -> FILE).
+write_file() {
+  local tmp
+  tmp="$(mktemp "$1.XXXXXX")"
+  cat > "$tmp"
+  if [ -f "$1" ] && cmp -s "$1" "$tmp"; then rm -f "$tmp"; return 0; fi
+  if [ -f "$1" ]; then chmod --reference="$1" "$tmp"; fi
+  mv "$tmp" "$1"
+}
+# KEY=VALUE in place of the file's KEY line (added at the end when missing).
+# install-panel.sh writes the same lines, so its next run changes nothing.
+set_line() { # FILE KEY VALUE
+  awk -v k="$2" -v v="$3" 'index($0, k "=") == 1 { if (!done) print k "=" v; done = 1; next }
+    { print } END { if (!done) print k "=" v }' "$1" | write_file "$1"
+}
+
+# The monitor's settings, from klaus-panel.env (install-panel.sh and
+# telegram-setup call this).
+write_monitor_env() {
+  write_file "$RW_DIR/klaus-monitor.env" <<EOF
+# Written by klaus-panel from klaus-panel.env; rewritten on every change.
+PANEL_URL=http://remnawave:3000
+PANEL_TOKEN=${MONITOR_TOKEN:-}
+TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+TELEGRAM_API_BASE=$TELEGRAM_API_BASE
+REPORT_THRESHOLD=${REPORT_THRESHOLD:-2}
+REPORT_WINDOW_MIN=${REPORT_WINDOW_MIN:-20}
+REPORT_COOLDOWN_MIN=${REPORT_COOLDOWN_MIN:-180}
+EOF
+}
+
+# docker compose in the panel's folder, quiet unless it fails.
+compose() {
+  local log
+  log="$(mktemp)"
+  if ! (cd "$RW_DIR" && docker compose "$@") >"$log" 2>&1; then
+    tail -n 30 "$log" >&2
+    rm -f "$log"
+    return 1
+  fi
+  rm -f "$log"
 }
 
 # ---------------------------------------------------------------- API
@@ -206,7 +263,7 @@ setup_squad() {
 setup_subscription_settings() {
   api_ok GET /api/subscription-settings
   local body
-  body="$(jq -c --arg support "${SUPPORT_URL:-}" --arg rule "$RULE_NAME" '.response
+  body="$(jq -c --arg support "${SUPPORT_URL:-}" --arg rule "$RULE_NAME" --arg sub "$SUB_DOMAIN" '.response
     | {
         # English defaults of the panel; replaced only while untouched.
         seed: {
@@ -243,9 +300,13 @@ setup_subscription_settings() {
         # every refresh.
         randomizeHosts: false,
         # support-url follows SUPPORT_URL; without it there is none (the
-        # panel starts with a placeholder that leads nowhere).
+        # panel starts with a placeholder that leads nowhere). The app sends
+        # block reports to klaus-report-url and looks for updates at
+        # klaus-app-url.
         customResponseHeaders: (($c.customResponseHeaders // {})
-          + {"profile-title": "Klaus VPN", "profile-update-interval": "1"}
+          + {"profile-title": "Klaus VPN", "profile-update-interval": "1",
+             "klaus-report-url": "https://\($sub)/klaus/report",
+             "klaus-app-url": "https://\($sub)/app/version.json"}
           | if $support != "" then .["support-url"] = $support else del(.["support-url"]) end),
         customRemarks: (if $c.customRemarks == .seed then .ru else $c.customRemarks end),
         # Devices are recorded even while the limit is off (the panel
@@ -265,11 +326,14 @@ setup_subscription_settings() {
 
 setup_subpage() {
   api_ok GET /api/subscription-page-configs
-  local uuid cfg
+  local uuid cfg apk="${APK_URL:-}"
   uuid="$(jq -r 'first((.response.configs[] | select(.uuid == "00000000-0000-0000-0000-000000000000")), .response.configs[0]) | .uuid // empty' <<<"$RESP")"
   [ -n "$uuid" ] || die "в панели нет настроек страницы подписки"
   api_ok GET "/api/subscription-page-configs/$uuid"
-  cfg="$(jq -c --arg apk "${APK_URL:-}" --arg support "${SUPPORT_URL:-}" --arg sub "$SUB_DOMAIN" --arg app "$APP_NAME" '.response.config
+  # The app published on the subscription address, unless APK_URL says
+  # otherwise.
+  if [ -z "$apk" ] && [ -f "$APP_DIR/KlausVPN.apk" ]; then apk="https://$SUB_DOMAIN/app/KlausVPN.apk"; fi
+  cfg="$(jq -c --arg apk "$apk" --arg support "${SUPPORT_URL:-}" --arg sub "$SUB_DOMAIN" --arg app "$APP_NAME" '.response.config
     | .locales as $locales
     # Every text needs every language of the page: Russian for ru,
     # English for the rest.
@@ -288,7 +352,7 @@ setup_subpage() {
                 "Ask the person who gave you this link for the Klaus VPN file and install it.")
             end),
           buttons: (if $apk != "" then
-              [{type: "external", link: $apk, text: t("Скачать Klaus VPN"; "Download Klaus VPN"), svgIconKey: "DownloadIcon"}]
+              [{type: "external", link: $apk, text: t("Скачать приложение"; "Download the app"), svgIconKey: "DownloadIcon"}]
             else [] end)
         },
         {
@@ -325,11 +389,21 @@ setup_subpage() {
     # The other apps stay available, Klaus VPN comes first and is preselected.
     | .platforms.android.apps = [$klaus] + (.platforms.android.apps | map(select(.name != $app) | .featured = false))
   ' <<<"$RESP")"
+  # Unchanged settings: no restart (friends' refreshes would fail meanwhile).
+  [ "$(jq -S -c '.response.config' <<<"$RESP")" != "$(jq -S -c . <<<"$cfg")" ] || return 0
   api_ok PATCH /api/subscription-page-configs "$(jq -c --arg u "$uuid" '{uuid: $u, config: .}' <<<"$cfg")"
   # The page reads its settings only when it starts.
   if grep -qx remnawave-subscription-page <<<"$(docker ps --format '{{.Names}}' 2>/dev/null)"; then
     docker restart remnawave-subscription-page >/dev/null
   fi
+}
+
+# version.json names the APK with the subscription address: follow a new
+# SUB_DOMAIN.
+refresh_version_json() {
+  [ -f "$APP_DIR/version.json" ] || return 0
+  jq --arg sub "$SUB_DOMAIN" '.apk = "https://\($sub)/app/" + (.apk | split("/") | last)' "$APP_DIR/version.json" |
+    write_file "$APP_DIR/version.json"
 }
 
 cmd_setup() {
@@ -338,7 +412,9 @@ cmd_setup() {
   setup_profile
   setup_squad
   setup_subscription_settings
+  refresh_version_json
   setup_subpage
+  write_monitor_env
   say "Настройки панели применены"
 }
 
@@ -595,9 +671,19 @@ cmd_backup() {
     die "pg_dump не сработал (запущен ли контейнер remnawave-db?)"
   # .env holds APP_SECRET: without it the restored panel would not accept
   # the servers' and tokens' signatures.
-  for f in .env subscription.env klaus-panel.env docker-compose.yml Caddyfile; do
+  for f in .env subscription.env klaus-panel.env klaus-monitor.env docker-compose.yml Caddyfile; do
     if [ -f "$RW_DIR/$f" ]; then cp -p "$RW_DIR/$f" "$tmp/"; fi
   done
+  # The published app: version.json and the APK it names (KlausVPN.apk is
+  # the same file, one more name for it: cp -a keeps them one file).
+  if [ -f "$APP_DIR/version.json" ]; then
+    local apk files=("$APP_DIR/version.json")
+    apk="$(jq -r '.apk // "" | split("/") | last' "$APP_DIR/version.json")"
+    if [[ "$apk" =~ ^KlausVPN-[0-9A-Za-z._-]+\.apk$ ]] && [ -f "$APP_DIR/$apk" ]; then files+=("$APP_DIR/$apk"); fi
+    if [ -f "$APP_DIR/KlausVPN.apk" ]; then files+=("$APP_DIR/KlausVPN.apk"); fi
+    mkdir -p "$tmp/app"
+    cp -a "${files[@]}" "$tmp/app/"
+  fi
   if [ -n "${ADMIN_FILE:-}" ] && [ -f "$ADMIN_FILE" ]; then cp -p "$ADMIN_FILE" "$tmp/admin.txt"; fi
   if grep -qx caddy <<<"$(docker ps --format '{{.Names}}')"; then
     docker exec caddy tar -C /data -cf - . > "$tmp/caddy-data.tar" || warn "не удалось скопировать сертификаты Caddy (не страшно: получит новые)"
@@ -606,6 +692,223 @@ cmd_backup() {
   (umask 077 && tar -C "$tmp" -czf "$out" .)
   say "Готово: $out ($(du -h "$out" | cut -f1))"
   echo "Скачайте файл к себе (scp root@сервер:$out .) и храните в надёжном месте: в нём все ключи."
+}
+
+# ---------------------------------------------------------------- telegram
+# Telegram Bot API; the token is part of the URL, so the URL goes to curl
+# through a file (never in "ps").
+tg() { # METHOD [JSON]; uses TG_TOKEN, sets TG_RESP and TG_CODE
+  local tmp
+  tmp="$(mktemp -d)"
+  printf 'url = "%s/bot%s/%s"\n' "$TELEGRAM_API_BASE" "$TG_TOKEN" "$1" > "$tmp/c"
+  printf '%s' "${2:-"{}"}" > "$tmp/b"
+  TG_CODE="$(curl -sS --max-time 40 -K "$tmp/c" -o "$tmp/o" -w '%{http_code}' \
+    -H 'Content-Type: application/json' --data-binary "@$tmp/b" 2>/dev/null)" || TG_CODE=000
+  TG_RESP="$(cat "$tmp/o" 2>/dev/null || true)"
+  rm -rf "$tmp"
+}
+
+tg_send() { # TEXT: to the saved chat ("chat" or "chat:topic", as the panel takes it), or dies
+  tg sendMessage "$(jq -nc --arg c "$TELEGRAM_CHAT_ID" --arg t "$1" '($c | split(":")) as $ct
+    | {chat_id: $ct[0], text: $t, link_preview_options: {is_disabled: true}}
+    + (if ($ct | length) > 1 then {message_thread_id: ($ct[1] | tonumber)} else {} end)')"
+  { [ "$TG_CODE" = "200" ] && [ "$(jq -r '.ok' <<<"$TG_RESP" 2>/dev/null)" = "true" ]; } ||
+    die "Telegram не принял сообщение (ответ $TG_CODE${TG_RESP:+: $(jq -r '.description // empty' <<<"$TG_RESP" 2>/dev/null)})"
+}
+
+# The panel of an older install-panel.sh has no monitor and no Telegram
+# lines to fill in.
+need_new_panel() {
+  { grep -q '^TELEGRAM_BOT_API_ROOT=' "$RW_DIR/.env" 2>/dev/null && grep -q 'klaus-monitor:' "$RW_DIR/docker-compose.yml" 2>/dev/null; } ||
+    die "панель установлена старой версией install-panel.sh: запустите новую версию ещё раз (sudo bash install-panel.sh), затем повторите"
+}
+
+cmd_telegram_setup() {
+  local token="${1:-}" bot chat="" who="" offset=0 deadline upd
+  if [ -z "$token" ]; then
+    [ -t 0 ] || die "укажите токен бота: klaus-panel telegram-setup ТОКЕН"
+    read -r -s -p "Токен бота (его выдаёт @BotFather): " token
+    echo
+  fi
+  [[ "$token" =~ ^[0-9]{5,}:[A-Za-z0-9_-]{30,}$ ]] || die "это не токен бота (он выглядит так: 123456789:AAE…); его выдаёт @BotFather"
+  [[ "$TELEGRAM_API_BASE" =~ ^https?://[A-Za-z0-9.:_-]+(/[A-Za-z0-9._/-]*)?$ ]] || die "странный адрес $TELEGRAM_API_BASE"
+  need_new_panel
+  TG_TOKEN="$token"
+  tg getMe
+  case "$TG_CODE" in
+    200) ;;
+    401 | 404) die "Telegram не принял токен: скопируйте его ещё раз (@BotFather → /mybots → бот → API Token)" ;;
+    000) die "нет связи с $TELEGRAM_API_BASE" ;;
+    *) die "Telegram ответил $TG_CODE" ;;
+  esac
+  bot="$(jq -r '.result.username // empty' <<<"$TG_RESP")"
+  say "Бот @$bot. Откройте его в Telegram (https://t.me/$bot), нажмите «Запустить» или напишите ему что угодно. Жду до 10 минут…"
+  deadline=$((SECONDS + 600))
+  while [ -z "$chat" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || die "сообщение боту так и не пришло; запустите команду ещё раз"
+    tg getUpdates "$(jq -nc --argjson o "$offset" '{offset: $o, timeout: 20, allowed_updates: ["message"]}')"
+    case "$TG_CODE" in
+      200) ;;
+      409) die "этот бот уже подключён к другой программе (вебхук): создайте для оповещений отдельного бота" ;;
+      *) sleep 3; continue ;;
+    esac
+    offset="$(jq -r --argjson o "$offset" '[.result[].update_id] | max | if . == null then $o else . + 1 end' <<<"$TG_RESP")"
+    upd="$(jq -c '[.result[] | select(.message.chat.id != null)] | last // empty' <<<"$TG_RESP")"
+    if [ -n "$upd" ]; then
+      chat="$(jq -r '.message.chat.id' <<<"$upd")"
+      who="$(jq -r '.message.chat | .title // ([.first_name, .last_name, (if .username then "@" + .username else null end)] | map(select(. != null)) | join(" "))' <<<"$upd")"
+    fi
+  done
+  [[ "$chat" =~ ^-?[0-9]{1,20}$ ]] || die "странный номер чата: $chat"
+  # Mark the messages as read, so the next setup does not pick them up.
+  tg getUpdates "$(jq -nc --argjson o "$offset" '{offset: $o, timeout: 0}')"
+  say "Сообщение пришло из чата «$who» ($chat): оповещения будут приходить туда"
+
+  TELEGRAM_BOT_TOKEN="$token"
+  TELEGRAM_CHAT_ID="$chat"
+  set_line "$CONF" TELEGRAM_BOT_TOKEN "$(printf '%q' "$token")"
+  set_line "$CONF" TELEGRAM_CHAT_ID "$(printf '%q' "$chat")"
+  set_line "$CONF" TELEGRAM_API_BASE "$(printf '%q' "$TELEGRAM_API_BASE")"
+  # The panel's own messages (servers lost and back): the same lines as
+  # install-panel.sh writes.
+  set_line "$RW_DIR/.env" IS_TELEGRAM_NOTIFICATIONS_ENABLED true
+  set_line "$RW_DIR/.env" TELEGRAM_BOT_TOKEN "$token"
+  set_line "$RW_DIR/.env" TELEGRAM_BOT_API_ROOT "$TELEGRAM_API_BASE"
+  set_line "$RW_DIR/.env" TELEGRAM_NOTIFY_NODES "$chat"
+  write_monitor_env
+  say "Перезапускаю панель и монитор блокировок с новыми настройками"
+  # Exactly what install-panel.sh would start: every container whose
+  # settings changed is recreated.
+  compose up -d || die "контейнеры не перезапустились (подробности выше)"
+  local i
+  for i in $(seq 1 60); do
+    api GET /api/auth/status
+    [ "$HTTP_CODE" = "200" ] && break
+    [ "$i" -eq 60 ] && die "панель не запустилась после перезапуска: docker logs remnawave"
+    sleep 3
+  done
+  tg_send "Klaus VPN: оповещения включены.
+Сюда придёт сообщение, если VPN-сервер потеряет связь с панелью или если у знакомых он перестанет открываться (похоже на блокировку)."
+  say "Готово: проверочное сообщение отправлено в Telegram"
+}
+
+cmd_telegram_test() {
+  { [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; } ||
+    die "оповещения ещё не настроены: klaus-panel telegram-setup ТОКЕН"
+  TG_TOKEN="$TELEGRAM_BOT_TOKEN"
+  tg_send "Klaus VPN: проверка оповещений. Всё работает."
+  say "Проверочное сообщение отправлено"
+}
+
+# ---------------------------------------------------------------- app
+# New builds of the app from the GitHub releases (private repository: a
+# read-only token) go to https://SUB_DOMAIN/app/: KlausVPN.apk,
+# KlausVPN-<version>.apk and version.json, which the app checks for updates.
+gh_get() { # URL FILE [ACCEPT] [SECONDS]; sets GH_CODE. The token goes to curl
+  # through a file; curl does not pass it on when GitHub redirects a
+  # download to its file storage.
+  local tmp
+  tmp="$(mktemp -d)"
+  printf 'Authorization: Bearer %s\nAccept: %s\nX-GitHub-Api-Version: 2022-11-28\n' \
+    "$GITHUB_TOKEN" "${3:-application/vnd.github+json}" > "$tmp/h"
+  GH_CODE="$(curl -sS -L --max-time "${4:-60}" --max-filesize 314572800 -A klaus-panel \
+    -H "@$tmp/h" -o "$2" -w '%{http_code}' "$1" 2>/dev/null)" || GH_CODE=000
+  rm -rf "$tmp"
+}
+
+cmd_publish_apk() {
+  local tag="${RELEASE_TAG:-build-claude-compassionate-mayer-6jph8m}" repo="${GITHUB_REPO:-klausms17/vpn}"
+  local gh="${GITHUB_API:-https://api.github.com}" quiet=0
+  local apk apk_url sums_url ver code sha cur_code=0 cur_sha="" cur_apk="" got staging f
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tag) tag="${2:-}"; shift 2 ;;
+      --quiet) quiet=1; shift ;;
+      *) die "непонятный параметр: $1" ;;
+    esac
+  done
+  if [ -z "${GITHUB_TOKEN:-}" ]; then
+    # The hourly timer: nothing to do until a token is given.
+    [ "$quiet" = "1" ] && return 0
+    die "нет GITHUB_TOKEN: создайте токен только для чтения (инструкция, раздел 12) и запустите sudo GITHUB_TOKEN=… bash install-panel.sh"
+  fi
+  [[ "$tag" =~ ^[A-Za-z0-9._/-]+$ ]] || die "странное имя релиза: $tag"
+  note() { if [ "$quiet" != "1" ]; then say "$@"; fi; }
+  mkdir -p "$APP_DIR"
+  # One at a time (the timer and a manual run).
+  exec 9>"$RW_DIR/.publish-apk.lock"
+  if command -v flock >/dev/null; then flock -n 9 || die "публикация уже идёт"; fi
+  tmpdir
+
+  gh_get "$gh/repos/$repo/releases/tags/$tag" "$TMPD/release.json"
+  case "$GH_CODE" in
+    200) ;;
+    401) die "GitHub не принял GITHUB_TOKEN (истёк или отозван?)" ;;
+    403 | 404) die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)" ;;
+    000) die "нет связи с $gh" ;;
+    *) die "GitHub ответил $GH_CODE" ;;
+  esac
+  apk="$(jq -r 'first(.assets[]? | select(.name | test("^KlausVPN-[0-9A-Za-z._-]+\\.apk$")) | .name) // empty' "$TMPD/release.json")"
+  apk_url="$(jq -r --arg n "$apk" 'first(.assets[]? | select(.name == $n) | .url) // empty' "$TMPD/release.json")"
+  sums_url="$(jq -r 'first(.assets[]? | select(.name == "SHA256SUMS.txt") | .url) // empty' "$TMPD/release.json")"
+  { [ -n "$apk" ] && [ -n "$apk_url" ]; } || die "в релизе $tag нет файла KlausVPN-….apk"
+  [ -n "$sums_url" ] || die "в релизе $tag нет SHA256SUMS.txt: без контрольной суммы файл не публикуется"
+  ver="${apk#KlausVPN-}"
+  ver="${ver%.apk}"
+  # CI names builds 1.0.<run number>: the last number is the versionCode.
+  [[ "$ver" =~ ([0-9]+)$ ]] || die "из имени $apk не понять номер версии"
+  code=$((10#${BASH_REMATCH[1]}))
+
+  gh_get "$sums_url" "$TMPD/sums" application/octet-stream
+  [ "$GH_CODE" = "200" ] || die "не удалось скачать SHA256SUMS.txt (ответ $GH_CODE)"
+  sha="$(awk -v f="$apk" '($2 == f || $2 == "*" f) && $1 ~ /^[0-9A-Fa-f]+$/ && length($1) == 64 { print tolower($1); exit }' "$TMPD/sums")"
+  [ -n "$sha" ] || die "в SHA256SUMS.txt нет контрольной суммы $apk"
+
+  if [ -f "$APP_DIR/version.json" ]; then
+    cur_code="$(jq -r '.versionCode // 0' "$APP_DIR/version.json")"
+    cur_sha="$(jq -r '.sha256 // ""' "$APP_DIR/version.json")"
+    cur_apk="$(jq -r '.apk // "" | split("/") | last' "$APP_DIR/version.json")"
+    [[ "$cur_code" =~ ^[0-9]+$ ]] || cur_code=0
+  fi
+  if [ "$cur_sha" = "$sha" ] && [ -f "$APP_DIR/$apk" ] && [ -f "$APP_DIR/KlausVPN.apk" ]; then
+    note "Версия $ver уже опубликована: https://$SUB_DOMAIN/app/KlausVPN.apk"
+    return 0
+  fi
+  if [ "$cur_code" -gt "$code" ]; then
+    note "На сервере уже версия новее ($cur_apk), чем $apk в релизе $tag: оставляю её"
+    return 0
+  fi
+
+  note "Скачиваю $apk из релиза $tag"
+  staging="$RW_DIR/.app-staging"
+  rm -rf "$staging"
+  mkdir -p "$staging"
+  gh_get "$apk_url" "$staging/$apk" application/octet-stream 900
+  if [ "$GH_CODE" != "200" ]; then rm -rf "$staging"; die "не удалось скачать $apk (ответ $GH_CODE)"; fi
+  got="$(sha256sum "$staging/$apk" | cut -d' ' -f1)"
+  if [ "$got" != "$sha" ]; then
+    rm -rf "$staging"
+    die "контрольная сумма $apk не совпала с SHA256SUMS.txt: файл повреждён или подменён. Ничего не опубликовано"
+  fi
+  # The versioned file first, then the fixed name, then version.json: it
+  # never names a file that is not there yet.
+  chmod 644 "$staging/$apk"
+  mv -f "$staging/$apk" "$APP_DIR/$apk"
+  ln -f "$APP_DIR/$apk" "$staging/KlausVPN.apk"
+  mv -f "$staging/KlausVPN.apk" "$APP_DIR/KlausVPN.apk"
+  jq -n --argjson c "$code" --arg n "$ver" --arg a "https://$SUB_DOMAIN/app/$apk" --arg s "$sha" \
+    '{versionCode: $c, versionName: $n, apk: $a, sha256: $s}' > "$staging/version.json"
+  chmod 644 "$staging/version.json"
+  mv -f "$staging/version.json" "$APP_DIR/version.json"
+  rm -rf "$staging"
+  # Older builds go, except the previous one (a download may be running).
+  for f in "$APP_DIR"/KlausVPN-*.apk; do
+    [ -e "$f" ] || continue
+    case "${f##*/}" in "$apk" | "$cur_apk") ;; *) rm -f "$f" ;; esac
+  done
+  # The subscription page's download button appears with the first APK.
+  setup_subpage
+  note "Опубликована версия $ver: https://$SUB_DOMAIN/app/KlausVPN.apk (приложения знакомых предложат обновиться)"
 }
 
 # ---------------------------------------------------------------- main
@@ -636,5 +939,8 @@ case "$cmd" in
   enable-node) node_action enable "$@" ;;
   hwid-limit) cmd_hwid_limit "$@" ;;
   backup) cmd_backup ;;
+  telegram-setup) cmd_telegram_setup "$@" ;;
+  telegram-test) cmd_telegram_test ;;
+  publish-apk) cmd_publish_apk "$@" ;;
   *) usage >&2; exit 1 ;;
 esac
