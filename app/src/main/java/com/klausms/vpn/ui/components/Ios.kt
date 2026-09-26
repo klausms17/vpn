@@ -608,9 +608,9 @@ fun TabBar(items: List<TabItem>, selected: String, onSelect: (String) -> Unit, m
             .padding(start = 20.dp, end = 20.dp, bottom = 20.dp)
             .fillMaxWidth()
             .height(62.dp)
-            // Nearly opaque, same tone as the glass over black: without a
+            // Opaque, same tone as the glass over black: without a
             // backdrop blur, rows scrolled under the bar must not show through.
-            .glass(RoundedCornerShape(31.dp), fill = Color(0xF2202022), elevation = 16.dp)
+            .glass(RoundedCornerShape(31.dp), fill = Color(0xFF202022), elevation = 16.dp)
             .padding(4.dp),
     ) {
         for (item in items) {
