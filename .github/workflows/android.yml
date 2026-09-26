@@ -192,6 +192,7 @@ jobs:
       - name: Screenshots of the screens and the widget
         id: screenshots
         continue-on-error: true
+        timeout-minutes: 20
         run: ./gradlew --no-daemon testDebugUnitTest --tests 'com.klausms.vpn.ui.ScreenshotTest'
 
       - name: Publish screenshots
