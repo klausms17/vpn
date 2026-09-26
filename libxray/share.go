@@ -56,6 +56,7 @@ func errf(format string, a ...any) error { return &userError{fmt.Sprintf(format,
 func parseLink(raw string) (*Profile, error) {
 	link := strings.TrimSpace(raw)
 	link = strings.Trim(link, "\u200b\ufeff\"'`<>")
+	link = stripServerDescription(link)
 	if link == "" {
 		return nil, errf("пустая ссылка")
 	}
@@ -94,6 +95,18 @@ func parseLink(raw string) (*Profile, error) {
 		p.Name = net.JoinHostPort(p.Address, strconv.Itoa(p.Port))
 	}
 	return p, nil
+}
+
+// stripServerDescription removes the "?serverDescription=<base64>" that
+// Remnawave appends after the #remark for some clients. The remark itself is
+// percent-encoded, so the first literal '?' after '#' starts the suffix.
+func stripServerDescription(link string) string {
+	if i := strings.IndexByte(link, '#'); i >= 0 {
+		if j := strings.Index(link[i:], "?serverDescription="); j >= 0 {
+			return link[:i+j]
+		}
+	}
+	return link
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +276,9 @@ type streamOptions struct {
 	ech        string
 	pcs        string
 	vcn        string
+	cs         string // TLS cipherSuites
+	heartbeat  string // ws heartbeatPeriod, seconds
+	fm         string // finalmask (JSON)
 	insecure   bool
 }
 
@@ -287,6 +303,9 @@ func streamOptionsFromQuery(q params) streamOptions {
 		ech:        q.get("ech", "echConfigList"),
 		pcs:        q.get("pcs", "pinnedPeerCertSha256", "pinSHA256"),
 		vcn:        q.get("vcn", "verifyPeerCertByName"),
+		cs:         q.get("cs", "cipherSuites"),
+		heartbeat:  q.get("heartbeatPeriod"),
+		fm:         q.get("fm", "finalmask"),
 		insecure:   q.flag("allowInsecure", "insecure", "skip-cert-verify"),
 	}
 }
@@ -339,6 +358,10 @@ func buildStream(o streamOptions, address string, defaultSecurity string) (map[s
 		if host != "" {
 			ws["host"] = host
 		}
+		// A keepalive: an invalid value only loses the pings, not the key.
+		if n, err := strconv.ParseUint(o.heartbeat, 10, 32); err == nil && n > 0 {
+			ws["heartbeatPeriod"] = n
+		}
 		stream["wsSettings"] = ws
 	case "httpupgrade":
 		hu := map[string]any{"path": orDefault(path, "/")}
@@ -377,6 +400,11 @@ func buildStream(o streamOptions, address string, defaultSecurity string) (map[s
 		}
 		stream["xhttpSettings"] = x
 	}
+	if fm, err := parseFinalMask(o.fm); err != nil {
+		return nil, "", "", false, err
+	} else if fm != nil {
+		stream["finalmask"] = fm
+	}
 
 	security := strings.ToLower(o.security)
 	if security == "" {
@@ -408,6 +436,9 @@ func buildStream(o streamOptions, address string, defaultSecurity string) (map[s
 		}
 		if o.vcn != "" {
 			tls["verifyPeerCertByName"] = o.vcn
+		}
+		if o.cs != "" {
+			tls["cipherSuites"] = o.cs
 		}
 		if o.ech != "" {
 			tls["echConfigList"] = o.ech
@@ -468,6 +499,19 @@ func realityFingerprint(fp string) string {
 		return fp
 	}
 	return "chrome"
+}
+
+// parseFinalMask reads the "fm" parameter: Xray's streamSettings.finalmask
+// (TCP/UDP masks, QUIC parameters) as JSON. nil when absent.
+func parseFinalMask(s string) (map[string]any, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	var fm map[string]any
+	if err := json.Unmarshal([]byte(s), &fm); err != nil {
+		return nil, errf("параметр fm в ссылке повреждён")
+	}
+	return fm, nil
 }
 
 func orDefault(v, def string) string {
@@ -789,6 +833,12 @@ func parseHysteria2(link string) (*Profile, error) {
 		"security":         "tls",
 		"tlsSettings":      tls,
 	}
+	// Remnawave sends the full finalmask as fm, and its salamander mask
+	// also as obfs/obfs-password for other clients: add that mask only once.
+	fm, err := parseFinalMask(q.get("fm", "finalmask"))
+	if err != nil {
+		return nil, err
+	}
 	switch obfs := strings.ToLower(q.get("obfs")); obfs {
 	case "":
 	case "salamander":
@@ -796,11 +846,20 @@ func parseHysteria2(link string) (*Profile, error) {
 		if pw == "" {
 			return nil, errf("в ключе Hysteria2 нет obfs-password")
 		}
-		stream["finalmask"] = map[string]any{"udp": []any{map[string]any{
-			"type": "salamander", "settings": map[string]any{"password": pw},
-		}}}
+		if fm == nil {
+			fm = map[string]any{}
+		}
+		udp, _ := fm["udp"].([]any)
+		if !hasMask(udp, "salamander") {
+			fm["udp"] = append(udp, map[string]any{
+				"type": "salamander", "settings": map[string]any{"password": pw},
+			})
+		}
 	default:
 		return nil, errf("обфускация Hysteria2 %q не поддерживается", obfs)
+	}
+	if fm != nil {
+		stream["finalmask"] = fm
 	}
 	outbound := map[string]any{
 		"tag":            ProxyTag,
@@ -814,6 +873,15 @@ func parseHysteria2(link string) (*Profile, error) {
 		Network: "hysteria", Security: "tls", Outbounds: []json.RawMessage{mustJSON(outbound)},
 		NeedsCertPin: insecure && pcs == "", CertPinSNI: sni, CertPinQuic: true,
 	}, nil
+}
+
+func hasMask(masks []any, typ string) bool {
+	for _, m := range masks {
+		if mm, ok := m.(map[string]any); ok && strings.EqualFold(fmt.Sprint(mm["type"]), typ) {
+			return true
+		}
+	}
+	return false
 }
 
 func orDefaultList(v, def []string) []string {

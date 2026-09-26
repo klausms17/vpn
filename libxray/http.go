@@ -2,6 +2,7 @@ package libxray
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,7 +10,10 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	core "github.com/xtls/xray-core/core"
 )
@@ -17,14 +21,20 @@ import (
 // DefaultTestURL answers 204 quickly from almost everywhere.
 const DefaultTestURL = "https://www.gstatic.com/generate_204"
 
-// maxFetchBytes caps subscription / geo downloads so a broken server can't
-// exhaust memory.
-const maxFetchBytes = 64 << 20
+// maxFetchBytes caps subscription downloads so a broken or hostile panel
+// cannot exhaust memory: Fetch also runs inside the VPN process. Large geo
+// databases go through DownloadFile, which streams to disk instead.
+const maxFetchBytes = 8 << 20
 
 func proxyTransport(inst *core.Instance) *http.Transport {
+	return proxyTransportVia(inst, ProxyTag)
+}
+
+// proxyTransportVia dials every connection through the outbound tagged tag.
+func proxyTransportVia(inst *core.Instance, tag string) *http.Transport {
 	return &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (gonet.Conn, error) {
-			return dialThroughProxy(ctx, inst, network, addr)
+			return dialVia(ctx, inst, tag, network, addr)
 		},
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 20 * time.Second,
@@ -35,10 +45,14 @@ func proxyTransport(inst *core.Instance) *http.Transport {
 }
 
 func measureDelay(inst *core.Instance, url string, timeout time.Duration) (int64, error) {
+	return measureDelayVia(inst, ProxyTag, url, timeout)
+}
+
+func measureDelayVia(inst *core.Instance, tag string, url string, timeout time.Duration) (int64, error) {
 	if url == "" {
 		url = DefaultTestURL
 	}
-	tr := proxyTransport(inst)
+	tr := proxyTransportVia(inst, tag)
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, Timeout: timeout}
 
@@ -85,15 +99,31 @@ func measureDelay(inst *core.Instance, url string, timeout time.Duration) (int64
 }
 
 // FetchResult is the body of a downloaded document plus the headers that
-// subscription panels use to describe themselves.
+// subscription panels use to describe themselves. Text headers sent as
+// "base64:..." (Remnawave does that for non-ASCII values) are decoded.
 type FetchResult struct {
 	Body []byte
 	// Raw "subscription-userinfo" header: upload=..; download=..; total=..; expire=..
 	UserInfo string
-	// Raw "profile-title" header (may be "base64:...").
+	// "profile-title" header.
 	ProfileTitle string
 	// Raw "profile-update-interval" header, in hours.
 	UpdateInterval string
+	// "support-url" header: where the user can ask the owner for help.
+	SupportUrl string
+	// "profile-web-page-url" header: the subscription's web page.
+	WebPageUrl string
+	// "announce" header: a message from the owner.
+	Announce string
+	// Remnawave device limit ("x-hwid-*: true" headers). HwidActive: the
+	// limit applies to this user. HwidLimit: the request was refused because
+	// of it, HwidMaxDevices: no free device slot, HwidNotSupported: the
+	// device id was missing or invalid. When refused, the body only holds
+	// placeholders (see SubscriptionResult.Notices) or nothing.
+	HwidActive       bool
+	HwidLimit        bool
+	HwidMaxDevices   bool
+	HwidNotSupported bool
 }
 
 // Fetch downloads url and returns the body. When proxyConfigJSON is not
@@ -101,10 +131,25 @@ type FetchResult struct {
 // (it must contain an outbound tagged "proxy"); otherwise it goes direct.
 // Unlike Android's Java stack it also works for plain-http subscription
 // links, which many self-hosted panels still use.
-func Fetch(url string, userAgent string, timeoutMs int32, proxyConfigJSON string) (result *FetchResult, err error) {
+func Fetch(url string, userAgent string, timeoutMs int32, proxyConfigJSON string) (*FetchResult, error) {
+	return FetchWithHeaders(url, userAgent, "", timeoutMs, proxyConfigJSON)
+}
+
+// FetchWithHeaders is Fetch plus extra request headers, given as a JSON
+// object ({"X-Hwid":"...", ...}; "" for none). Names must be HTTP tokens;
+// Host, Content-Length, Transfer-Encoding, Connection and User-Agent are
+// ignored, and control characters are removed from values.
+//
+// With proxyConfigJSON the temporary instance takes over Xray's
+// process-wide state (see Controller.restoreGlobals): in the process that
+// runs the tunnel use Controller.FetchThroughTunnel instead.
+func FetchWithHeaders(url, userAgent, headersJSON string, timeoutMs int32, proxyConfigJSON string) (result *FetchResult, err error) {
 	defer recoverInto(&err)
 
-	timeout := timeoutDuration(timeoutMs)
+	extra, err := parseHeaders(headersJSON)
+	if err != nil {
+		return nil, err
+	}
 	var tr *http.Transport
 	if proxyConfigJSON != "" {
 		inst, err := newInstance(proxyConfigJSON)
@@ -120,9 +165,12 @@ func Fetch(url string, userAgent string, timeoutMs int32, proxyConfigJSON string
 		tr = http.DefaultTransport.(*http.Transport).Clone()
 	}
 	defer tr.CloseIdleConnections()
+	return doFetch(tr, url, userAgent, extra, timeoutDuration(timeoutMs))
+}
 
+func doFetch(tr http.RoundTripper, url, userAgent string, extra http.Header, timeout time.Duration) (*FetchResult, error) {
 	client := &http.Client{Transport: tr, Timeout: timeout}
-	resp, err := get(client, url, userAgent)
+	resp, err := get(client, url, userAgent, extra)
 	if err != nil {
 		return nil, err
 	}
@@ -137,12 +185,86 @@ func Fetch(url string, userAgent string, timeoutMs int32, proxyConfigJSON string
 	if len(data) > maxFetchBytes {
 		return nil, errors.New("response is too large")
 	}
+	h := resp.Header
+	flag := func(name string) bool { return strings.EqualFold(strings.TrimSpace(h.Get(name)), "true") }
 	return &FetchResult{
-		Body:           data,
-		UserInfo:       resp.Header.Get("Subscription-Userinfo"),
-		ProfileTitle:   resp.Header.Get("Profile-Title"),
-		UpdateInterval: resp.Header.Get("Profile-Update-Interval"),
+		Body:             data,
+		UserInfo:         strings.TrimSpace(h.Get("Subscription-Userinfo")),
+		ProfileTitle:     headerText(h.Get("Profile-Title")),
+		UpdateInterval:   strings.TrimSpace(h.Get("Profile-Update-Interval")),
+		SupportUrl:       headerText(h.Get("Support-Url")),
+		WebPageUrl:       headerText(h.Get("Profile-Web-Page-Url")),
+		Announce:         headerText(h.Get("Announce")),
+		HwidActive:       flag("X-Hwid-Active"),
+		HwidLimit:        flag("X-Hwid-Limit"),
+		HwidMaxDevices:   flag("X-Hwid-Max-Devices-Reached"),
+		HwidNotSupported: flag("X-Hwid-Not-Supported"),
 	}, nil
+}
+
+// headerText decodes a panel header value: "base64:<text>" (how Remnawave
+// sends anything that is not plain ASCII) or plain text. A value that does
+// not decode to UTF-8 text is dropped.
+func headerText(v string) string {
+	v = strings.TrimSpace(v)
+	if rest, ok := strings.CutPrefix(v, "base64:"); ok {
+		b, err := decodeBase64Loose(rest)
+		if err != nil || !utf8.Valid(b) {
+			return ""
+		}
+		v = string(b)
+	}
+	return strings.TrimSpace(v)
+}
+
+// parseHeaders turns the JSON object of extra request headers into an
+// http.Header. Errors never quote values: they carry the device id.
+func parseHeaders(headersJSON string) (http.Header, error) {
+	if strings.TrimSpace(headersJSON) == "" {
+		return nil, nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(headersJSON), &m); err != nil {
+		return nil, errors.New("bad request headers: need a JSON object of strings")
+	}
+	h := http.Header{}
+	for name, value := range m {
+		if !isToken(name) {
+			return nil, fmt.Errorf("bad request header name %q", name)
+		}
+		switch http.CanonicalHeaderKey(name) {
+		case "Host", "Content-Length", "Transfer-Encoding", "Connection", "User-Agent":
+			continue
+		}
+		value = strings.TrimSpace(strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) {
+				return -1
+			}
+			return r
+		}, value))
+		if value != "" {
+			h.Set(name, value)
+		}
+	}
+	return h, nil
+}
+
+// isToken reports whether s is an HTTP token (RFC 9110), the only valid
+// form of a header name.
+func isToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // DownloadFile streams url into dst (replaced atomically on success). It is
@@ -168,7 +290,7 @@ func DownloadFile(url string, dst string, userAgent string, timeoutMs int32, pro
 	defer tr.CloseIdleConnections()
 
 	client := &http.Client{Transport: tr, Timeout: timeoutDuration(timeoutMs)}
-	resp, err := get(client, url, userAgent)
+	resp, err := get(client, url, userAgent, nil)
 	if err != nil {
 		return err
 	}
@@ -197,11 +319,15 @@ func DownloadFile(url string, dst string, userAgent string, timeoutMs int32, pro
 }
 
 // get performs a GET whose errors never contain the URL: subscription links
-// carry a secret token, and error texts end up in logs and on screen.
-func get(client *http.Client, rawURL string, userAgent string) (*http.Response, error) {
+// carry a secret token, and error texts end up in logs and on screen. extra
+// headers (may be nil) are added to the request, and never to geo downloads.
+func get(client *http.Client, rawURL string, userAgent string, extra http.Header) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, errors.New("invalid link")
+	}
+	for name, values := range extra {
+		req.Header[name] = values
 	}
 	if userAgent != "" {
 		req.Header.Set("User-Agent", userAgent)
