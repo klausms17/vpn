@@ -324,7 +324,7 @@ func TestEndToEnd(t *testing.T) {
 				t.Fatal("request did not reach the target")
 			}
 			ctrl.mu.Lock()
-			inst := ctrl.instance
+			inst := ctrl.cur.inst
 			ctrl.mu.Unlock()
 			if !c.noUDP {
 				if err := udpRoundTrip(inst, echoPort); err != nil {

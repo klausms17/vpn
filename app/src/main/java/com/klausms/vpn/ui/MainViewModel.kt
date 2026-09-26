@@ -226,7 +226,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         VpnCommands.connect(getApplication<Application>())
     }
 
-    fun stopVpn() = VpnCommands.disconnect(getApplication<Application>())
+    fun stopVpn() = VpnCommands.disconnect(getApplication<Application>(), "app")
 
     fun startVpnDenied() = message("Без разрешения на VPN подключиться нельзя. Если включён другой VPN-клиент как «постоянный», отключите его.")
 
@@ -438,6 +438,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val before = settings.value
         val after = repo.updateSettings(transform)
         if (after != before) reconnectIfRunning(delayMs = 800)
+    }
+
+    /** The app lists changed while their screen is open; applied when it closes. */
+    private var appListsChanged = false
+
+    /**
+     * Picking apps one by one is saved at once but reaches the tunnel only
+     * when the list is closed ([applyAppLists]): one reconnect, not one per
+     * tap.
+     */
+    fun updateAppLists(transform: (AppSettings) -> AppSettings) = viewModelScope.launch(saveErrors) {
+        val before = settings.value
+        if (repo.updateSettings(transform) != before) appListsChanged = true
+    }
+
+    fun applyAppLists() = viewModelScope.launch(saveErrors) {
+        repo.awaitSaves()
+        if (appListsChanged) {
+            appListsChanged = false
+            reconnectIfRunning()
+        }
     }
 
     fun updateGeo() = viewModelScope.launch {

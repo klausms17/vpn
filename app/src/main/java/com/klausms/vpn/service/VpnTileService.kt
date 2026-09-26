@@ -41,7 +41,7 @@ class VpnTileService : TileService() {
     override fun onClick() {
         super.onClick()
         when (VpnStatusHolder.status.value.state) {
-            VpnState.CONNECTED, VpnState.CONNECTING -> VpnCommands.disconnect(this)
+            VpnState.CONNECTED, VpnState.CONNECTING -> VpnCommands.disconnect(this, "tile")
             else -> {
                 if (VpnService.prepare(this) != null) {
                     // First run: the permission dialog needs the app.

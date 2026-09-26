@@ -4,7 +4,10 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
 import com.klausms.vpn.service.IVpnCallback
 import com.klausms.vpn.service.IVpnController
 import com.klausms.vpn.service.TrafficStats
@@ -27,6 +30,10 @@ import kotlinx.coroutines.withContext
  * app is on screen, so the VPN process sends nothing when nobody looks.
  */
 class VpnClient(private val context: Context) {
+    private companion object {
+        const val REBIND_GAP_MS = 10_000L
+    }
+
     private val _status = MutableStateFlow(VpnStatus())
     val status: StateFlow<VpnStatus> = _status.asStateFlow()
 
@@ -41,6 +48,8 @@ class VpnClient(private val context: Context) {
     @Volatile
     private var controller: IVpnController? = null
     private var bound = false
+    private val main = Handler(Looper.getMainLooper())
+    private var lastRebind = -REBIND_GAP_MS
 
     private val callback = object : IVpnCallback.Stub() {
         override fun onStatus(state: Int, profileId: String?, profileName: String?, message: String?, connectedSince: Long) {
@@ -71,9 +80,23 @@ class VpnClient(private val context: Context) {
 
         override fun onServiceDisconnected(name: ComponentName?) {
             // The VPN process died; Android tears the tunnel down with it.
+            AppLog.w("vpn process died")
             controller = null
             _status.value = VpnStatus()
             _traffic.value = TrafficStats()
+            // Android restarts a crashed service only after a pause (up to
+            // half an hour after repeated crashes); binding anew brings it
+            // back now, and it resumes the tunnel if it should run.
+            // At most every 10 s: a process that dies on start must not loop.
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastRebind < REBIND_GAP_MS) return
+            lastRebind = now
+            main.post {
+                if (bound) {
+                    unbind()
+                    bind()
+                }
+            }
         }
 
         override fun onBindingDied(name: ComponentName?) {

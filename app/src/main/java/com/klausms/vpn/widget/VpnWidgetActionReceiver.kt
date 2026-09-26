@@ -29,7 +29,7 @@ class VpnWidgetActionReceiver : BroadcastReceiver() {
                 // tunnel back after the user turned it off.
                 RuntimeState.setShouldRun(context, false)
                 try {
-                    VpnCommands.disconnect(context)
+                    VpnCommands.disconnect(context, "widget")
                 } catch (e: Exception) {
                     AppLog.w("widget could not stop the VPN", e)
                 }

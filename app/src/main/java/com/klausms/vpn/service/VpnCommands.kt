@@ -16,7 +16,8 @@ object VpnCommands {
     fun reconnect(context: Context) =
         ContextCompat.startForegroundService(context, intent(context, XrayVpnService.ACTION_RECONNECT))
 
-    fun disconnect(context: Context) {
-        context.startService(intent(context, XrayVpnService.ACTION_DISCONNECT))
+    /** [source]: who asked ("app", "tile", "widget"), for the log. */
+    fun disconnect(context: Context, source: String) {
+        context.startService(intent(context, XrayVpnService.ACTION_DISCONNECT).putExtra(XrayVpnService.EXTRA_SOURCE, source))
     }
 }

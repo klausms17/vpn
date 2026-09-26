@@ -22,6 +22,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -76,7 +77,10 @@ fun AppsScreen(vm: MainViewModel, includeMode: Boolean, onBack: () -> Unit) {
     val selected = if (includeMode) settings.includedApps else settings.excludedApps
     val icons = remember { HashMap<String, ImageBitmap>() }
 
-    fun toggle(pkg: String) = vm.updateSettings { s ->
+    // The tunnel takes the new list once, when this screen closes.
+    DisposableEffect(vm) { onDispose { vm.applyAppLists() } }
+
+    fun toggle(pkg: String) = vm.updateAppLists { s ->
         if (includeMode) {
             s.copy(includedApps = if (pkg in s.includedApps) s.includedApps - pkg else s.includedApps + pkg)
         } else {

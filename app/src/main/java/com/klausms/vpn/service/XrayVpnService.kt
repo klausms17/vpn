@@ -82,7 +82,13 @@ class XrayVpnService : VpnService() {
         const val ACTION_RECONNECT = "com.klausms.vpn.RECONNECT"
         const val ACTION_BIND = "com.klausms.vpn.BIND"
 
+        /** Who asked to disconnect, for the log. */
+        const val EXTRA_SOURCE = "source"
+
         private const val NETWORK_SETTLE_MS = 1_500L
+
+        /** A failed start of a tunnel that should run is tried this many more times. */
+        private const val MAX_START_RETRIES = 2
         private const val MIN_UPTIME_FOR_RESET_MS = 3_000L
 
         // The traffic check: a second site confirms before a server counts as dead.
@@ -149,6 +155,9 @@ class XrayVpnService : VpnService() {
 
     @Volatile
     private var resetJob: Job? = null
+
+    /** Counts starts; a retry planned for an older one is dropped. Used in the serial queue only. */
+    private var startGeneration = 0
 
     // ------------------------------------------------------ failover state
 
@@ -262,6 +271,8 @@ class XrayVpnService : VpnService() {
         lastStartId = startId
         when (intent?.action) {
             ACTION_DISCONNECT -> {
+                val source = intent.getStringExtra(EXTRA_SOURCE)?.takeIf { it.length <= 20 } ?: "unknown"
+                AppLog.i("disconnect asked by $source")
                 disconnect(userInitiated = true, startId)
                 return START_NOT_STICKY
             }
@@ -312,7 +323,7 @@ class XrayVpnService : VpnService() {
 
     override fun onRevoke() {
         // Another VPN took over or the user revoked permission in settings.
-        AppLog.i("VPN permission revoked by the system")
+        AppLog.i("VPN permission revoked by the system (another VPN app or the system settings)")
         disconnect(userInitiated = true, lastStartId)
     }
 
@@ -358,9 +369,14 @@ class XrayVpnService : VpnService() {
         failedId: String? = null,
         expectedSelection: String? = null,
         notice: String? = null,
+        attempt: Int = 0,
     ) {
         val restarting = config != null
-        setStatus(VpnStatus(VpnState.CONNECTING, profileName = VpnStatusHolder.status.value.profileName))
+        val generation = ++startGeneration
+        val before = VpnStatusHolder.status.value
+        // From here on the new interface has replaced the old one.
+        var swapped = false
+        setStatus(VpnStatus(VpnState.CONNECTING, profileName = before.profileName))
         try {
             val profiles = Stores.profiles(this).read()
             val profile = profileOverride?.let { id -> profiles.profiles.firstOrNull { it.id == id } }
@@ -390,6 +406,7 @@ class XrayVpnService : VpnService() {
             // Android then switches over without a moment of traffic
             // flowing outside the VPN.
             val newTun = establishTun(profile, settings, userRequested)
+            swapped = true
             val oldTun = tun
             resetJob?.cancel()
             if (restarting) {
@@ -440,12 +457,58 @@ class XrayVpnService : VpnService() {
                 return
             }
             val message = (e as? VpnStartException)?.message ?: "Ошибка запуска: ${e.userMessage()}"
-            AppLog.e("tunnel start failed: $message")
+            AppLog.e("tunnel start failed (attempt ${attempt + 1}): $message", e.takeIf { it !is VpnStartException })
+            val again: (Int) -> Unit = { next ->
+                retryStart(generation, next) {
+                    startTunnel(lastStartId, userRequested = false, profileOverride, failedId, expectedSelection, notice, attempt = next)
+                }
+            }
+            // New settings or another server for a tunnel that works: until
+            // the new interface replaced it, the old tunnel still carries the
+            // traffic. It keeps running; one more try a little later.
+            if (restarting && !swapped && config != null) {
+                val running = runningProfile
+                setStatus(
+                    VpnStatus(
+                        VpnState.CONNECTED, running?.id, running?.name,
+                        message = "Не удалось применить изменения: $message",
+                        connectedSince = before.connectedSince.takeIf { it > 0 } ?: System.currentTimeMillis(),
+                    ),
+                )
+                publishConnected()
+                if (attempt < MAX_START_RETRIES) again(attempt + 1)
+                return
+            }
+            // It was running, or should be running (a restart nobody asked
+            // for): a second try usually works. The new interface stays up
+            // meanwhile, so apps wait instead of going around the VPN.
+            if ((restarting || !userRequested) && attempt < MAX_START_RETRIES && RuntimeState.shouldRun(this)) {
+                haltCore()
+                setStatus(VpnStatus(VpnState.CONNECTING, profileName = before.profileName, message = "Переподключение…"))
+                again(attempt + 1)
+                return
+            }
             stopCore()
             RuntimeState.setShouldRun(this, false)
             setStatus(VpnStatus(VpnState.ERROR, message = message))
             if (!isAppVisible()) Notifications.showError(this, message)
             withContext(Dispatchers.Main) { stopIfLatest(startId) }
+        }
+    }
+
+    /**
+     * Runs [start] again after a pause, unless the tunnel was started or
+     * stopped in any other way meanwhile ([generation] is no longer the last
+     * start, or the user switched it off).
+     */
+    private fun retryStart(generation: Int, attempt: Int, start: suspend () -> Unit) {
+        scope.launch(worker) {
+            delay(if (attempt == 1) 1_500L else 5_000L)
+            enqueue {
+                if (generation != startGeneration || !RuntimeState.shouldRun(this@XrayVpnService)) return@enqueue
+                AppLog.i("starting again (attempt ${attempt + 1})")
+                start()
+            }
         }
     }
 
@@ -561,6 +624,15 @@ class XrayVpnService : VpnService() {
 
     /** Stops the core first, then closes the TUN fd it was reading. */
     private fun stopCore() {
+        haltCore()
+        closeTun()
+    }
+
+    /**
+     * Stops the core but keeps the TUN interface: until a new start (which
+     * closes it), apps' traffic waits instead of leaving the VPN.
+     */
+    private fun haltCore() {
         resetJob?.cancel()
         liveController = null
         runningProfile = null
@@ -571,7 +643,6 @@ class XrayVpnService : VpnService() {
             AppLog.w("core stop", e)
         }
         config = null
-        closeTun()
     }
 
     private fun closeTun() {

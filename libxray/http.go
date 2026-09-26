@@ -44,11 +44,12 @@ func proxyTransportVia(inst *core.Instance, tag string) *http.Transport {
 	}
 }
 
-func measureDelay(inst *core.Instance, url string, timeout time.Duration) (int64, error) {
-	return measureDelayVia(inst, ProxyTag, url, timeout)
+func measureDelay(parent context.Context, inst *core.Instance, url string, timeout time.Duration) (int64, error) {
+	return measureDelayVia(parent, inst, ProxyTag, url, timeout)
 }
 
-func measureDelayVia(inst *core.Instance, tag string, url string, timeout time.Duration) (int64, error) {
+// measureDelayVia gives up when parent ends (the instance is being stopped).
+func measureDelayVia(parent context.Context, inst *core.Instance, tag string, url string, timeout time.Duration) (int64, error) {
 	if url == "" {
 		url = DefaultTestURL
 	}
@@ -56,7 +57,7 @@ func measureDelayVia(inst *core.Instance, tag string, url string, timeout time.D
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, Timeout: timeout}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	// The first request pays for the proxy handshake; the second one shows
@@ -171,12 +172,12 @@ func FetchWithHeaders(url, userAgent, headersJSON string, timeoutMs int32, proxy
 		tr = http.DefaultTransport.(*http.Transport).Clone()
 	}
 	defer tr.CloseIdleConnections()
-	return doFetch(tr, url, userAgent, extra, timeoutDuration(timeoutMs))
+	return doFetch(context.Background(), tr, url, userAgent, extra, timeoutDuration(timeoutMs))
 }
 
-func doFetch(tr http.RoundTripper, url, userAgent string, extra http.Header, timeout time.Duration) (*FetchResult, error) {
+func doFetch(ctx context.Context, tr http.RoundTripper, url, userAgent string, extra http.Header, timeout time.Duration) (*FetchResult, error) {
 	client := &http.Client{Transport: tr, Timeout: timeout}
-	resp, err := get(client, url, userAgent, extra)
+	resp, err := get(ctx, client, url, userAgent, extra)
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +299,7 @@ func DownloadFile(url string, dst string, userAgent string, timeoutMs int32, pro
 	defer tr.CloseIdleConnections()
 
 	client := &http.Client{Transport: tr, Timeout: timeoutDuration(timeoutMs)}
-	resp, err := get(client, url, userAgent, nil)
+	resp, err := get(context.Background(), client, url, userAgent, nil)
 	if err != nil {
 		return err
 	}
@@ -329,8 +330,8 @@ func DownloadFile(url string, dst string, userAgent string, timeoutMs int32, pro
 // get performs a GET whose errors never contain the URL: subscription links
 // carry a secret token, and error texts end up in logs and on screen. extra
 // headers (may be nil) are added to the request, and never to geo downloads.
-func get(client *http.Client, rawURL string, userAgent string, extra http.Header) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+func get(ctx context.Context, client *http.Client, rawURL string, userAgent string, extra http.Header) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, errors.New("invalid link")
 	}

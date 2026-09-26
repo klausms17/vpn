@@ -51,7 +51,8 @@ object Notifications {
         if (withDisconnect) {
             val stop = PendingIntent.getService(
                 context, 1,
-                Intent(context, XrayVpnService::class.java).setAction(XrayVpnService.ACTION_DISCONNECT),
+                Intent(context, XrayVpnService::class.java).setAction(XrayVpnService.ACTION_DISCONNECT)
+                    .putExtra(XrayVpnService.EXTRA_SOURCE, "notification"),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
             builder.addAction(Notification.Action.Builder(null, "Отключить", stop).build())

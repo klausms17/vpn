@@ -62,9 +62,35 @@ func Version() string {
 
 // Controller owns a single running Xray instance bound to the VPN TUN fd.
 type Controller struct {
-	mu       sync.Mutex
-	instance *core.Instance
-	stats    stats.Manager
+	mu  sync.Mutex
+	cur *run // nil when not running
+}
+
+// run is one started instance and the calls that use it (delay tests,
+// fetches through the tunnel). Stop cancels those calls and waits for them
+// before closing the instance, so nothing works on a closing core.
+type run struct {
+	inst   *core.Instance
+	stats  stats.Manager
+	ctx    context.Context
+	cancel context.CancelFunc
+	calls  sync.WaitGroup
+}
+
+// stopWait bounds how long Stop waits for cancelled calls to return.
+const stopWait = 3 * time.Second
+
+// use hands out the running instance for one call; done must be called
+// when the call is over. ctx ends when the instance is stopped.
+func (c *Controller) use() (inst *core.Instance, ctx context.Context, done func(), err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	r := c.cur
+	if r == nil {
+		return nil, nil, nil, errors.New("core is not running")
+	}
+	r.calls.Add(1)
+	return r.inst, r.ctx, r.calls.Done, nil
 }
 
 // NewController creates an idle controller.
@@ -81,7 +107,7 @@ func (c *Controller) Start(configJSON string, tunFd int32) (err error) {
 	defer c.mu.Unlock()
 	defer recoverInto(&err)
 
-	if c.instance != nil {
+	if c.cur != nil {
 		return errors.New("core is already running")
 	}
 	if err := os.Setenv(envTunFd, strconv.Itoa(int(tunFd))); err != nil {
@@ -98,10 +124,12 @@ func (c *Controller) Start(configJSON string, tunFd int32) (err error) {
 		return fmt.Errorf("start failed: %w", err)
 	}
 
-	c.instance = inst
+	r := &run{inst: inst}
+	r.ctx, r.cancel = context.WithCancel(context.Background())
 	if sm, ok := inst.GetFeature(stats.ManagerType()).(stats.Manager); ok {
-		c.stats = sm
+		r.stats = sm
 	}
+	c.cur = r
 	// Parsing geo files and configs leaves a lot of garbage behind; hand it
 	// back to the OS so the long-lived VPN process stays small.
 	go releaseMemory()
@@ -114,21 +142,37 @@ func (c *Controller) Stop() (err error) {
 	defer c.mu.Unlock()
 	defer recoverInto(&err)
 
-	if c.instance == nil {
+	r := c.cur
+	if r == nil {
 		return nil
 	}
-	err = c.instance.Close()
-	c.instance = nil
-	c.stats = nil
+	// Detached first: even if closing panics, the next Start works.
+	c.cur = nil
+	r.cancel()
+	waitFor(&r.calls, stopWait)
+	err = r.inst.Close()
 	go releaseMemory()
 	return err
+}
+
+// waitFor waits for wg, at most d. No Add can follow: the run is detached.
+func waitFor(wg *sync.WaitGroup, d time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+	}
 }
 
 // IsRunning reports whether an instance is currently running.
 func (c *Controller) IsRunning() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.instance != nil
+	return c.cur != nil
 }
 
 // Traffic holds byte counters accumulated since the previous QueryTraffic call.
@@ -142,8 +186,11 @@ type Traffic struct {
 // QueryTraffic returns and resets the proxy/direct outbound traffic counters.
 // The config must enable "stats" and the outbound uplink/downlink policy.
 func (c *Controller) QueryTraffic() *Traffic {
+	var sm stats.Manager
 	c.mu.Lock()
-	sm := c.stats
+	if c.cur != nil {
+		sm = c.cur.stats
+	}
 	c.mu.Unlock()
 
 	t := &Traffic{}
@@ -168,13 +215,12 @@ func (c *Controller) QueryTraffic() *Traffic {
 func (c *Controller) MeasureDelay(url string, timeoutMs int32) (ms int64, err error) {
 	defer recoverInto(&err)
 
-	c.mu.Lock()
-	inst := c.instance
-	c.mu.Unlock()
-	if inst == nil {
-		return -1, errors.New("core is not running")
+	inst, ctx, done, err := c.use()
+	if err != nil {
+		return -1, err
 	}
-	return measureDelay(inst, url, timeoutDuration(timeoutMs))
+	defer done()
+	return measureDelay(ctx, inst, url, timeoutDuration(timeoutMs))
 }
 
 // MeasureOutboundDelay starts a temporary instance from configJSON (which
@@ -192,7 +238,7 @@ func MeasureOutboundDelay(configJSON string, url string, timeoutMs int32) (ms in
 	if err := inst.Start(); err != nil {
 		return -1, fmt.Errorf("start failed: %w", err)
 	}
-	return measureDelay(inst, url, timeoutDuration(timeoutMs))
+	return measureDelay(context.Background(), inst, url, timeoutDuration(timeoutMs))
 }
 
 // FetchThroughTunnel is FetchWithHeaders through the proxy outbound of the
@@ -205,15 +251,14 @@ func (c *Controller) FetchThroughTunnel(url, userAgent, headersJSON string, time
 	if err != nil {
 		return nil, err
 	}
-	c.mu.Lock()
-	inst := c.instance
-	c.mu.Unlock()
-	if inst == nil {
-		return nil, errors.New("core is not running")
+	inst, ctx, done, err := c.use()
+	if err != nil {
+		return nil, err
 	}
+	defer done()
 	tr := proxyTransport(inst)
 	defer tr.CloseIdleConnections()
-	return doFetch(tr, url, userAgent, extra, timeoutDuration(timeoutMs))
+	return doFetch(ctx, tr, url, userAgent, extra, timeoutDuration(timeoutMs))
 }
 
 // maxProbeParallel caps ProbeOutbounds' concurrent probes: each one holds
@@ -297,7 +342,7 @@ func (c *Controller) ProbeOutbounds(candidatesJSON string, url string, timeoutMs
 				defer func() { _ = recover() }()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				if ms, err := measureDelayVia(inst, tag, url, timeout); err == nil {
+				if ms, err := measureDelayVia(context.Background(), inst, tag, url, timeout); err == nil {
 					results[i] = ms
 				}
 			}()
@@ -366,14 +411,15 @@ func (c *Controller) newProbeInstance(groups [][]any) (*core.Instance, error) {
 func (c *Controller) restoreGlobals(probe *core.Instance) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.instance == nil {
+	if c.cur == nil {
 		return
 	}
-	if lg, ok := c.instance.GetFeature((*applog.Instance)(nil)).(*applog.Instance); ok {
+	running := c.cur.inst
+	if lg, ok := running.GetFeature((*applog.Instance)(nil)).(*applog.Instance); ok {
 		commonlog.RegisterHandler(lg)
 	}
-	dc, _ := c.instance.GetFeature(dns.ClientType()).(dns.Client)
-	om, _ := c.instance.GetFeature(xoutbound.ManagerType()).(xoutbound.Manager)
+	dc, _ := running.GetFeature(dns.ClientType()).(dns.Client)
+	om, _ := running.GetFeature(xoutbound.ManagerType()).(xoutbound.Manager)
 	if dc == nil || om == nil {
 		return
 	}

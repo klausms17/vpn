@@ -65,6 +65,9 @@ class AppRepository(context: Context) : ProfilesAccess {
         next
     }
 
+    /** Returns once the saves started before it are done. */
+    suspend fun awaitSaves() = mutex.withLock { }
+
     /** Picks up what the VPN process saved (failover, subscription refresh). */
     suspend fun reload() = mutex.withLock {
         withContext(Dispatchers.IO) {
