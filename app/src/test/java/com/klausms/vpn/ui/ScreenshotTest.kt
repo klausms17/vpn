@@ -52,6 +52,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import org.robolectric.shadows.ShadowLooper
 import java.awt.image.BufferedImage
 import java.io.File
 import javax.imageio.ImageIO
@@ -268,8 +269,16 @@ class ScreenshotTest {
         val d = context.resources.displayMetrics.density
         for (shot in shots) {
             compose.runOnUiThread { current = shot }
-            repeat(3) { compose.mainClock.advanceTimeBy(300) }
+            // The window draws a frame behind: the first capture still shows
+            // the previous widget, so let it draw and capture again.
             val bitmap = try {
+                repeat(2) {
+                    repeat(3) { compose.mainClock.advanceTimeBy(300) }
+                    ShadowLooper.idleMainLooper()
+                    compose.onRoot().captureToImage()
+                }
+                repeat(3) { compose.mainClock.advanceTimeBy(300) }
+                ShadowLooper.idleMainLooper()
                 val full = compose.onRoot().captureToImage().asAndroidBitmap()
                 val w = ((shot.wDp + 32) * d).toInt().coerceAtMost(full.width)
                 val h = ((shot.hDp + 32) * d).toInt().coerceAtMost(full.height)
