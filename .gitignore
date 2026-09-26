@@ -21,3 +21,4 @@ geo-cache/
 *.jks
 *.keystore
 keystore.properties
+__pycache__/
