@@ -7,6 +7,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.view.View
 import android.widget.FrameLayout
+import android.widget.RemoteViews
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -25,6 +26,7 @@ import com.klausms.vpn.data.AppSettings
 import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.Subscription
+import com.klausms.vpn.data.SubscriptionUpdater
 import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.service.VpnStatus
 import com.klausms.vpn.ui.screens.ServerActions
@@ -88,11 +90,26 @@ class ScreenshotTest {
     private val whitelist = mapOf("ru.example.com" to 1)
     private val noServerActions = ServerActions({}, {}, {}, { _, _ -> }, {}, {}, {})
 
+    private companion object {
+        const val SWITCH_NOTICE = "Переключились на «Амстердам»: «Франкфурт» не отвечал"
+    }
+
     // ------------------------------------------------------------ screens
 
     @Test fun homeOff() = home("home-off", VpnStatus(VpnState.DISCONNECTED))
 
     @Test fun homeConnected() = home("home-connected", connected())
+
+    @Test fun homeConnectedNotice() = home("home-connected-notice", connected().copy(message = SWITCH_NOTICE))
+
+    /** The panel refused (device limit): the old servers stay, the reason is shown. */
+    @Test fun homeSubscriptionNotice() {
+        val limited = subscription.copy(
+            notice = SubscriptionUpdater.HWID_LIMIT,
+            announce = "Напишите мне в Telegram — освобожу место для нового телефона",
+        )
+        home("home-subscription-notice", connected(), profiles.copy(subscriptions = listOf(limited)), scrollTo = 4)
+    }
 
     @Test fun homeConnecting() = home("home-connecting", VpnStatus(VpnState.CONNECTING, profileId = "nl"))
 
@@ -186,21 +203,26 @@ class ScreenshotTest {
             Triple("error", VpnState.ERROR, -1L),
         )
         for ((label, state, ping) in cases) {
-            val views = VpnWidget.previews(context, state, since, nl, ping)
-            for ((variant, rv) in views) {
-                val (w, h) = when (variant) {
-                    "FULL" -> 340 to 150
-                    "ROW" -> 320 to 64
-                    else -> 150 to 64
-                }
-                val parent = FrameLayout(context)
-                val view = rv.apply(context, parent)
-                save("widget-${variant.lowercase()}-$label", onWallpaper(context, view, w, h))
-            }
+            saveWidget(context, label, VpnWidget.previews(context, state, since, nl, ping))
         }
+        // Connected, with a notice (the server was switched).
+        saveWidget(context, "notice", VpnWidget.previews(context, VpnState.CONNECTED, since, nl, 48L, notice = SWITCH_NOTICE))
         // No server yet.
         val empty = VpnWidget.previews(context, VpnState.DISCONNECTED, 0, null, null)
         save("widget-full-no-server", onWallpaper(context, empty.getValue("FULL").apply(context, FrameLayout(context)), 340, 150))
+    }
+
+    private fun saveWidget(context: Context, label: String, views: Map<String, RemoteViews>) {
+        for ((variant, rv) in views) {
+            val (w, h) = when (variant) {
+                "FULL" -> 340 to 150
+                "ROW" -> 320 to 64
+                else -> 150 to 64
+            }
+            val parent = FrameLayout(context)
+            val view = rv.apply(context, parent)
+            save("widget-${variant.lowercase()}-$label", onWallpaper(context, view, w, h))
+        }
     }
 
     private fun onWallpaper(context: Context, view: View, wDp: Int, hDp: Int): Bitmap {

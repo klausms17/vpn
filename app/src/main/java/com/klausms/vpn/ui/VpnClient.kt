@@ -13,8 +13,12 @@ import com.klausms.vpn.service.VpnStatus
 import com.klausms.vpn.service.XrayVpnService
 import com.klausms.vpn.util.AppLog
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 
@@ -29,6 +33,11 @@ class VpnClient(private val context: Context) {
     private val _traffic = MutableStateFlow(TrafficStats())
     val traffic: StateFlow<TrafficStats> = _traffic.asStateFlow()
 
+    private val _profilesChanged = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    /** The VPN process saved other servers or a new selection: reload them. */
+    val profilesChanged: SharedFlow<Unit> = _profilesChanged.asSharedFlow()
+
     @Volatile
     private var controller: IVpnController? = null
     private var bound = false
@@ -42,6 +51,10 @@ class VpnClient(private val context: Context) {
 
         override fun onTraffic(upRate: Long, downRate: Long, upTotal: Long, downTotal: Long) {
             _traffic.value = TrafficStats(upRate, downRate, upTotal, downTotal)
+        }
+
+        override fun onProfilesChanged() {
+            _profilesChanged.tryEmit(Unit)
         }
     }
 

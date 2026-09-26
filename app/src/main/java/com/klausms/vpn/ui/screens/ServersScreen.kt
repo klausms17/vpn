@@ -367,6 +367,16 @@ private fun SubscriptionHeader(sub: Subscription, onRefresh: () -> Unit, onDelet
                         )
                     }
                 }
+                // What the panel said instead of servers (device limit,
+                // expired, ...): the servers from before stay usable.
+                sub.notice?.let { notice ->
+                    Spacer(Modifier.height(6.dp))
+                    Text(notice, style = IosType.footnote, color = kc.orange, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                }
+                sub.announce?.let { announce ->
+                    Spacer(Modifier.height(6.dp))
+                    Text(announce, style = IosType.footnote, color = kc.secondary, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                }
             }
             Spacer(Modifier.width(8.dp))
             RoundIconButton(R.drawable.ic_refresh_ios, "Обновить подписку", onRefresh)

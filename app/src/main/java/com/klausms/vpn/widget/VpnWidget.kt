@@ -216,12 +216,14 @@ object VpnWidget {
         val ping: Ping,
         /** False until a tunnel has come up once (the user allowed the VPN). */
         val vpnAllowed: Boolean,
+        /** Shown while connected, e.g. that the server was switched. */
+        val notice: String? = null,
     )
 
     /**
      * Screenshot tests: every size of the widget for one state, built exactly
      * as for the home screen. [pingMs]: null not measured, -1 no answer,
-     * -2 being measured.
+     * -2 being measured. [notice]: the connected state's message.
      */
     @VisibleForTesting
     internal fun previews(
@@ -230,6 +232,7 @@ object VpnWidget {
         connectedSince: Long,
         profile: StoredProfile?,
         pingMs: Long?,
+        notice: String? = null,
     ): Map<String, RemoteViews> {
         val ping = when {
             pingMs == null -> Ping.Unknown
@@ -237,7 +240,7 @@ object VpnWidget {
             pingMs < 0 -> Ping.Testing
             else -> Ping.Ok(pingMs)
         }
-        val m = Model(state, connectedSince, profile, ping, vpnAllowed = true)
+        val m = Model(state, connectedSince, profile, ping, vpnAllowed = true, notice = notice)
         return Variant.entries.associate { it.name to build(context, m, it) }
     }
 
@@ -252,8 +255,9 @@ object VpnWidget {
             !prefs.contains(KEY_PING_MS) -> Ping.Unknown
             else -> prefs.getLong(KEY_PING_MS, -1L).let { if (it < 0) Ping.Failed else Ping.Ok(it) }
         }
+        val notice = status.message?.takeIf { status.state == VpnState.CONNECTED && it.isNotBlank() }
         // Not VpnService.prepare(): it would take the VPN over from another app.
-        return Model(status.state, status.connectedSince, profile, ping, RuntimeState.vpnConsented(context))
+        return Model(status.state, status.connectedSince, profile, ping, RuntimeState.vpnConsented(context), notice)
     }
 
     private fun render(context: Context) {
@@ -335,6 +339,10 @@ object VpnWidget {
         val v = RemoteViews(context.packageName, variant.layout)
         val connected = m.state == VpnState.CONNECTED
         val busy = m.state == VpnState.CONNECTING || m.state == VpnState.DISCONNECTING
+        val notice = m.notice?.takeIf { connected }
+        // The row has no protocol line: its notice takes the status text's
+        // place next to the timer.
+        val noticeInStatus = notice != null && variant == Variant.ROW
 
         // Status
         val (statusText, statusColor) = when (m.state) {
@@ -345,8 +353,15 @@ object VpnWidget {
             VpnState.DISCONNECTED -> "Отключен" to GREY
         }
         v.setInt(R.id.status_dot, "setColorFilter", statusColor)
-        v.setTextViewText(R.id.status_text, statusText)
-        v.setTextColor(R.id.status_text, if (m.state == VpnState.DISCONNECTED) TEXT_SECONDARY else statusColor)
+        v.setTextViewText(R.id.status_text, if (noticeInStatus) notice else statusText)
+        v.setTextColor(
+            R.id.status_text,
+            when {
+                noticeInStatus -> AMBER
+                m.state == VpnState.DISCONNECTED -> TEXT_SECONDARY
+                else -> statusColor
+            },
+        )
         v.setInt(R.id.panel, "setBackgroundResource", if (connected) R.drawable.widget_panel_on else R.drawable.widget_panel)
 
         // Connection timer: counted by the launcher, not by this app. Every
@@ -373,7 +388,15 @@ object VpnWidget {
                 else -> profile.address
             },
         )
-        v.setTextViewText(R.id.protocol, if (profile != null) protocolLine(profile) else "Добавьте ключ в приложении")
+        v.setTextViewText(
+            R.id.protocol,
+            when {
+                profile == null -> "Добавьте ключ в приложении"
+                notice != null -> notice
+                else -> protocolLine(profile)
+            },
+        )
+        v.setTextColor(R.id.protocol, if (notice != null && profile != null) AMBER else TEXT_SECONDARY)
 
         // Power button
         v.setImageViewResource(

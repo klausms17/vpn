@@ -26,10 +26,23 @@ data class Subscription(
     val id: String,
     val name: String,
     val url: String,
+    /** When its servers were last replaced by a fresh list. */
     val updatedAt: Long = 0,
     /** Raw "subscription-userinfo" header (traffic / expiry). */
     val userInfo: String? = null,
+    /** Why the last attempt failed; null once one succeeds. */
     val lastError: String? = null,
+    /** Last attempt, successful or not. */
+    val lastAttemptAt: Long = 0,
+    /**
+     * What the panel said instead of (or besides) servers: device limit,
+     * subscription expired, ... The servers from before are kept then.
+     */
+    val notice: String? = null,
+    /** The owner's message ("announce" header). */
+    val announce: String? = null,
+    /** Where to ask the owner for help ("support-url" header). */
+    val supportUrl: String? = null,
 )
 
 @Serializable

@@ -124,6 +124,10 @@ jobs:
             exit 1
           }
 
+      # Plain JVM tests of the app's logic (subscriptions, storage, links, failover).
+      - name: Unit tests
+        run: ./gradlew --no-daemon testDebugUnitTest --tests 'com.klausms.vpn.data.*' --tests 'com.klausms.vpn.ui.DeepLinkTest' --tests 'com.klausms.vpn.service.FailoverTest'
+
       - name: Check native library 16 KB alignment
         run: |
           readelf="$(ls "$ANDROID_NDK_LATEST_HOME"/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf)"
