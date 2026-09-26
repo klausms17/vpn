@@ -57,14 +57,19 @@ object VpnWidget {
     /** A second tap this soon after a result is taken as a double tap. */
     private const val DOUBLE_TAP_MS = 1_500L
 
-    // iOS system colours on dark.
-    private const val GREEN = 0xFF30D158.toInt()
+    // The look of the Happ widget the owner asked for: a deep green for
+    // "connected", a bright one for the power sign, yellow for a slow ping.
+    private const val GREEN = 0xFF00B800.toInt()
+    private const val NEON = 0xFF19FF3C.toInt()
+    private const val YELLOW = 0xFFFFD600.toInt()
     private const val AMBER = 0xFFFF9F0A.toInt()
     private const val RED = 0xFFFF453A.toInt()
     private const val GREY = 0xFF8E8E93.toInt()
-    private const val BAR_OFF = 0xFFEBEBF5.toInt()
+    private const val BAR_OFF = 0xFFC0C0C0.toInt()
     private const val TEXT = 0xFFFFFFFF.toInt()
     private const val TEXT_SECONDARY = 0x99EBEBF5.toInt()
+    private const val MAP_ON = 0xFF3CDC64.toInt()
+    private const val MAP_OFF = 0xFFFFFFFF.toInt()
 
     private const val RC_OPEN = 100
     private const val RC_CONNECT_UI = 101
@@ -363,6 +368,15 @@ object VpnWidget {
             },
         )
         v.setInt(R.id.panel, "setBackgroundResource", if (connected) R.drawable.widget_panel_on else R.drawable.widget_panel)
+        // The map: cropped where the launcher clips it to the rounded panel
+        // (Android 12+), stretched with its own rounded corners before.
+        val clipped = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+        v.setViewVisibility(R.id.map, if (clipped) View.VISIBLE else View.GONE)
+        v.setViewVisibility(R.id.map_fit, if (clipped) View.GONE else View.VISIBLE)
+        for (id in intArrayOf(R.id.map, R.id.map_fit)) {
+            v.setInt(id, "setColorFilter", if (connected) MAP_ON else MAP_OFF)
+            v.setInt(id, "setImageAlpha", if (connected) 255 else 0x66)
+        }
 
         // Connection timer: counted by the launcher, not by this app. Every
         // visibility is set explicitly: a launcher may re-apply this picture
@@ -407,7 +421,7 @@ object VpnWidget {
                 else -> R.drawable.widget_power_off
             },
         )
-        v.setInt(R.id.power_icon, "setColorFilter", if (connected) GREEN else if (busy) AMBER else TEXT)
+        v.setInt(R.id.power_icon, "setColorFilter", if (connected) NEON else if (busy) AMBER else TEXT)
         v.setViewVisibility(R.id.power_glow, if (connected) View.VISIBLE else View.GONE)
         val on = connected || m.state == VpnState.CONNECTING
         v.setContentDescription(
@@ -443,7 +457,7 @@ object VpnWidget {
             is Ping.Ok -> when {
                 ping.ms < 150 -> 4 to GREEN
                 ping.ms < 400 -> 3 to GREEN
-                ping.ms < 1000 -> 2 to AMBER
+                ping.ms < 1000 -> 3 to YELLOW
                 else -> 1 to RED
             }
             Ping.Failed -> 1 to RED
@@ -451,12 +465,10 @@ object VpnWidget {
         }
         val barIds = intArrayOf(R.id.bar1, R.id.bar2, R.id.bar3, R.id.bar4)
         for ((i, id) in barIds.withIndex()) {
-            // SRC_ATOP keeps the bar's own (opaque) alpha, so dim "off" bars
-            // with the image alpha instead of a translucent tint. Both are
-            // always set: RemoteViews may be re-applied onto old views.
+            // Both are always set: RemoteViews may be re-applied onto old views.
             val on = i < bars
             v.setInt(id, "setColorFilter", if (on) color else BAR_OFF)
-            v.setInt(id, "setImageAlpha", if (on) 255 else 0x4D)
+            v.setInt(id, "setImageAlpha", if (on || bars > 0) 255 else 0x80)
         }
 
         val text = when (ping) {
