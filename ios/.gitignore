@@ -1,0 +1,9 @@
+# Generated in CI (xcodegen, gomobile, prepare-geo.sh).
+KlausVPN.xcodeproj/
+Frameworks/
+PacketTunnel/Resources/geo/
+App/Info.plist
+App/KlausVPN.entitlements
+PacketTunnel/Info.plist
+PacketTunnel/PacketTunnel.entitlements
+build/

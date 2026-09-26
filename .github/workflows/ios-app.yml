@@ -1,0 +1,81 @@
+name: iPhone app
+
+# Builds the iPhone app on a macOS runner. macOS minutes are expensive
+# (they count 10x on private repositories), so this runs only when the app
+# itself changes, or by hand; core changes are checked on Linux (ios.yml).
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "ios/**"
+      - "scripts/build-libxray-ios.sh"
+      - ".github/workflows/ios-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-app-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build (unsigned)
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: libxray/go.mod
+          cache-dependency-path: libxray/go.sum
+
+      - name: Xcode version
+        id: xcode
+        run: |
+          xcodebuild -version
+          echo "build=$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
+
+      - name: Core framework from the cache
+        id: core
+        uses: actions/cache@v6
+        with:
+          path: ios/Frameworks/Libxray.xcframework
+          key: libxray-ios-${{ steps.xcode.outputs.build }}-${{ hashFiles('libxray/*.go', 'libxray/go.mod', 'libxray/go.sum', 'scripts/build-libxray-ios.sh') }}
+
+      - name: Build the core framework (gomobile)
+        if: steps.core.outputs.cache-hit != 'true'
+        run: scripts/build-libxray-ios.sh
+
+      - name: Install XcodeGen
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen"
+          bin="$(find "$RUNNER_TEMP/xcodegen" -type f -name xcodegen -perm -u+x | head -n 1)"
+          echo "XCODEGEN=$bin" >> "$GITHUB_ENV"
+
+      - name: Generate the Xcode project
+        run: '"$XCODEGEN" generate --spec ios/project.yml'
+
+      - name: Build
+        run: |
+          xcodebuild build \
+            -project ios/KlausVPN.xcodeproj -scheme KlausVPN -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            COMPILER_INDEX_STORE_ENABLE=NO -quiet
+
+      - name: Check the app
+        run: |
+          app="$(find "$RUNNER_TEMP/dd" -name KlausVPN.app -type d | head -n 1)"
+          test -n "$app"
+          test -d "$app/PlugIns/PacketTunnel.appex"
+          plutil -p "$app/PlugIns/PacketTunnel.appex/Info.plist" | grep -q packet-tunnel
+          du -sh "$app" "$app/PlugIns/PacketTunnel.appex"
