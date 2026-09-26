@@ -9,10 +9,17 @@ import android.view.View
 import android.widget.FrameLayout
 import android.widget.RemoteViews
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.platform.LocalDensity
@@ -22,6 +29,8 @@ import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.klausms.vpn.data.AppSettings
 import com.klausms.vpn.data.AppUpdate
 import com.klausms.vpn.data.ProfilesState
@@ -213,26 +222,63 @@ class ScreenshotTest {
             Triple("connecting", VpnState.CONNECTING, -2L),
             Triple("error", VpnState.ERROR, -1L),
         )
+        val shots = mutableListOf<WidgetShot>()
         for ((label, state, ping) in cases) {
-            saveWidget(context, label, VpnWidget.previews(context, state, since, nl, ping))
+            shots += widgetShots(label, VpnWidget.previews(context, state, since, nl, ping))
         }
         // Connected, with a notice (the server was switched).
-        saveWidget(context, "notice", VpnWidget.previews(context, VpnState.CONNECTED, since, nl, 48L, notice = SWITCH_NOTICE))
+        shots += widgetShots("notice", VpnWidget.previews(context, VpnState.CONNECTED, since, nl, 48L, notice = SWITCH_NOTICE))
         // No server yet.
         val empty = VpnWidget.previews(context, VpnState.DISCONNECTED, 0, null, null)
-        save("widget-full-no-server", onWallpaper(context, empty.getValue("FULL").apply(context, FrameLayout(context)), 340, 150))
+        shots += WidgetShot("widget-full-no-server", empty.getValue("FULL"), 340, 150)
+        renderWidgets(context, shots)
     }
 
-    private fun saveWidget(context: Context, label: String, views: Map<String, RemoteViews>) {
-        for ((variant, rv) in views) {
-            val (w, h) = when (variant) {
-                "FULL" -> 340 to 150
-                "ROW" -> 320 to 64
-                else -> 150 to 64
+    private class WidgetShot(val name: String, val views: RemoteViews, val wDp: Int, val hDp: Int)
+
+    private fun widgetShots(label: String, views: Map<String, RemoteViews>) = views.map { (variant, rv) ->
+        val (w, h) = when (variant) {
+            "FULL" -> 340 to 150
+            "ROW" -> 320 to 64
+            else -> 150 to 64
+        }
+        WidgetShot("widget-${variant.lowercase()}-$label", rv, w, h)
+    }
+
+    /**
+     * On a real window, drawn as the launcher draws it (hardware layers, so
+     * views are clipped to their rounded outlines); the plain software
+     * drawing if that cannot be captured.
+     */
+    private fun renderWidgets(context: Context, shots: List<WidgetShot>) {
+        compose.mainClock.autoAdvance = false
+        var current by mutableStateOf<WidgetShot?>(null)
+        compose.setContent {
+            Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color(0xFF3A4E6B))) {
+                current?.let { shot ->
+                    key(shot.name) {
+                        AndroidView(
+                            factory = { ctx -> shot.views.apply(ctx, FrameLayout(ctx)) },
+                            modifier = Modifier.padding(16.dp).size(shot.wDp.dp, shot.hDp.dp),
+                        )
+                    }
+                }
             }
-            val parent = FrameLayout(context)
-            val view = rv.apply(context, parent)
-            save("widget-${variant.lowercase()}-$label", onWallpaper(context, view, w, h))
+        }
+        val d = context.resources.displayMetrics.density
+        for (shot in shots) {
+            compose.runOnUiThread { current = shot }
+            repeat(3) { compose.mainClock.advanceTimeBy(300) }
+            val bitmap = try {
+                val full = compose.onRoot().captureToImage().asAndroidBitmap()
+                val w = ((shot.wDp + 32) * d).toInt().coerceAtMost(full.width)
+                val h = ((shot.hDp + 32) * d).toInt().coerceAtMost(full.height)
+                Bitmap.createBitmap(full, 0, 0, w, h)
+            } catch (e: Throwable) {
+                System.err.println("captureToImage failed for ${shot.name}, drawing the view instead: $e")
+                onWallpaper(context, shot.views.apply(context, FrameLayout(context)), shot.wDp, shot.hDp)
+            }
+            save(shot.name, bitmap)
         }
     }
 
