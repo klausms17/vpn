@@ -131,9 +131,11 @@ func NewController() *Controller {
 }
 
 // Start builds an Xray instance from configJSON and starts it. tunFd is the
-// file descriptor of the Android VPN interface (0 when the config has no tun
-// inbound). The fd stays owned by the caller: Xray never closes it, so the
-// caller must close it only after Stop returns.
+// file descriptor of the VPN interface: Android's VpnService fd, or the
+// utun of an iOS packet tunnel (TunnelFD); 0 when the config has no tun
+// inbound. The fd stays owned by the caller: Xray never closes it, so the
+// caller must close it only after Stop returns (on iOS Xray works on a
+// copy, see prepareTunFd).
 func (c *Controller) Start(configJSON string, tunFd int32) (err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -142,9 +144,19 @@ func (c *Controller) Start(configJSON string, tunFd int32) (err error) {
 	if c.cur != nil {
 		return errors.New("core is already running")
 	}
-	if err := os.Setenv(envTunFd, strconv.Itoa(int(tunFd))); err != nil {
+	fd, err := prepareTunFd(tunFd)
+	if err != nil {
+		return fmt.Errorf("tun fd: %w", err)
+	}
+	if fd > 0 {
+		err = os.Setenv(envTunFd, strconv.Itoa(int(fd)))
+	} else {
+		err = os.Unsetenv(envTunFd)
+	}
+	if err != nil {
 		return fmt.Errorf("set tun fd: %w", err)
 	}
+	defer startGC()()
 	reloadGeoIfChanged()
 
 	inst, err := newInstance(configJSON)
@@ -518,6 +530,10 @@ func timeoutDuration(ms int32) time.Duration {
 	}
 	return time.Duration(ms) * time.Millisecond
 }
+
+// ReleaseMemory hands freed memory back to the system at once, e.g. when
+// iOS warns the tunnel extension about memory.
+func ReleaseMemory() { releaseMemory() }
 
 func releaseMemory() {
 	runtime.GC()

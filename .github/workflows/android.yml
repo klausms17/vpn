@@ -3,7 +3,8 @@ name: Build
 on:
   push:
     branches: ["**"]
-    paths-ignore: ["**.md"]
+    # The iPhone app has its own workflow (ios.yml).
+    paths-ignore: ["**.md", "ios/**", ".github/workflows/ios*.yml"]
   workflow_dispatch:
   schedule:
     # Weekly rebuild so the bundled Russian databases stay fresh.

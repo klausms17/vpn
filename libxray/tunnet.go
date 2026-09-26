@@ -91,3 +91,62 @@ func complementIPv4(exclude []string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// AppleTunConfig is TunConfig in the shape NEPacketTunnelNetworkSettings
+// takes: routes to exclude instead of routes to include for IPv4, masks
+// instead of prefix lengths.
+type AppleTunConfig struct {
+	MTU        int          `json:"mtu"`
+	IPv4       AppleRoute   `json:"ipv4"`         // the interface address
+	IPv4Out    []AppleRoute `json:"ipv4Excluded"` // everything else goes in
+	IPv6       string       `json:"ipv6"`         // the interface address
+	IPv6Prefix int          `json:"ipv6Prefix"`
+	IPv6In     []AppleRoute `json:"ipv6Included"` // global unicast only
+	DNSServers []string     `json:"dnsServers"`
+}
+
+// AppleRoute is an IPv4 route as address and mask, or an IPv6 one as
+// address and prefix length.
+type AppleRoute struct {
+	Address string `json:"address"`
+	Mask    string `json:"mask,omitempty"`
+	Prefix  int    `json:"prefix,omitempty"`
+}
+
+// TunSettingsApple returns the tunnel settings for an iOS packet tunnel
+// as JSON: the same addresses, MTU, DNS and bypassed networks as
+// TunSettings. The MTU must match the tun inbound (Xray reads MTU+4 bytes).
+func TunSettingsApple(ipv6 bool) string {
+	_ = ipv6 // IPv6 always goes in, so it cannot leak (as on Android)
+	cfg := AppleTunConfig{
+		MTU:        TunMTU,
+		IPv4:       AppleRoute{Address: TunIPv4, Mask: ipv4Mask(TunIPv4Len)},
+		IPv6:       TunIPv6,
+		IPv6Prefix: TunIPv6Len,
+		IPv6In:     []AppleRoute{routeV6(tunIPv6Route)},
+		DNSServers: []string{TunDNSv4},
+	}
+	for _, s := range bypassIPv4 {
+		p := netip.MustParsePrefix(s)
+		// 0.0.0.0/8 is not a destination; iOS rejects it as a route.
+		if p.Addr().IsUnspecified() {
+			continue
+		}
+		cfg.IPv4Out = append(cfg.IPv4Out, AppleRoute{Address: p.Masked().Addr().String(), Mask: ipv4Mask(p.Bits())})
+	}
+	out, _ := json.Marshal(cfg)
+	return string(out)
+}
+
+func ipv4Mask(bits int) string {
+	var m [4]byte
+	for i := 0; i < bits; i++ {
+		m[i/8] |= 0x80 >> (i % 8)
+	}
+	return netip.AddrFrom4(m).String()
+}
+
+func routeV6(s string) AppleRoute {
+	p := netip.MustParsePrefix(s)
+	return AppleRoute{Address: p.Masked().Addr().String(), Prefix: p.Bits()}
+}
