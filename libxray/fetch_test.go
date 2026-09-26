@@ -131,6 +131,44 @@ func TestFetchWithHeaders(t *testing.T) {
 	}
 }
 
+func TestFetchKlausHeaders(t *testing.T) {
+	report := "https://sub.example.com/klaus/report"
+	app := "https://sub.example.com/app/version.json"
+	b64 := func(s string) string { return "base64:" + base64.StdEncoding.EncodeToString([]byte(s)) }
+	cases := []struct {
+		name                string
+		headers             map[string]string
+		wantReport, wantApp string
+	}{
+		{"plain", map[string]string{"klaus-report-url": report, "klaus-app-url": app}, report, app},
+		{"base64", map[string]string{"klaus-report-url": b64(report), "klaus-app-url": " " + b64(app) + " "}, report, app},
+		{"missing", nil, "", ""},
+		{"broken-base64", map[string]string{"klaus-report-url": "base64:!!!", "klaus-app-url": ""}, "", ""},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, c := range cases {
+			if r.URL.Path == "/"+c.name {
+				// Lower-case names on the wire, as Remnawave sends them.
+				for k, v := range c.headers {
+					w.Header()[k] = []string{v}
+				}
+			}
+		}
+		w.Write([]byte("body"))
+	}))
+	defer srv.Close()
+
+	for _, c := range cases {
+		res, err := Fetch(srv.URL+"/"+c.name, "", 5000, "")
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if res.ReportUrl != c.wantReport || res.AppUrl != c.wantApp {
+			t.Errorf("%s: got report %q app %q, want %q %q", c.name, res.ReportUrl, res.AppUrl, c.wantReport, c.wantApp)
+		}
+	}
+}
+
 func TestFetchErrorsAndLimit(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

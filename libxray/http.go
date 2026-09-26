@@ -115,6 +115,12 @@ type FetchResult struct {
 	WebPageUrl string
 	// "announce" header: a message from the owner.
 	Announce string
+	// "klaus-report-url" header (our panel only): where the app reports a
+	// server that failover had to leave.
+	ReportUrl string
+	// "klaus-app-url" header (our panel only): the version.json of the
+	// latest published app build.
+	AppUrl string
 	// Remnawave device limit ("x-hwid-*: true" headers). HwidActive: the
 	// limit applies to this user. HwidLimit: the request was refused because
 	// of it, HwidMaxDevices: no free device slot, HwidNotSupported: the
@@ -195,6 +201,8 @@ func doFetch(tr http.RoundTripper, url, userAgent string, extra http.Header, tim
 		SupportUrl:       headerText(h.Get("Support-Url")),
 		WebPageUrl:       headerText(h.Get("Profile-Web-Page-Url")),
 		Announce:         headerText(h.Get("Announce")),
+		ReportUrl:        headerText(h.Get("Klaus-Report-Url")),
+		AppUrl:           headerText(h.Get("Klaus-App-Url")),
 		HwidActive:       flag("X-Hwid-Active"),
 		HwidLimit:        flag("X-Hwid-Limit"),
 		HwidMaxDevices:   flag("X-Hwid-Max-Devices-Reached"),
