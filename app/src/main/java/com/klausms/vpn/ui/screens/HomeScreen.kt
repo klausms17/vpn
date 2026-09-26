@@ -88,6 +88,8 @@ fun HomeScreen(
     onToggle: () -> Unit,
     onAdd: () -> Unit,
     onOpenSettings: () -> Unit,
+    onPaste: () -> Boolean = { false },
+    onScan: (() -> Unit)? = null,
 ) {
     val profiles by vm.profiles.collectAsStateWithLifecycle()
     val status by vm.status.collectAsStateWithLifecycle()
@@ -123,6 +125,8 @@ fun HomeScreen(
         update = update,
         onUpdate = { if (!openInBrowser(context, it.apkUrl)) vm.updateNotOpened() },
         onDismissUpdate = { vm.dismissUpdate() },
+        onPaste = onPaste,
+        onScan = onScan,
     )
 }
 
@@ -141,6 +145,10 @@ fun HomeContent(
     update: AppUpdate? = null,
     onUpdate: (AppUpdate) -> Unit = {},
     onDismissUpdate: () -> Unit = {},
+    /** Imports the clipboard; false when it holds no text. */
+    onPaste: () -> Boolean = { false },
+    /** Opens the QR scanner; null without a camera. */
+    onScan: (() -> Unit)? = null,
 ) {
     val state = status.state
     val active = state == VpnState.CONNECTED || state == VpnState.CONNECTING || state == VpnState.DISCONNECTING
@@ -228,6 +236,8 @@ fun HomeContent(
                 actions = actions,
                 onRename = { renameTarget = it },
                 onAdd = onAdd,
+                onPaste = onPaste,
+                onScan = onScan,
             )
         }
         // Rows scrolled under the status bar fade out; once the connect

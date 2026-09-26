@@ -13,10 +13,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
@@ -43,6 +43,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.klausms.vpn.R
@@ -55,9 +56,11 @@ import com.klausms.vpn.ui.components.Countries
 import com.klausms.vpn.ui.components.IosIcon
 import com.klausms.vpn.ui.components.PrimaryButton
 import com.klausms.vpn.ui.components.RowDivider
+import com.klausms.vpn.ui.components.SecondaryButton
 import com.klausms.vpn.ui.components.SectionFooter
 import com.klausms.vpn.ui.components.SectionHeader
 import com.klausms.vpn.ui.components.SignalBars
+import com.klausms.vpn.ui.components.TextAction
 import com.klausms.vpn.ui.components.groupRow
 import com.klausms.vpn.ui.components.pressScale
 import com.klausms.vpn.ui.components.tap
@@ -92,6 +95,10 @@ fun LazyListScope.serverSections(
     actions: ServerActions,
     onRename: (StoredProfile) -> Unit,
     onAdd: () -> Unit,
+    /** Imports what is in the clipboard; false when it holds no text. */
+    onPaste: () -> Boolean = { false },
+    /** Opens the QR scanner; null without a camera. */
+    onScan: (() -> Unit)? = null,
 ) {
     val subIds = profiles.subscriptions.map { it.id }.toSet()
     // Servers whose subscription is gone are treated as own keys.
@@ -101,7 +108,7 @@ fun LazyListScope.serverSections(
         ServersTitle(showPingAll = profiles.profiles.isNotEmpty(), onPingAll = actions.pingAll)
     }
     if (profiles.profiles.isEmpty()) {
-        item(key = "servers-empty") { EmptyServers(onAdd) }
+        item(key = "servers-empty") { EmptyServers(onAdd, onPaste, onScan) }
         return
     }
     if (own.isNotEmpty()) {
@@ -170,26 +177,51 @@ private fun ServersTitle(showPingAll: Boolean, onPingAll: () -> Unit) {
     }
 }
 
+/**
+ * The first screen: a key or a subscription link copied from a messenger
+ * goes in with one tap, or from a QR code; typing is the last resort.
+ */
 @Composable
-private fun EmptyServers(onAdd: () -> Unit) {
+private fun EmptyServers(onAdd: () -> Unit, onPaste: () -> Boolean, onScan: (() -> Unit)?) {
+    var clipboardEmpty by rememberSaveable { mutableStateOf(false) }
     Column(
         Modifier
             .padding(horizontal = 20.dp, vertical = 8.dp)
             .fillMaxWidth()
             .clip(RoundedCornerShape(26.dp))
             .background(kc.card)
-            .padding(20.dp),
+            .padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("Пока нет ни одного сервера", style = IosType.headline, color = kc.label)
+        Text("Добавьте сервер", style = IosType.headline, color = kc.label)
         Spacer(Modifier.height(6.dp))
         Text(
-            "Вставьте ключ (vless://…) или ссылку на подписку. Можно также «Поделиться» ключом из мессенджера в это приложение.",
+            if (onScan != null) {
+                "Скопируйте ключ (vless://…) или ссылку на подписку и нажмите «Вставить из буфера». Или отсканируйте QR-код."
+            } else {
+                "Скопируйте ключ (vless://…) или ссылку на подписку и нажмите «Вставить из буфера»."
+            },
             style = IosType.subhead,
             color = kc.secondary,
+            textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(16.dp))
-        PrimaryButton("Добавить сервер", onClick = onAdd, icon = R.drawable.ic_plus_ios)
+        PrimaryButton("Вставить из буфера", onClick = { clipboardEmpty = !onPaste() }, icon = R.drawable.ic_clipboard_ios)
+        if (clipboardEmpty) {
+            Text(
+                "В буфере обмена нет текста: сначала скопируйте ключ или ссылку",
+                style = IosType.footnote,
+                color = kc.orange,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+        if (onScan != null) {
+            Spacer(Modifier.height(10.dp))
+            SecondaryButton("Сканировать QR-код", onClick = { clipboardEmpty = false; onScan() }, icon = R.drawable.ic_qr_ios)
+        }
+        Spacer(Modifier.height(4.dp))
+        TextAction("Ввести вручную", onClick = onAdd, style = IosType.subhead)
     }
 }
 

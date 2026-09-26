@@ -46,10 +46,10 @@ import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
 import kotlinx.coroutines.launch
 
-/** Sheet for pasting keys or a subscription link. */
+/** Sheet for pasting keys or a subscription link, or scanning a QR code ([onScan], null without a camera). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit) {
+fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit, onScan: (() -> Unit)? = null) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
@@ -148,6 +148,10 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit) {
                 PrimaryButton("Вставить из буфера", onClick = paste, icon = R.drawable.ic_clipboard_ios)
             } else {
                 SecondaryButton("Вставить из буфера", onClick = paste, icon = R.drawable.ic_clipboard_ios)
+            }
+            if (onScan != null) {
+                Spacer(Modifier.height(10.dp))
+                SecondaryButton("Сканировать QR-код", onClick = { close(onScan) }, icon = R.drawable.ic_qr_ios)
             }
             Spacer(Modifier.height(10.dp))
             PrimaryButton(

@@ -4,9 +4,11 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
@@ -49,7 +51,10 @@ import com.klausms.vpn.ui.screens.AppsScreen
 import com.klausms.vpn.ui.screens.HomeScreen
 import com.klausms.vpn.ui.screens.LicensesScreen
 import com.klausms.vpn.ui.screens.LogsScreen
+import com.klausms.vpn.ui.screens.ScanScreen
 import com.klausms.vpn.ui.screens.SettingsScreen
+import com.klausms.vpn.ui.screens.readClipboard
+import com.klausms.vpn.util.AppLog
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.KlausTheme
 import com.klausms.vpn.ui.theme.kc
@@ -80,6 +85,18 @@ class MainActivity : ComponentActivity() {
         // The VPN works either way; the notification is only a status display.
         connectWithPermission()
     }
+
+    /** The scanner is to open (the camera may be used). */
+    private var scanRequested by mutableStateOf(false)
+
+    /** The camera was refused: say how to allow it. */
+    private var cameraRefused by mutableStateOf(false)
+
+    private val cameraPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) scanRequested = true else cameraRefused = true
+    }
+
+    private val hasCamera by lazy { packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // Light icons on a clear bar always: the app is always dark, even
@@ -124,6 +141,12 @@ class MainActivity : ComponentActivity() {
         LaunchedEffect(Unit) { vm.messages.collect { toasts.showSnackbar(it) } }
 
         BackHandler(enabled = route.isNotEmpty(), onBack = back)
+        LaunchedEffect(scanRequested) {
+            if (scanRequested) {
+                scanRequested = false
+                if (top != "scan") push("scan")
+            }
+        }
 
         Box(Modifier.fillMaxSize().background(kc.page)) {
             when (top) {
@@ -134,11 +157,14 @@ class MainActivity : ComponentActivity() {
                     val coreVersion by vm.coreVersion.collectAsStateWithLifecycle()
                     LicensesScreen(coreVersion, onBack = back)
                 }
+                "scan" -> ScanScreen(onBack = back, onFound = { text -> back(); vm.import(text) })
                 else -> HomeScreen(
                     vm = vm,
                     onToggle = ::toggleVpn,
                     onAdd = { showAdd = true },
                     onOpenSettings = { push("settings") },
+                    onPaste = ::pasteClipboard,
+                    onScan = if (hasCamera) ::openScanner else null,
                 )
             }
             Column(
@@ -151,7 +177,29 @@ class MainActivity : ComponentActivity() {
         }
 
         if (showAdd) {
-            AddKeySheet(onDismiss = { showAdd = false }, onAdd = { text -> showAdd = false; vm.import(text) })
+            AddKeySheet(
+                onDismiss = { showAdd = false },
+                onAdd = { text -> showAdd = false; vm.import(text) },
+                onScan = if (hasCamera) { { showAdd = false; openScanner() } } else null,
+            )
+        }
+        if (cameraRefused) {
+            AlertDialog(
+                onDismissRequest = { cameraRefused = false },
+                containerColor = kc.card,
+                title = { Text("Нет доступа к камере", style = IosType.headline, color = kc.label) },
+                text = {
+                    Text(
+                        "Чтобы сканировать QR-коды, разрешите приложению камеру в настройках. Или скопируйте ключ и нажмите «Вставить из буфера».",
+                        style = IosType.subhead,
+                        color = kc.secondary,
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { cameraRefused = false; openAppSettings() }) { Text("Настройки", color = kc.green) }
+                },
+                dismissButton = { TextButton(onClick = { cameraRefused = false }) { Text("Отмена", color = kc.green) } },
+            )
         }
         // Shared keys and "add" links are confirmed on whatever screen is open.
         sharedText?.let { text ->
@@ -202,6 +250,32 @@ class MainActivity : ComponentActivity() {
                 val state = vm.status.value.state
                 if (state != VpnState.CONNECTED && state != VpnState.CONNECTING) toggleVpn()
             }
+        }
+    }
+
+    /** Adds what was copied (a key, several, or a subscription link); false when the clipboard has no text. */
+    private fun pasteClipboard(): Boolean {
+        val text = readClipboard(this) ?: return false
+        vm.import(text.take(256 * 1024))
+        return true
+    }
+
+    private fun openScanner() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            scanRequested = true
+        } else {
+            cameraPermission.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    private fun openAppSettings() {
+        try {
+            startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        } catch (e: Exception) {
+            AppLog.w("app settings did not open", e)
         }
     }
 

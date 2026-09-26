@@ -172,6 +172,7 @@ class ScreenshotTest {
             onOpenSettings = {},
             onPing = {},
             update = update,
+            onScan = {},
         )
     }
 
