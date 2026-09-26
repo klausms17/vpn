@@ -29,6 +29,9 @@ import com.klausms.vpn.util.AppLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private fun tail(file: File, maxLines: Int): List<String> =
     if (file.exists()) file.readLines().takeLast(maxLines) else emptyList()
@@ -41,9 +44,18 @@ private fun readLogs(context: Context): String {
         "Ядро Xray" to listOf("xray.log.1", "xray.log"),
         "Сбои ядра" to listOf("go-crash.log.1", "go-crash.log"),
     )
+    // The runtime writes a crash report without a time: the file's own
+    // time tells when the last one happened.
+    val stamp = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.US)
+    fun lines(name: String): List<String> {
+        val f = File(dir, name)
+        val body = tail(f, 300)
+        if (body.isEmpty() || !name.startsWith("go-crash")) return body
+        return listOf("-- $name, записан ${stamp.format(Date(f.lastModified()))}") + body
+    }
     return buildString {
         for ((title, files) in sections) {
-            val lines = files.flatMap { tail(File(dir, it), 300) }.takeLast(300)
+            val lines = files.flatMap { lines(it) }.takeLast(300)
             append("== ").append(title).append(" ==\n")
             if (lines.isEmpty()) append("(пусто)\n") else lines.forEach { append(it).append('\n') }
             append('\n')

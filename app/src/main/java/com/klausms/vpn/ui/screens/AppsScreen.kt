@@ -32,22 +32,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.klausms.vpn.R
 import com.klausms.vpn.ui.MainViewModel
-import com.klausms.vpn.ui.components.navBarClearance
 import com.klausms.vpn.ui.components.IosIcon
 import com.klausms.vpn.ui.components.IosSwitch
 import com.klausms.vpn.ui.components.ListRow
 import com.klausms.vpn.ui.components.NavBar
 import com.klausms.vpn.ui.components.RowDivider
 import com.klausms.vpn.ui.components.SectionFooter
+import com.klausms.vpn.ui.components.navBarClearance
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
 import kotlinx.coroutines.Dispatchers
@@ -77,8 +79,10 @@ fun AppsScreen(vm: MainViewModel, includeMode: Boolean, onBack: () -> Unit) {
     val selected = if (includeMode) settings.includedApps else settings.excludedApps
     val icons = remember { HashMap<String, ImageBitmap>() }
 
-    // The tunnel takes the new list once, when this screen closes.
+    // The tunnel takes the new list once, when this screen closes or the
+    // app goes to the background (e.g. Home, to open the app just excluded).
     DisposableEffect(vm) { onDispose { vm.applyAppLists() } }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { vm.applyAppLists() }
 
     fun toggle(pkg: String) = vm.updateAppLists { s ->
         if (includeMode) {

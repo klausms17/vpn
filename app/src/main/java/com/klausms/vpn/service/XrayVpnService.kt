@@ -281,7 +281,9 @@ class XrayVpnService : VpnService() {
                 return START_NOT_STICKY
             }
             ACTION_RECONNECT -> {
-                enterForeground("Переподключение…", null)
+                // A running tunnel keeps working while new settings apply.
+                val now = VpnStatusHolder.status.value
+                if (now.state == VpnState.CONNECTED) enterForeground("Подключено", now.profileName) else enterForeground("Переподключение…", null)
                 lastReconnectId = startId
                 AppLog.i("reconnect asked (#$startId)")
                 enqueue {
@@ -380,7 +382,9 @@ class XrayVpnService : VpnService() {
         notice: String? = null,
         attempt: Int = 0,
     ) {
-        val restarting = config != null
+        // Also while a failed start waits to be retried with the interface
+        // held: that is a tunnel that should run, not a first start.
+        val restarting = config != null || tun != null
         val generation = ++startGeneration
         val before = VpnStatusHolder.status.value
         // From here on the new interface has replaced the old one.
@@ -484,7 +488,7 @@ class XrayVpnService : VpnService() {
             // New settings or another server for a tunnel that works: until
             // the new interface replaced it, the old tunnel still carries the
             // traffic. It keeps running; one more try a little later.
-            if (restarting && !swapped && config != null) {
+            if (restarting && !swapped && config != null && liveController != null) {
                 val running = runningProfile
                 setStatus(
                     VpnStatus(
@@ -503,6 +507,7 @@ class XrayVpnService : VpnService() {
             if ((restarting || !userRequested) && attempt < MAX_START_RETRIES && RuntimeState.shouldRun(this)) {
                 haltCore()
                 setStatus(VpnStatus(VpnState.CONNECTING, profileName = before.profileName, message = "Переподключение…"))
+                withContext(Dispatchers.Main) { enterForeground("Переподключение…", null) }
                 again(attempt + 1)
                 return
             }
@@ -635,6 +640,8 @@ class XrayVpnService : VpnService() {
                 setStatus(VpnStatus(VpnState.DISCONNECTING, profileName = VpnStatusHolder.status.value.profileName))
             }
             stopCore()
+            // A start that finished just before this set it again.
+            if (userInitiated) RuntimeState.setShouldRun(this, false)
             setStatus(VpnStatus(VpnState.DISCONNECTED, message = message))
             AppLog.i("tunnel down")
             withContext(Dispatchers.Main) { stopIfLatest(startId) }
@@ -765,6 +772,11 @@ class XrayVpnService : VpnService() {
                     scheduleVerify(Reason.NETWORK)
                 } catch (e: Exception) {
                     AppLog.e("core restart after network change failed", e)
+                    // No core runs now: the restart must not count on the old one.
+                    liveController = null
+                    runningProfile = null
+                    config = null
+                    newEpoch()
                     enqueue { if (RuntimeState.shouldRun(this@XrayVpnService)) startTunnel(startId, userRequested = false) }
                 }
             }

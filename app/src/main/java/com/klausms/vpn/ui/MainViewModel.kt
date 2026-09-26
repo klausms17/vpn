@@ -226,7 +226,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         VpnCommands.connect(getApplication<Application>())
     }
 
-    fun stopVpn() = VpnCommands.disconnect(getApplication<Application>(), "app")
+    fun stopVpn() {
+        // A settings change waiting to be applied must not switch it back on.
+        reconnectJob?.cancel()
+        VpnCommands.disconnect(getApplication<Application>(), "app")
+    }
 
     fun startVpnDenied() = message("Без разрешения на VPN подключиться нельзя. Если включён другой VPN-клиент как «постоянный», отключите его.")
 
@@ -441,6 +445,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** The app lists changed while their screen is open; applied when it closes. */
+    @Volatile
     private var appListsChanged = false
 
     /**
@@ -449,8 +454,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * tap.
      */
     fun updateAppLists(transform: (AppSettings) -> AppSettings) = viewModelScope.launch(saveErrors) {
-        val before = settings.value
-        if (repo.updateSettings(transform) != before) appListsChanged = true
+        // Set inside the save, so applyAppLists (waiting for the saves) sees it.
+        repo.updateSettings { s -> transform(s).also { if (it != s) appListsChanged = true } }
     }
 
     fun applyAppLists() = viewModelScope.launch(saveErrors) {
