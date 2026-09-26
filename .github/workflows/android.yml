@@ -124,9 +124,9 @@ jobs:
             exit 1
           }
 
-      # Plain JVM tests of the app's logic (subscriptions, storage, links, failover).
+      # Plain JVM tests of the app's logic (subscriptions, storage, links, failover, block reports, updates).
       - name: Unit tests
-        run: ./gradlew --no-daemon testDebugUnitTest --tests 'com.klausms.vpn.data.*' --tests 'com.klausms.vpn.ui.DeepLinkTest' --tests 'com.klausms.vpn.service.FailoverTest'
+        run: ./gradlew --no-daemon testDebugUnitTest --tests 'com.klausms.vpn.data.*' --tests 'com.klausms.vpn.ui.DeepLinkTest' --tests 'com.klausms.vpn.service.FailoverTest' --tests 'com.klausms.vpn.service.BlockReportTest'
 
       - name: Check native library 16 KB alignment
         run: |

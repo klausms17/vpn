@@ -22,6 +22,20 @@ fun interface Downloader {
 }
 
 /**
+ * [text] when it is a plain https URL with a host, else null: addresses
+ * from panel headers and files are used only then (never http, no spaces,
+ * control characters or "user@" before the host).
+ */
+fun httpsUrl(text: String?, max: Int = 1000): String? {
+    val t = text?.trim() ?: return null
+    if (t.length > max || !t.startsWith("https://", ignoreCase = true)) return null
+    if (t.any { it.isWhitespace() || it.isISOControl() }) return null
+    val authority = t.substring("https://".length).takeWhile { it != '/' && it != '?' && it != '#' }
+    val host = if (authority.startsWith("[")) authority.substringBefore(']').drop(1) else authority.substringBefore(':')
+    return t.takeIf { host.isNotEmpty() && '@' !in authority }
+}
+
+/**
  * Adds and refreshes subscriptions, from the UI or the VPN process. The
  * download happens first; the result is merged into what is on disk at
  * that moment, under the file lock, so the two processes never undo each
@@ -58,6 +72,8 @@ class SubscriptionUpdater(context: Context, private val profiles: ProfilesAccess
         val userInfo: String? = null,
         val supportUrl: String? = null,
         val announce: String? = null,
+        val reportUrl: String? = null,
+        val appUrl: String? = null,
     )
 
     /** Downloads [url] and adds it as a new subscription. Throws when it cannot be used. */
@@ -129,6 +145,8 @@ class SubscriptionUpdater(context: Context, private val profiles: ProfilesAccess
             userInfo = result.userInfo.clean(),
             supportUrl = result.supportUrl.clean()?.take(500),
             announce = result.announce.clean()?.take(500),
+            reportUrl = httpsUrl(result.reportUrl),
+            appUrl = httpsUrl(result.appUrl),
         )
         if (parsed == null) {
             AppLog.w("subscription refused by the panel's device limit")
@@ -198,6 +216,9 @@ class SubscriptionUpdater(context: Context, private val profiles: ProfilesAccess
                 announce = fetched.announce,
                 supportUrl = fetched.supportUrl,
                 userInfo = if (applied) fetched.userInfo else fetched.userInfo ?: sub.userInfo,
+                // Like the traffic info: an answer without servers keeps what it does not bring.
+                reportUrl = if (applied) fetched.reportUrl else fetched.reportUrl ?: sub.reportUrl,
+                appUrl = if (applied) fetched.appUrl else fetched.appUrl ?: sub.appUrl,
             )
             val subscriptions = state.subscriptions.map { if (it.id == subId) updated else it }
             if (!applied) return state.copy(subscriptions = subscriptions)

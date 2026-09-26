@@ -23,6 +23,7 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.unit.Density
 import com.klausms.vpn.data.AppSettings
+import com.klausms.vpn.data.AppUpdate
 import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.Subscription
@@ -111,6 +112,13 @@ class ScreenshotTest {
         home("home-subscription-notice", connected(), profiles.copy(subscriptions = listOf(limited)), scrollTo = 4)
     }
 
+    /** A newer build on the owner's panel: the card under the top bar. */
+    @Test fun homeUpdate() = home(
+        "home-update",
+        connected(),
+        update = AppUpdate(27, "1.0.27", "https://sub.example.com/app/KlausVPN-1.0.27.apk"),
+    )
+
     @Test fun homeConnecting() = home("home-connecting", VpnStatus(VpnState.CONNECTING, profileId = "nl"))
 
     @Test fun homeError() = home(
@@ -151,6 +159,7 @@ class ScreenshotTest {
         state: ProfilesState = profiles,
         fontScale: Float = 1f,
         scrollTo: Int? = null,
+        update: AppUpdate? = null,
     ) = shot(name, fontScale, scrollTo) {
         HomeContent(
             status = status,
@@ -162,6 +171,7 @@ class ScreenshotTest {
             onAdd = {},
             onOpenSettings = {},
             onPing = {},
+            update = update,
         )
     }
 

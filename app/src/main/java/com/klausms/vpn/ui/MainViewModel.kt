@@ -5,10 +5,12 @@ import androidx.core.content.edit
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.klausms.vpn.App
+import com.klausms.vpn.BuildConfig
 import com.klausms.vpn.core.ParsedProfile
 import com.klausms.vpn.core.XrayCore
 import com.klausms.vpn.core.userMessage
 import com.klausms.vpn.data.AppSettings
+import com.klausms.vpn.data.AppUpdate
 import com.klausms.vpn.data.Downloader
 import com.klausms.vpn.data.GeoFiles
 import com.klausms.vpn.data.ProfilesState
@@ -70,8 +72,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _messages = Channel<String>(Channel.BUFFERED)
     val messages = _messages.receiveAsFlow()
 
+    /** A newer build of the app on the owner's panel, until installed or put off. */
+    private val _update = MutableStateFlow<AppUpdate?>(null)
+    val update: StateFlow<AppUpdate?> = _update.asStateFlow()
+
     private var reconnectJob: Job? = null
     private var staleJob: Job? = null
+
+    // Small UI state; declared before init, whose coroutine reads it.
+    private val uiPrefs by lazy { app.getSharedPreferences("ui", android.content.Context.MODE_PRIVATE) }
 
     private val updater = SubscriptionUpdater(app, repo)
 
@@ -110,18 +119,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 AppLog.e("startup", e)
             }
         }
+        // What the last update check found, until the next one.
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                _update.compareAndSet(null, offer(AppUpdate.parse(uiPrefs.getString(KEY_UPDATE, null))))
+            } catch (e: Exception) {
+                AppLog.w("saved update", e)
+            }
+        }
         // The VPN process changed the servers (failover, subscription refresh).
         viewModelScope.launch { vpn.profilesChanged.collect { repo.reload() } }
     }
 
     /**
      * The app came on screen (also back from Recents): picks up what the VPN
-     * process saved meanwhile, then refreshes old subscriptions.
+     * process saved meanwhile, then refreshes old subscriptions and looks
+     * for a newer app build.
      */
     fun onAppVisible() = viewModelScope.launch {
         repo.reload()
         if (staleJob?.isActive == true) return@launch
-        staleJob = viewModelScope.launch { refreshStaleSubscriptions() }
+        staleJob = viewModelScope.launch {
+            refreshStaleSubscriptions()
+            // After the refresh: it may have brought the panel's app address.
+            checkForUpdate()
+        }
     }
 
     /**
@@ -140,6 +162,57 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _messages.trySend(text)
     }
 
+    // ------------------------------------------------------------- update
+
+    /**
+     * Asks the owner's panel for its latest app build (version.json of the
+     * first subscription that names one), at most every 12 hours; like a
+     * subscription, directly and then through the selected server. Quiet:
+     * a failure or a malformed answer changes nothing.
+     */
+    private suspend fun checkForUpdate() {
+        val url = profiles.value.subscriptions.firstNotNullOfOrNull { it.appUrl } ?: return
+        val via = profiles.value.selected?.outbounds
+        withContext(Dispatchers.IO) {
+            try {
+                val now = System.currentTimeMillis()
+                if (!AppUpdate.checkDue(uiPrefs.getLong(KEY_UPDATE_CHECKED, 0L), now)) return@withContext
+                uiPrefs.edit { putLong(KEY_UPDATE_CHECKED, now) }
+                val result = try {
+                    XrayCore.fetch(url, null, timeoutMs = UPDATE_TIMEOUT_MS)
+                } catch (direct: Exception) {
+                    // "HTTP 404" and the like came from the panel itself: nothing to get around.
+                    if (via == null || direct.message?.startsWith("HTTP ") == true) throw direct
+                    AppLog.w("update check direct download failed, retrying via proxy", direct)
+                    XrayCore.fetch(url, via, timeoutMs = UPDATE_TIMEOUT_MS)
+                }
+                val latest = AppUpdate.parse(result.body?.toString(Charsets.UTF_8))
+                if (latest == null) {
+                    AppLog.w("update check: not a version.json")
+                    return@withContext
+                }
+                uiPrefs.edit { putString(KEY_UPDATE, latest.toJson()) }
+                _update.value = offer(latest)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                AppLog.w("update check failed: ${e.userMessage()}")
+            }
+        }
+    }
+
+    /** [latest] when it is newer than this build and was not put off. */
+    private fun offer(latest: AppUpdate?): AppUpdate? =
+        AppUpdate.offer(latest, BuildConfig.VERSION_CODE, uiPrefs.getInt(KEY_UPDATE_DISMISSED, 0))
+
+    /** «Позже»: the card stays hidden until an even newer build appears. */
+    fun dismissUpdate() {
+        val shown = _update.value ?: return
+        _update.value = null
+        uiPrefs.edit { putInt(KEY_UPDATE_DISMISSED, shown.versionCode) }
+    }
+
+    fun updateNotOpened() = message("Не удалось открыть ссылку: на телефоне нет браузера")
+
     private val isTunnelUp: Boolean
         get() = status.value.state == VpnState.CONNECTED || status.value.state == VpnState.CONNECTING
 
@@ -156,8 +229,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun stopVpn() = VpnCommands.disconnect(getApplication<Application>())
 
     fun startVpnDenied() = message("Без разрешения на VPN подключиться нельзя. Если включён другой VPN-клиент как «постоянный», отключите его.")
-
-    private val uiPrefs by lazy { app.getSharedPreferences("ui", android.content.Context.MODE_PRIVATE) }
 
     fun notificationPermissionAsked(): Boolean = uiPrefs.getBoolean("notif_asked", false)
 
@@ -388,5 +459,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         vpn.unbind()
+    }
+
+    private companion object {
+        const val KEY_UPDATE = "update_latest"
+        const val KEY_UPDATE_CHECKED = "update_checked_at"
+        const val KEY_UPDATE_DISMISSED = "update_dismissed"
+        const val UPDATE_TIMEOUT_MS = 15_000
     }
 }
