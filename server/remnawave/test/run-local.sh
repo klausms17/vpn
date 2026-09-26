@@ -466,6 +466,10 @@ ls "$WORK/opt/app"
 [ ! -e "$WORK/opt/app/KlausVPN-1.0.10.apk" ] || fail "a build replaced 14 hours ago was kept"
 [ -e "$WORK/opt/app/KlausVPN-1.0.11.apk" ] || fail "a build replaced 2 hours ago was deleted"
 rm -f "$WORK/opt/app/KlausVPN-1.0.11.apk"
+# An app that still offers a deleted build gets the current one.
+code="$(sub_code app/KlausVPN-1.0.10.apk -D "$WORK/gone.headers")"
+echo "https://$SUB_DOMAIN/app/KlausVPN-1.0.10.apk (deleted) -> $code $(grep -i '^location:' "$WORK/gone.headers" | tr -d '\r')"
+[ "$code" = "302" ] && grep -qi '^location: /app/KlausVPN.apk' "$WORK/gone.headers" || fail "no redirect from a deleted build"
 code="$(sub_code app/version.json)"
 cat "$WORK/last.body"; echo
 [ "$code" = "200" ] || fail "version.json not served"
@@ -493,7 +497,7 @@ sub_get "$UA_BROWSER" "https://$SUB_DOMAIN/assets/.app-config-v2.json" -b "$WORK
 jq -e --arg a "https://$SUB_DOMAIN/app/KlausVPN.apk" \
   '[.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external" and .link == $a)] | length == 1' \
   "$WORK/b2.config.json" >/dev/null || fail "the page does not show the download button"
-pass "wrong checksum and temporary key refused; replaced builds kept 13 h; KlausVPN.apk, KlausVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»"
+pass "wrong checksum and temporary key refused; replaced builds kept 13 h, then a redirect to the current one; KlausVPN.apk, KlausVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»"
 
 step "(c) the device is recorded (the limit itself is off)"
 USER_ID="$(api "/api/users/by-username/friend_1" | jq -r '.response.id')"
@@ -559,6 +563,12 @@ kp add-user friend_5 > "$WORK/add-user-5.log"
 SUB5="$(grep -o "https://$SUB_DOMAIN/[A-Za-z0-9_-]*" "$WORK/add-user-5.log" | head -n 1)"
 SHORT5="${SUB5##*/}"
 ALERT="Klaus VPN: сервер"
+# The monitor's token finds one subscription by its id, never lists them.
+MON_TOKEN="$(sed -n 's/^PANEL_TOKEN=//p' "$WORK/opt/klaus-monitor.env")"
+code="$(curl -sS --noproxy '*' -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 127.0.0.1' -H 'X-Forwarded-Proto: https' \
+  -H @<(printf 'Authorization: Bearer %s\n' "$MON_TOKEN") "http://127.0.0.1:3000/api/users?start=0&size=1")"
+echo "the monitor's token lists users -> $code"
+[ "$code" = "403" ] || fail "the monitor's token can list users"
 code="$(report "unknown${SHORT1:7}" wifi)"
 echo "unknown subscription -> $code"
 [ "$code" = "403" ] || fail "an unknown subscription was not refused"
@@ -615,7 +625,7 @@ for secret in "$SHORT1" "$SHORT2" "$SHORT5" "unknown${SHORT1:7}" random0000 "$SP
 done
 if grep -Eq '([0-9]{1,3}\.){3}[0-9]{1,3}' "$WORK/monitor.log"; then fail "the monitor's log contains an IP address"; fi
 if grep -Eq '"(remote_ip|client_ip|uri)"' "$WORK/caddy.log"; then fail "Caddy's log keeps request addresses or links"; fi
-pass "unknown friend 403, one friend twice no alert, two friends one alert (Russian, blocking hint), cooldown, rate limit 30/h, 80 made-up ids do not block a friend; no IPs or ids in the logs"
+pass "monitor token cannot list users; unknown friend 403, one friend twice no alert, two friends one alert (Russian, blocking hint), cooldown, rate limit 30/h, 80 made-up ids do not block a friend; no IPs or ids in the logs"
 
 step "backup; a restore that stops early (a .ru domain given by mistake)"
 BACKUP_DIR="$WORK/backups" kp backup

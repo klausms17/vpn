@@ -81,8 +81,10 @@ write_file() {
 }
 # KEY=VALUE in place of the file's KEY line (added at the end when missing).
 # install-panel.sh writes the same lines, so its next run changes nothing.
-set_line() { # FILE KEY VALUE
-  awk -v k="$2" -v v="$3" 'index($0, k "=") == 1 { if (!done) print k "=" v; done = 1; next }
+set_line() { # FILE KEY VALUE; the value (a token) goes to awk through the
+  # environment: arguments show in "ps", and -v would change backslashes.
+  K="$2" V="$3" awk 'BEGIN { k = ENVIRON["K"]; v = ENVIRON["V"] }
+    index($0, k "=") == 1 { if (!done) print k "=" v; done = 1; next }
     { print } END { if (!done) print k "=" v }' "$1" | write_file "$1"
 }
 
@@ -830,6 +832,19 @@ gh_get() { # URL FILE [ACCEPT] [SECONDS]; sets GH_CODE. The token goes to curl
   rm -rf "$tmp"
 }
 
+page_button() { # the page's download button; if the panel cannot take it
+  # now, only a warning: the build is out, the next run tries again.
+  local rc
+  set +e
+  (
+    set -e
+    setup_subpage
+  )
+  rc=$?
+  set -e
+  [ "$rc" = "0" ] || warn "кнопку «Скачать приложение» на странице подписки поставить не удалось, попробую при следующей проверке"
+}
+
 cmd_publish_apk() {
   local tag="${RELEASE_TAG:-build-claude-compassionate-mayer-6jph8m}" repo="${GITHUB_REPO:-klausms17/vpn}"
   local gh="${GITHUB_API:-https://api.github.com}" quiet=0
@@ -893,6 +908,8 @@ cmd_publish_apk() {
     [[ "$cur_code" =~ ^[0-9]+$ ]] || cur_code=0
   fi
   if [ "$cur_sha" = "$sha" ] && [ -f "$APP_DIR/$apk" ] && [ -f "$APP_DIR/KlausVPN.apk" ]; then
+    # A run that could not reach the panel left the page without its button.
+    page_button
     note "Версия $ver уже опубликована: https://$SUB_DOMAIN/app/KlausVPN.apk"
     return 0
   fi
@@ -912,15 +929,12 @@ cmd_publish_apk() {
     rm -rf "$staging"
     die "контрольная сумма $apk не совпала с SHA256SUMS.txt: файл повреждён или подменён. Ничего не опубликовано"
   fi
-  # The versioned file first, then the fixed name, then the page's
-  # download button, then version.json: it never names a file that is not
-  # there yet, and it marks the publishing as done only when everything
-  # else is (if the panel is down, the next run does it all again).
+  # The versioned file first, then the fixed name, then version.json: it
+  # never names a file that is not there yet.
   chmod 644 "$staging/$apk"
   mv -f "$staging/$apk" "$APP_DIR/$apk"
   ln -f "$APP_DIR/$apk" "$staging/KlausVPN.apk"
   mv -f "$staging/KlausVPN.apk" "$APP_DIR/KlausVPN.apk"
-  setup_subpage
   jq -n --argjson c "$code" --arg n "$ver" --arg a "https://$SUB_DOMAIN/app/$apk" --arg s "$sha" \
     '{versionCode: $c, versionName: $n, apk: $a, sha256: $s}' > "$staging/version.json"
   chmod 644 "$staging/version.json"
@@ -933,6 +947,7 @@ cmd_publish_apk() {
     touch "$APP_DIR/$cur_apk"
   fi
   find "$APP_DIR" -maxdepth 1 -type f -name 'KlausVPN-*.apk' ! -name "$apk" -mmin +780 -delete
+  page_button
   note "Опубликована версия $ver: https://$SUB_DOMAIN/app/KlausVPN.apk (приложения знакомых предложат обновиться)"
 }
 

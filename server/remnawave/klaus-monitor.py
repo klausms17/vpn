@@ -17,9 +17,13 @@ REPORT_WINDOW_MIN minutes, one Russian alert goes to Telegram, then that
 server is quiet for REPORT_COOLDOWN_MIN minutes.
 
 Privacy: the client's IP is never logged or stored (requests are not logged
-at all). Subscription ids stay in memory (reports for the report window, the
-panel's list of active ones to check reports against) and are never logged
-or sent anywhere.
+at all). Subscription ids stay only in memory (the panel's answer about an id
+for 10 minutes, who reported which server for the report window) and are
+never logged or sent anywhere but to the panel's own API.
+
+The panel token can only look up one subscription by its id, never list
+them: this service faces the internet, and a list would hold every friend's
+keys.
 
 Settings (environment, written to klaus-monitor.env by klaus-panel):
 PANEL_URL, PANEL_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
@@ -60,13 +64,14 @@ COOLDOWN = env_int("REPORT_COOLDOWN_MIN", 180, 1, 7 * 24 * 60) * 60
 RATE_LIMIT = env_int("RATE_LIMIT_PER_HOUR", 30, 1, 10000)
 PORT = env_int("LISTEN_PORT", 8080, 1, 65535)
 
-# The panel's list of active subscriptions is fetched whole, so an id it
-# does not know costs nothing: random ids cannot flood the panel or crowd
-# out real friends.
-ACTIVE_TTL = 10 * 60  # how long the list is trusted
-REFRESH_GAP = 60  # an unknown id fetches it again at most this often
-PAGE_SIZE = 500
-MAX_USERS = 100000
+KNOWN_TTL = 10 * 60  # how long a panel answer about a subscription is kept
+MAX_KNOWN = 5000  # answers kept, the oldest go first
+# An id not known yet costs one lookup (the panel finds a user by its short
+# id). There is no budget per minute that made-up ids could use up and so
+# lock friends out: anyone can make the panel do the same lookup by opening
+# https://SUB_DOMAIN/<id> anyway. Only the lookups in flight are capped.
+LOOKUPS_AT_ONCE = 16
+LOOKUP_WAIT = 5  # seconds a report waits for a free lookup, then 503
 HOSTS_TTL = 60  # the panel's server list
 MAX_TRACKED = 20000  # entries per table, whatever happens
 
@@ -161,20 +166,26 @@ def duration(seconds):
 class State:
     def __init__(self):
         self.lock = threading.Lock()
-        self.refresh = threading.Lock()  # one fetch of the user list at a time
-        self.active = frozenset()  # shortUuids of the panel's ACTIVE users
-        self.active_at = -ACTIVE_TTL  # when that list was fetched
-        self.tried_at = -REFRESH_GAP  # the last attempt, even a failed one
+        self.known = collections.OrderedDict()  # shortUuid -> (active subscription, expires), oldest first
+        self.lookups = threading.BoundedSemaphore(LOOKUPS_AT_ONCE)
         self.rate = {}  # shortUuid -> deque of report times, last hour
         self.reports = {}  # (host, port) -> {shortUuid: (time, network label)}
         self.cooldown = {}  # (host, port) -> quiet until
         self.hosts = (0.0, [])  # (fetched at, panel hosts)
         self.purged = time.monotonic()
 
+    def remember(self, s, ok, expires):
+        self.known.pop(s, None)
+        self.known[s] = (ok, expires)
+        while len(self.known) > MAX_KNOWN:
+            self.known.popitem(last=False)
+
     def purge(self, now):
         if now - self.purged < 60 and all(len(t) < MAX_TRACKED for t in (self.rate, self.reports)):
             return
         self.purged = now
+        for s in [s for s, v in self.known.items() if v[1] <= now]:
+            del self.known[s]
         for s in list(self.rate):
             q = self.rate[s]
             while q and q[0] <= now - 3600:
@@ -198,45 +209,29 @@ class State:
 STATE = State()
 
 
-def active_subscriptions():
-    """The short ids of every ACTIVE user, from all pages of the panel's user list."""
-    ids, start = set(), 0
-    while True:
-        page = panel_response("/api/users?start=%d&size=%d" % (start, PAGE_SIZE))
-        users = page.get("users") if isinstance(page, dict) else None
-        total = page.get("total") if isinstance(page, dict) else None
-        if not isinstance(users, list) or not isinstance(total, int):
-            raise PanelError("panel API: unexpected user list")
-        for user in users:
-            # A disabled or expired friend cannot use any server anyway:
-            # his failures say nothing about blocking.
-            if isinstance(user, dict) and user.get("status") == "ACTIVE" and isinstance(user.get("shortUuid"), str):
-                ids.add(user["shortUuid"])
-        start += PAGE_SIZE
-        if not users or start >= total or start >= MAX_USERS:
-            return frozenset(ids)
-
-
 def subscription_ok(s):
     """True/False, or None when the panel cannot be asked right now."""
-    # Requests wait here while one of them fetches the list, then use it.
-    with STATE.refresh:
-        now = time.monotonic()
-        fresh = now - STATE.active_at < ACTIVE_TTL
-        if fresh and s in STATE.active:
-            return True
-        # Not in the list: a friend added since, or a made-up id. The list
-        # is fetched again at most once a minute, whatever arrives.
-        if now - STATE.tried_at < REFRESH_GAP:
-            return False if fresh else None
-        STATE.tried_at = now
-        try:
-            active = active_subscriptions()
-        except PanelError as e:
-            log(str(e))
-            return None
-        STATE.active, STATE.active_at = active, time.monotonic()
-        return s in active
+    now = time.monotonic()
+    with STATE.lock:
+        cached = STATE.known.get(s)
+        if cached and cached[1] > now:
+            return cached[0]
+    if not STATE.lookups.acquire(timeout=LOOKUP_WAIT):
+        return None
+    try:
+        user = panel_get("/api/users/by-short-uuid/" + urllib.parse.quote(s, safe=""))
+    except PanelError as e:
+        log(str(e))
+        return None
+    finally:
+        STATE.lookups.release()
+    # A disabled or expired friend cannot use any server anyway: his
+    # failures say nothing about blocking.
+    response = user.get("response") if isinstance(user, dict) else None
+    ok = isinstance(response, dict) and response.get("status") == "ACTIVE"
+    with STATE.lock:
+        STATE.remember(s, ok, time.monotonic() + KNOWN_TTL)
+    return ok
 
 
 def panel_hosts():
@@ -390,6 +385,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path, _, query = self.path.partition("?")
         if path == "/klaus/health":
+            # Docker asks every 30 s: old reports go even when none come.
+            with STATE.lock:
+                STATE.purge(time.monotonic())
             self.reply(200, {"ok": True})
         elif path == "/klaus/report":
             if len(query) > 2048:

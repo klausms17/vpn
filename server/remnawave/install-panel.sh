@@ -59,9 +59,10 @@ SNI_CANDIDATES="www.nvidia.com www.samsung.com www.amd.com dl.google.com www.cis
 # its own settings and which of them a user gets. The page itself (/api/sub)
 # needs no token.
 SUBPAGE_SCOPES='["system:metadata", "subscription-page-configs:list", "subscription-page-configs:get", "subscriptions:subpage-config"]'
-# The block report monitor: which subscriptions are active (a report must
-# come from one), which servers are there and are they connected.
-MONITOR_SCOPES='["users:list", "hosts:list", "nodes:list"]'
+# The block report monitor: is this a real subscription, which servers are
+# there and are they connected. Never users:list: the list holds every
+# friend's keys, and the monitor faces the internet.
+MONITOR_SCOPES='["users:by-short-uuid", "hosts:list", "nodes:list"]'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
@@ -594,6 +595,13 @@ $tls_line
 	handle_path /app/* {
 		root * /srv/app
 		header Cache-Control "no-cache"
+		# An app may still offer a build that was replaced long ago: its
+		# link leads to the current one.
+		@gone {
+			path /KlausVPN-*.apk
+			not file
+		}
+		redir @gone /app/KlausVPN.apk 302
 		@apk path *.apk
 		header @apk Content-Type "application/vnd.android.package-archive"
 		file_server
@@ -770,9 +778,10 @@ if ! token_ok "$SUBPAGE_TOKEN" /api/system/metadata || ! token_ok "$SUBPAGE_TOKE
   SUBPAGE_TOKEN="$TOKEN"
 fi
 # The monitor faces the internet too: it only checks that a report comes
-# from a real subscription and looks up the servers.
-if ! token_ok "$MONITOR_TOKEN" "/api/users?start=0&size=1" || ! token_ok "$MONITOR_TOKEN" /api/hosts ||
-  ! token_ok "$MONITOR_TOKEN" /api/nodes; then
+# from a real subscription and looks up the servers. A token that can list
+# the users is replaced.
+if ! token_ok "$MONITOR_TOKEN" /api/hosts || ! token_ok "$MONITOR_TOKEN" /api/nodes ||
+  token_ok "$MONITOR_TOKEN" "/api/users?start=0&size=1"; then
   say "Создаю API-токен для сигналов о блокировках"
   new_token klaus-monitor "$MONITOR_SCOPES"
   MONITOR_TOKEN="$TOKEN"
