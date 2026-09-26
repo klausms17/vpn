@@ -12,17 +12,21 @@
 #   PANEL_DOMAIN   admin panel address (required)
 #   SUB_DOMAIN     subscription page address given to friends (required)
 #   APK_URL        https link to the Klaus VPN APK (adds a download button)
-#   SUPPORT_URL    https link friends can use to reach you (e.g. https://t.me/you)
+#   SUPPORT_URL    https link friends can use to reach you (e.g. https://t.me/you);
+#                  without it the page's support button only says to ask you
 #   ADMIN_USER     panel login (default admin); the password is generated
 #   REALITY_SNI    site the VPN imitates (default: first working from a list)
 #   FORCE=1        take over an existing Remnawave setup not made by this script
 #   RESTORE=file   move the panel to this (new) server from a backup made by
-#                  "klaus-panel backup": same users, links and servers
+#                  "klaus-panel backup": same users, links and servers. If it
+#                  stops halfway, run the same command again
 #   ALLOW_RU_DOMAIN=1  try a .ru/.su/.рф domain anyway (certificates for them
 #                  are refused, so HTTPS will most likely not work)
 #
 # Re-running keeps all keys, users and passwords; it updates the containers
 # and re-applies the settings (the previous files are kept as *.bak-*).
+# Variables given again (a new domain, SUPPORT_URL=… or SUPPORT_URL= to
+# remove it) replace the saved ones.
 #
 # For the local test harness only (server/remnawave/test): RW_DIR, ADMIN_FILE,
 # SKIP_SYSTEM=1 (no apt/Docker/firewall/sysctl changes), CADDY_TLS=internal,
@@ -56,10 +60,20 @@ die() { printf '\033[1;31mОшибка:\033[0m %s\n' "$*" >&2; exit 1; }
 # Friends' links stay the same once the domains point at this server.
 RESTORE="${RESTORE:-}"
 RESTORE_DIR=""
+# While a restore is unfinished this file says how far it got: "files" (the
+# settings are back, the database is not) or "db" (both are back). A restore
+# that stopped can then simply be run again (it starts over), and a run
+# without RESTORE refuses to build an empty panel over a missing or
+# half-restored database. Removed once all went well.
+RESTORE_MARK="$RW_DIR/.restore-unfinished"
+RESTORE_STAGE="$(cat "$RESTORE_MARK" 2>/dev/null || true)"
+db_volume() { docker volume inspect remnawave-db-data >/dev/null 2>&1; }
+env_secret() { sed -n 's/^APP_SECRET=//p' "$1" 2>/dev/null | tail -n 1; }
 if [ -n "$RESTORE" ]; then
   [ -f "$RESTORE" ] || die "нет файла $RESTORE"
-  if [ -f "$RW_DIR/.env" ] || docker volume inspect remnawave-db-data >/dev/null 2>&1; then
-    die "восстанавливать можно только на новый сервер: здесь уже есть панель ($RW_DIR или база remnawave-db-data)"
+  # A stopped Docker would hide an existing database from the checks below.
+  if command -v docker >/dev/null && ! docker info >/dev/null 2>&1; then
+    die "Docker установлен, но не отвечает. Запустите его (systemctl restart docker) и повторите"
   fi
   RESTORE_DIR="$(mktemp -d)"
   trap 'rm -rf "$RESTORE_DIR"' EXIT
@@ -67,8 +81,21 @@ if [ -n "$RESTORE" ]; then
   for f in remnawave-db.dump .env klaus-panel.env; do
     [ -f "$RESTORE_DIR/$f" ] || die "в $RESTORE нет $f: это не резервная копия klaus-panel"
   done
+  # Only onto a new server, or over a restore of this same panel that
+  # stopped halfway (its settings are already here; its database, if any,
+  # is restored again).
+  same=0
+  if [ -f "$RW_DIR/.env" ] && [ "$(env_secret "$RW_DIR/.env")" = "$(env_secret "$RESTORE_DIR/.env")" ]; then same=1; fi
+  if db_volume; then
+    { [ "$same" = "1" ] && [ -n "$RESTORE_STAGE" ]; } ||
+      die "восстанавливать можно только на новый сервер: здесь уже есть панель (база remnawave-db-data)"
+  elif [ -f "$RW_DIR/.env" ] && [ "$same" != "1" ] && [ -z "$RESTORE_STAGE" ]; then
+    die "в $RW_DIR уже есть настройки другой панели (её базы здесь нет). Если они не нужны, удалите $RW_DIR и повторите"
+  fi
   mkdir -p "$RW_DIR"
   chmod 700 "$RW_DIR"
+  RESTORE_STAGE=files
+  echo "$RESTORE_STAGE" > "$RESTORE_MARK"
   for f in .env subscription.env klaus-panel.env; do
     if [ -f "$RESTORE_DIR/$f" ]; then install -m 600 "$RESTORE_DIR/$f" "$RW_DIR/$f"; fi
   done
@@ -115,6 +142,10 @@ done
 case "$APK_URL" in "" | https://*) ;; *) die "APK_URL должен начинаться с https://" ;; esac
 case "$SUPPORT_URL" in "" | https://* | http://*) ;; *) die "SUPPORT_URL должен быть ссылкой https://…" ;; esac
 case "$REALITY_PORT" in *[!0-9]* | "") die "REALITY_PORT должен быть числом" ;; esac
+SAVED_SUB="$(norm_domain "$(conf_get SUB_DOMAIN)")"
+if [ -n "$SAVED_SUB" ] && [ "$SAVED_SUB" != "$SUB_DOMAIN" ]; then
+  warn "адрес подписок меняется: $SAVED_SUB → $SUB_DOMAIN. Ссылки на $SAVED_SUB, которые уже есть у знакомых, перестанут работать: отправьте им новые (klaus-panel link ИМЯ)"
+fi
 
 # Never silently take over a Remnawave setup this script did not create:
 # FORCE=1 does it, keeping its database and secrets (copies of the files stay).
@@ -164,6 +195,19 @@ if [ "$SKIP_SYSTEM" != "1" ]; then
   install_docker
 fi
 for c in docker curl jq openssl; do command -v "$c" >/dev/null || die "не найдена программа $c"; done
+docker info >/dev/null 2>&1 || die "Docker не отвечает. Запустите его (systemctl restart docker) и повторите"
+
+# Settings of a panel whose database is not here: an unfinished move, or
+# the database was removed. A fresh empty panel with the old settings would
+# look like it works while every friend's link is dead.
+if [ -z "$RESTORE" ]; then
+  if [ "$RESTORE_STAGE" = "files" ]; then
+    die "перенос панели из резервной копии не закончен. Запустите ту же команду с RESTORE=файл-копии ещё раз"
+  fi
+  if [ -n "$API_TOKEN" ] && ! db_volume; then
+    die "в $RW_DIR есть настройки панели, а её базы (том remnawave-db-data) нет. Если это перенос, запустите с RESTORE=файл-копии; если нужна новая пустая панель, сначала удалите $RW_DIR"
+  fi
+fi
 
 if [ -z "$PANEL_IP" ]; then
   PANEL_IP="$(curl -4 -fsS --max-time 10 https://api.ipify.org || curl -4 -fsS --max-time 10 https://ifconfig.me || true)"
@@ -410,7 +454,9 @@ tls_line=""
 [ "$CADDY_TLS" = "internal" ] && tls_line="	tls internal"
 # Caddy obtains and renews the certificates itself and adds the
 # X-Forwarded-For/-Proto headers the panel insists on. Connections for any
-# other name (IP scanners) are refused during the TLS handshake.
+# other name (IP scanners) are refused during the TLS handshake. The bare
+# subscription address is where the page's support button leads when there
+# is no SUPPORT_URL (the page itself only drops such requests).
 put_file "$RW_DIR/Caddyfile" <<EOF
 # Written by Klaus VPN install-panel.sh; re-running the script rewrites it.
 https://$PANEL_DOMAIN {
@@ -422,7 +468,13 @@ $tls_line
 https://$SUB_DOMAIN {
 $tls_line
 	encode
-	reverse_proxy remnawave-subscription-page:3010
+	handle / {
+		header Content-Type "text/plain; charset=utf-8"
+		respond "Klaus VPN: с вопросами обращайтесь к тому, кто дал вам ссылку на подписку." 200
+	}
+	handle {
+		reverse_proxy remnawave-subscription-page:3010
+	}
 }
 
 :443 {
@@ -463,16 +515,29 @@ if [ "$SKIP_SYSTEM" != "1" ]; then
   say "Скачиваю/обновляю образы Remnawave"
   compose pull || die "не удалось скачать образы (Docker Hub недоступен?). Повторите через пару минут"
 fi
+# The panel of an earlier try goes too: it would keep running against the
+# database removed under it.
+drop_db() { docker rm -f remnawave remnawave-db >/dev/null 2>&1 || true; docker volume rm remnawave-db-data >/dev/null 2>&1 || true; }
+# A half-restored database would block the next try: remove it, so the same
+# command can simply be run again.
+restore_failed() { drop_db; die "$1. Запустите ту же команду ещё раз"; }
 if [ -n "$RESTORE_DIR" ]; then
   say "Восстанавливаю базу из $RESTORE"
-  compose up -d --remove-orphans remnawave-db || die "база не запустилась (подробности выше)"
+  # A database here was left by a restore that stopped halfway (the check at
+  # the top made sure of that): start it over.
+  if db_volume; then drop_db; fi
+  compose up -d --remove-orphans remnawave-db || restore_failed "база не запустилась (подробности выше)"
+  # Over TCP: a new database is first set up by a temporary server that
+  # listens only on the Unix socket and is stopped right after.
   for i in $(seq 1 60); do
-    docker exec remnawave-db pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1 && break
-    [ "$i" -eq 60 ] && die "база не запустилась"
+    docker exec remnawave-db pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1 && break
+    [ "$i" -eq 60 ] && restore_failed "база не запустилась"
     sleep 2
   done
   docker exec -i remnawave-db pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-owner --exit-on-error \
-    < "$RESTORE_DIR/remnawave-db.dump" || die "не удалось восстановить базу"
+    < "$RESTORE_DIR/remnawave-db.dump" || restore_failed "не удалось восстановить базу"
+  RESTORE_STAGE=db
+  echo "$RESTORE_STAGE" > "$RESTORE_MARK"
   # Certificates are optional: Caddy would get new ones.
   if [ -f "$RESTORE_DIR/caddy-data.tar" ]; then
     docker run --rm -i -v remnawave-caddy-data:/data caddy:2 tar -C /data -xf - < "$RESTORE_DIR/caddy-data.tar" >/dev/null 2>&1 ||
@@ -610,6 +675,14 @@ KLAUS_PANEL_CONF="$CONF" bash "$KP" setup
 
 say "Открываю панель и страницу подписки в интернет (Caddy, HTTPS)"
 compose up -d --remove-orphans || die "контейнеры не запустились (подробности выше)"
+# Caddy reads its Caddyfile only when it starts, and its container keeps
+# seeing the file it started with (the new one replaces it). Restart it when
+# the two differ: a new domain, also one written by an earlier run that
+# stopped before this point.
+if ! docker exec caddy cat /etc/caddy/Caddyfile 2>/dev/null | cmp -s - "$RW_DIR/Caddyfile"; then
+  say "Перезапускаю Caddy с новыми настройками"
+  docker restart caddy >/dev/null || die "не удалось перезапустить Caddy"
+fi
 for i in $(seq 1 60); do
   [ "$(docker inspect -f '{{.State.Health.Status}}' remnawave-subscription-page 2>/dev/null)" = "healthy" ] && break
   [ "$i" -eq 60 ] && { docker compose logs --tail 40 remnawave-subscription-page >&2 || true; die "страница подписки не запустилась (журнал выше)"; }
@@ -637,6 +710,7 @@ if [ "$SKIP_SYSTEM" != "1" ]; then
   fi
 fi
 
+rm -f "$RESTORE_MARK"
 echo
 say "Готово! Панель работает."
 echo

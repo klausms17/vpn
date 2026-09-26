@@ -130,7 +130,9 @@ confirm() { # QUESTION; --yes on the command line skips it
 
 # ---------------------------------------------------------------- setup
 # Called by install-panel.sh; safe to run again (e.g. after changing
-# APK_URL): keeps keys and anything added in the panel by hand.
+# APK_URL): keeps keys and anything added in the panel by hand. The support
+# link is the exception: it always follows SUPPORT_URL, also when that is
+# removed.
 
 profile_config() { # CURRENT_CONFIG_JSON PRIVATE_KEY SHORT_ID
   local target="${REALITY_TARGET:-$REALITY_SNI:443}"
@@ -240,11 +242,11 @@ setup_subscription_settings() {
         # Random picks from comma lists would make the app reconnect on
         # every refresh.
         randomizeHosts: false,
+        # support-url follows SUPPORT_URL; without it there is none (the
+        # panel starts with a placeholder that leads nowhere).
         customResponseHeaders: (($c.customResponseHeaders // {})
           + {"profile-title": "Klaus VPN", "profile-update-interval": "1"}
-          | if $support != "" then .["support-url"] = $support
-            elif .["support-url"] == "https://dummy.docs.rw" then del(.["support-url"])
-            else . end),
+          | if $support != "" then .["support-url"] = $support else del(.["support-url"]) end),
         customRemarks: (if $c.customRemarks == .seed then .ru else $c.customRemarks end),
         # Devices are recorded even while the limit is off (the panel
         # stores every valid x-hwid); "klaus-panel hwid-limit N" turns the
@@ -267,7 +269,7 @@ setup_subpage() {
   uuid="$(jq -r 'first((.response.configs[] | select(.uuid == "00000000-0000-0000-0000-000000000000")), .response.configs[0]) | .uuid // empty' <<<"$RESP")"
   [ -n "$uuid" ] || die "в панели нет настроек страницы подписки"
   api_ok GET "/api/subscription-page-configs/$uuid"
-  cfg="$(jq -c --arg apk "${APK_URL:-}" --arg support "${SUPPORT_URL:-}" --arg app "$APP_NAME" '.response.config
+  cfg="$(jq -c --arg apk "${APK_URL:-}" --arg support "${SUPPORT_URL:-}" --arg sub "$SUB_DOMAIN" --arg app "$APP_NAME" '.response.config
     | .locales as $locales
     # Every text needs every language of the page: Russian for ru,
     # English for the rest.
@@ -313,7 +315,10 @@ setup_subpage() {
     | .svgLibrary.KlausVPN = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z\"/><path d=\"M9 12l2 2 4-4\"/></svg>"
     | .svgLibrary.Copy = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"8\" y=\"8\" width=\"12\" height=\"12\" rx=\"2\"/><path d=\"M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2\"/></svg>"
     | .brandingSettings.title = $app
-    | if $support != "" then .brandingSettings.supportUrl = $support else . end
+    # The support button cannot be hidden (the panel wants a link here).
+    # Without SUPPORT_URL it leads to a note on the subscription address
+    # (Caddy answers it) instead of the placeholder of the panel.
+    | .brandingSettings.supportUrl = (if $support != "" then $support else "https://\($sub)/" end)
     | .baseSettings.metaTitle = $app
     | .baseSettings.metaDescription = $app
     | .platforms.android //= {displayName: t("Android"; "Android"), svgIconKey: "Android", apps: []}
@@ -328,7 +333,7 @@ setup_subpage() {
 }
 
 cmd_setup() {
-  : "${REALITY_SNI:?}" "${REALITY_PORT:?}"
+  : "${REALITY_SNI:?}" "${REALITY_PORT:?}" "${SUB_DOMAIN:?}"
   command -v openssl >/dev/null || die "нужна программа openssl"
   setup_profile
   setup_squad
