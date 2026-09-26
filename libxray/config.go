@@ -438,23 +438,42 @@ func hostFromURL(s string) string {
 func sanitizeOutbound(v any) {
 	switch x := v.(type) {
 	case map[string]any:
-		delete(x, "masterKeyLog")
-		// Hysteria's congestion debug switches on process-wide output.
-		if qp, ok := x["quicParams"].(map[string]any); ok {
-			delete(qp, "debug")
-		}
-		if rs, ok := x["realitySettings"].(map[string]any); ok {
-			delete(rs, "show")
-			if fp, ok := rs["fingerprint"].(string); ok {
-				rs["fingerprint"] = realityFingerprint(fp)
+		// Keys are matched like Xray's JSON loader does: case-insensitively,
+		// so "MasterKeyLog" or "Debug" cannot slip through.
+		for k, child := range x {
+			switch {
+			case strings.EqualFold(k, "masterKeyLog"):
+				delete(x, k)
+				continue
+			case strings.EqualFold(k, "quicParams"):
+				// Hysteria's congestion debug switches on process-wide output.
+				if qp, ok := child.(map[string]any); ok {
+					deleteFold(qp, "debug")
+				}
+			case strings.EqualFold(k, "realitySettings"):
+				if rs, ok := child.(map[string]any); ok {
+					deleteFold(rs, "show")
+					for fk, fv := range rs {
+						if fp, ok := fv.(string); ok && strings.EqualFold(fk, "fingerprint") {
+							rs[fk] = realityFingerprint(fp)
+						}
+					}
+				}
 			}
-		}
-		for _, child := range x {
 			sanitizeOutbound(child)
 		}
 	case []any:
 		for _, child := range x {
 			sanitizeOutbound(child)
+		}
+	}
+}
+
+// deleteFold removes every key equal to key under Unicode case folding.
+func deleteFold(m map[string]any, key string) {
+	for k := range m {
+		if strings.EqualFold(k, key) {
+			delete(m, k)
 		}
 	}
 }

@@ -96,9 +96,11 @@ internal object Failover {
      * or a delete moved the selection to some first server), the winner
      * takes its place.
      */
-    fun selectInstead(state: ProfilesState, failedId: String, winnerId: String): ProfilesState {
+    fun selectInstead(state: ProfilesState, failedId: String, winnerId: String, expected: String? = failedId): ProfilesState {
         if (state.profiles.none { it.id == winnerId }) return state
-        if (!selectionFollowsFailed(state, failedId)) return state
+        // A real compare-and-set: only the selection the switch was decided
+        // on (or the failed server itself) is replaced, never a later pick.
+        if (state.selectedId != failedId && state.selectedId != expected) return state
         return state.copy(selectedId = winnerId)
     }
 

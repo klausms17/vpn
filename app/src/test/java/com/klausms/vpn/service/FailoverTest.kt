@@ -162,10 +162,16 @@ class FailoverTest {
         // The winner was deleted meanwhile.
         val noWinner = state.copy(profiles = listOf(a, c))
         assertSame(noWinner, Failover.selectInstead(noWinner, failedId = "a", winnerId = "b"))
-        // A refresh dropped the failed server and moved the selection to its first one.
+        // A refresh dropped the failed server and moved the selection to its first one
+        // before the switch was decided: the switch saw "c" and replaces it.
         val refreshed = state.copy(profiles = listOf(b, c), selectedId = "c")
         assertTrue(Failover.selectionFollowsFailed(refreshed, "a"))
-        assertEquals("b", Failover.selectInstead(refreshed, failedId = "a", winnerId = "b").selectedId)
+        assertEquals("b", Failover.selectInstead(refreshed, failedId = "a", winnerId = "b", expected = "c").selectedId)
+        // The user tapped "d" while the winner was starting: their pick stays,
+        // even though the failed server is gone.
+        val d = server("d", "d.example.com", "s1")
+        val tapped = refreshed.copy(profiles = listOf(b, c, d), selectedId = "d")
+        assertSame(tapped, Failover.selectInstead(tapped, failedId = "a", winnerId = "b", expected = "c"))
     }
 
     // -------------------------------------------------------------- budget

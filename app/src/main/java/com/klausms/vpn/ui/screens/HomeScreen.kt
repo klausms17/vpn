@@ -31,7 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -180,7 +180,8 @@ fun HomeContent(
                         // Without a server the big button opens "add server".
                         onClick = if (hero == HeroState.NO_SERVER) onAdd else onToggle,
                         enabled = state != VpnState.DISCONNECTING,
-                        modifier = Modifier.onGloballyPositioned { heroCenterY = it.boundsInRoot().center.y },
+                        // Unclipped position: boundsInRoot() stops at the list's edge.
+                        modifier = Modifier.onGloballyPositioned { heroCenterY = it.positionInRoot().y + it.size.height / 2f },
                     )
                     StatusBlock(
                         state = state,

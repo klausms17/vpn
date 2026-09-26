@@ -156,7 +156,7 @@ class MainActivity : ComponentActivity() {
         // Shared keys and "add" links are confirmed on whatever screen is open.
         sharedText?.let { text ->
             // Any web page can open a link: say where the subscription comes from.
-            val host = DeepLink.httpHost(text)
+            val host = ImportText.subscriptionUrl(text)?.let(DeepLink::urlHost)
             AlertDialog(
                 onDismissRequest = { sharedText = null },
                 containerColor = kc.card,

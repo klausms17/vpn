@@ -226,6 +226,26 @@ func TestOutboundsAreSanitized(t *testing.T) {
 	}
 }
 
+// Xray's loader matches keys case-insensitively, so must the sanitizer.
+func TestOutboundsAreSanitizedWhateverTheCase(t *testing.T) {
+	ob := json.RawMessage(`{"protocol":"hysteria","streamSettings":{"network":"hysteria",
+		"finalmask":{"QuicParams":{"congestion":"bbr","Debug":true}},
+		"RealitySettings":{"Fingerprint":"ios","Show":true,"MasterKeyLog":"/data/x"}}}`)
+	res, err := prepareOutbounds([]json.RawMessage{ob})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(mustJSON(res[0]))
+	for _, bad := range []string{"Debug", "MasterKeyLog", `"Show"`, `"ios"`} {
+		if strings.Contains(out, bad) {
+			t.Errorf("sanitized outbound still contains %s: %s", bad, out)
+		}
+	}
+	if !strings.Contains(out, `"congestion":"bbr"`) {
+		t.Errorf("sanitizing dropped a harmless key: %s", out)
+	}
+}
+
 func TestBlockedDomainsNeverFallBackToPlainDNS(t *testing.T) {
 	cfg, err := buildConfig(&BuildOptions{Outbounds: []json.RawMessage{json.RawMessage(`{"protocol":"vless"}`)}, Mode: ModeRuDirect, Tun: true})
 	if err != nil {

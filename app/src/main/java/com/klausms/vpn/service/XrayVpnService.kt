@@ -354,6 +354,7 @@ class XrayVpnService : VpnService() {
         userRequested: Boolean,
         profileOverride: String? = null,
         failedId: String? = null,
+        expectedSelection: String? = null,
         notice: String? = null,
     ) {
         val restarting = config != null
@@ -418,7 +419,7 @@ class XrayVpnService : VpnService() {
             RuntimeState.setShouldRun(this, true)
             withContext(Dispatchers.Main) { startNetworkMonitor() }
             // Only a server whose core came up becomes the selection.
-            if (profileOverride != null && failedId != null) saveSwitch(failedId, profile.id)
+            if (profileOverride != null && failedId != null) saveSwitch(failedId, profile.id, expectedSelection)
             setStatus(VpnStatus(VpnState.CONNECTED, profile.id, profile.name, message = notice, connectedSince = System.currentTimeMillis()))
             Notifications.clearError(this)
             AppLog.i("tunnel up: ${profile.protocol}/${profile.network}/${profile.security}, mode ${settings.mode.core}")
@@ -840,7 +841,14 @@ class XrayVpnService : VpnService() {
                 return
             }
             val notice = if (winner.id == failed.id) null else Failover.switchedNotice(winner.name, failed.name)
-            startTunnel(lastStartId, userRequested = false, profileOverride = winner.id, failedId = failed.id, notice = notice)
+            startTunnel(
+                lastStartId,
+                userRequested = false,
+                profileOverride = winner.id,
+                failedId = failed.id,
+                expectedSelection = saved.selectedId,
+                notice = notice,
+            )
         } catch (ex: Exception) {
             if (ex is CancellationException) throw ex
             AppLog.w("server switch failed", ex)
@@ -848,9 +856,9 @@ class XrayVpnService : VpnService() {
     }
 
     /** The server the tunnel switched to becomes the selection, unless the user chose another meanwhile. */
-    private fun saveSwitch(failedId: String, winnerId: String) {
+    private fun saveSwitch(failedId: String, winnerId: String, expected: String?) {
         try {
-            val saved = Stores.profiles(this).update { s -> Failover.selectInstead(s, failedId, winnerId) }
+            val saved = Stores.profiles(this).update { s -> Failover.selectInstead(s, failedId, winnerId, expected) }
             if (saved.selectedId == winnerId) {
                 notifyProfilesChanged()
             } else {

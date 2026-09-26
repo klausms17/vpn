@@ -63,7 +63,7 @@ class SubscriptionUpdater(context: Context, private val profiles: ProfilesAccess
     /** Downloads [url] and adds it as a new subscription. Throws when it cannot be used. */
     suspend fun add(url: String, downloader: Downloader): Outcome {
         if (profiles.snapshot().subscriptions.any { it.url == url }) throw IllegalStateException(ALREADY_ADDED)
-        val fetched = download(url, downloader, reuse = emptyMap())
+        val fetched = download(url, downloader, reuse = Pinned.NONE, known = Pinned.NONE)
         val now = System.currentTimeMillis()
         val sub = Subscription(id = UUID.randomUUID().toString(), name = fetched.title ?: hostOf(url) ?: "Подписка", url = url)
         var before = ProfilesState()
@@ -87,9 +87,12 @@ class SubscriptionUpdater(context: Context, private val profiles: ProfilesAccess
     suspend fun refresh(id: String, downloader: Downloader, runningId: String? = null, repin: Boolean = false): Outcome? {
         val snapshot = profiles.snapshot()
         val sub = snapshot.subscriptions.firstOrNull { it.id == id } ?: return null
-        val reuse = if (repin) emptyMap() else pinnedLinks(snapshot.profiles.filter { it.subscriptionId == id })
+        // Certificates pinned before: reused for unchanged servers, and kept
+        // when a server cannot be reached right now (it is not deleted).
+        val known = Pinned.of(snapshot.profiles.filter { it.subscriptionId == id })
+        val reuse = if (repin) Pinned.NONE else known
         val fetched = try {
-            download(sub.url, downloader, reuse)
+            download(sub.url, downloader, reuse, known)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             recordFailure(id, e.userMessage())
@@ -113,7 +116,7 @@ class SubscriptionUpdater(context: Context, private val profiles: ProfilesAccess
         }
     }
 
-    private suspend fun download(url: String, downloader: Downloader, reuse: Map<String, JsonArray>): Fetched {
+    private suspend fun download(url: String, downloader: Downloader, reuse: Pinned, known: Pinned): Fetched {
         val (result, parsed) = withContext(Dispatchers.IO) {
             val r = downloader.fetch(url, DeviceHeaders.json(appContext))
             // Refused for the device limit: the body holds only placeholders, or nothing.
@@ -132,7 +135,7 @@ class SubscriptionUpdater(context: Context, private val profiles: ProfilesAccess
             return base.copy(notice = if (result.hwidNotSupported) HWID_NOT_SUPPORTED else HWID_LIMIT)
         }
         val errors = parsed.errors.toMutableList()
-        val ready = pinWhereNeeded(parsed.profiles, errors) { p -> p.link?.let(reuse::get) }
+        val ready = pinWhereNeeded(parsed.profiles, errors, pinned = reuse::sameLink, fallback = known::sameServer)
         // Servers came, none usable: an error, not an empty list.
         if (ready.isEmpty() && parsed.profiles.isNotEmpty()) throw IllegalStateException(errors.firstOrNull() ?: "в подписке нет подходящих серверов")
         val notice = parsed.notices.joinToString("\n").ifBlank { null }
@@ -285,8 +288,6 @@ class SubscriptionUpdater(context: Context, private val profiles: ProfilesAccess
         private fun JsonObject.text(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
 
         /** Outbounds of links whose certificate was pinned before. */
-        private fun pinnedLinks(servers: List<StoredProfile>): Map<String, JsonArray> =
-            servers.mapNotNull { p -> p.link?.let { it to p.outbounds } }.toMap()
 
         private fun hostOf(url: String): String? = try {
             URI(url).host?.takeIf { it.isNotBlank() }
@@ -295,5 +296,32 @@ class SubscriptionUpdater(context: Context, private val profiles: ProfilesAccess
         }
 
         private fun String?.clean(): String? = this?.trim()?.takeIf { it.isNotEmpty() }
+    }
+}
+
+/**
+ * Outbounds with a certificate pinned earlier, by link (without the
+ * "#name": panels change names, e.g. "12 days left") and by endpoint.
+ */
+class Pinned private constructor(
+    private val byLink: Map<String, JsonArray>,
+    private val byEndpoint: Map<String, JsonArray>,
+) {
+    /** Same link: the same server settings, safe to reuse without contacting it. */
+    fun sameLink(p: ParsedProfile): JsonArray? = p.link?.let { byLink[linkKey(it)] }
+
+    /** The same server, maybe with other settings: only when it cannot be pinned now. */
+    fun sameServer(p: ParsedProfile): JsonArray? = sameLink(p) ?: byEndpoint[endpointKey(p.protocol, p.address, p.port)]
+
+    companion object {
+        val NONE = Pinned(emptyMap(), emptyMap())
+
+        fun of(servers: List<StoredProfile>) = Pinned(
+            servers.mapNotNull { p -> p.link?.let { linkKey(it) to p.outbounds } }.toMap(),
+            servers.associate { p -> endpointKey(p.protocol, p.address, p.port) to p.outbounds },
+        )
+
+        private fun linkKey(link: String) = link.substringBefore('#')
+        private fun endpointKey(protocol: String, address: String, port: Int) = "$protocol|${address.lowercase()}|$port"
     }
 }

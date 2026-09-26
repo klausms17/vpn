@@ -40,8 +40,6 @@ sealed interface PingResult {
     data class Failed(val reason: String) : PingResult
 }
 
-private val LINK_START = Regex("""^[A-Za-z][A-Za-z0-9+.\-]*://""")
-private val LINK_ANYWHERE = Regex("""[A-Za-z][A-Za-z0-9+.\-]*://\S+""")
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = (app as App).repository
@@ -214,30 +212,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (input.isEmpty()) return@launch
         _busy.value = "Добавление…"
         try {
-            val links = if (input.startsWith("{") || input.startsWith("[")) emptyList() else extractLinks(input)
-            when {
-                links.size == 1 && (links[0].startsWith("https://", true) || links[0].startsWith("http://", true)) ->
-                    addSubscription(links[0])
-                else -> addLinks(input, links)
-            }
+            val subscription = ImportText.subscriptionUrl(input)
+            if (subscription != null) addSubscription(subscription) else addLinks(input, ImportText.links(input))
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             message(e.userMessage())
         } finally {
             _busy.value = null
-        }
-    }
-
-    /**
-     * Keys and links in pasted or shared text. A line that starts with a
-     * link is taken whole (names after "#" may contain spaces); inside other
-     * text, such as a messenger message, each link is picked out.
-     */
-    private fun extractLinks(input: String): List<String> = input.lines().map { it.trim() }.flatMap { line ->
-        if (LINK_START.containsMatchIn(line)) {
-            listOf(line)
-        } else {
-            LINK_ANYWHERE.findAll(line).map { it.value.trimEnd('.', ',', ';', ')', '»', '"', '\'') }.toList()
         }
     }
 

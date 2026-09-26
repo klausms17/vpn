@@ -18,6 +18,7 @@ object DeepLink {
     // Some browsers fold "//" inside a path into one slash.
     private val FOLDED_SLASH = Regex("^(https?):/(?!/)", RegexOption.IGNORE_CASE)
     private val HTTP = Regex("^https?://", RegexOption.IGNORE_CASE)
+    private val LINK = Regex("""^[A-Za-z][A-Za-z0-9+.\-]*://""")
 
     /** The key or subscription link inside [data] (Intent.getDataString()), or null. */
     fun payload(data: String?): String? {
@@ -37,14 +38,17 @@ object DeepLink {
         text = FOLDED_SLASH.replace(text, "$1://")
         // A subscription page may add "#name"; for a key it is the server's name.
         if (HTTP.containsMatchIn(text)) text = text.substringBefore('#')
+        // Only a link or key goes on to the confirmation: no control
+        // characters, and a scheme at the very start.
+        if (text.any { it.isISOControl() } || !LINK.containsMatchIn(text)) return null
         return text.takeIf { it.isNotEmpty() && it.length <= MAX_LENGTH }
     }
 
-    /** The host of a lone http(s) link, to show where a subscription comes from. */
-    fun httpHost(text: String): String? {
-        val t = text.trim()
-        if (!HTTP.containsMatchIn(t) || t.any { it.isWhitespace() }) return null
-        val authority = t.substringAfter("://").takeWhile { it != '/' && it != '?' && it != '#' }
+    /** The host of an http(s) URL, to show where a subscription comes from. */
+    fun urlHost(url: String): String? {
+        val t = url.trim()
+        if (!HTTP.containsMatchIn(t)) return null
+        val authority = t.substringAfter("://").takeWhile { it != '/' && it != '?' && it != '#' && !it.isWhitespace() }
         val host = authority.substringAfterLast('@').let { a ->
             if (a.startsWith("[")) a.substringBefore(']') + "]" else a.substringBefore(':')
         }
