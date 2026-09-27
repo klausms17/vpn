@@ -22,14 +22,12 @@ import com.klausms.vpn.data.withNewKeys
 import com.klausms.vpn.data.withSelected
 import com.klausms.vpn.data.withoutProfile
 import com.klausms.vpn.data.withoutSubscription
-import com.klausms.vpn.service.VpnCommands
 import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.util.AppLog
 import com.klausms.vpn.util.PhoneSettings
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -97,11 +95,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _update = MutableStateFlow<AppUpdate?>(null)
     val update: StateFlow<AppUpdate?> = _update.asStateFlow()
 
-    private var reconnectJob: Job? = null
     private var staleJob: Job? = null
 
     /** Survives the activity finishing: see [App.appScope]. */
     private val appScope = (app as App).appScope
+
+    /**
+     * Owned by this ViewModel, not the app: isUp reads this ViewModel's
+     * VpnClient, the only source of the tunnel status.
+     */
+    private val tunnel = TunnelController(
+        appScope,
+        VpnTunnelCommands(app),
+        isUp = { isTunnelUp },
+        awaitSaves = repo::awaitSaves,
+    )
 
     // Small UI state; declared before init, whose coroutine reads it.
     private val uiPrefs by lazy { app.getSharedPreferences("ui", android.content.Context.MODE_PRIVATE) }
@@ -264,25 +272,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------------------------------------------------------------- VPN
 
-    /** A server picked by hand while the VPN was off; the next connect tells the service so. */
-    private var pickedWhileOff: String? = null
-
     fun startVpn() {
         val selected = profiles.value.selected
         if (selected == null) {
             message("Сначала добавьте ключ")
             return
         }
-        val picked = pickedWhileOff == selected.id
-        pickedWhileOff = null
-        VpnCommands.connect(getApplication<Application>(), picked)
+        tunnel.connect(selected.id)
     }
 
-    fun stopVpn() {
-        // A settings change waiting to be applied must not switch it back on.
-        reconnectJob?.cancel()
-        VpnCommands.disconnect(getApplication<Application>(), "app")
-    }
+    fun stopVpn() = tunnel.disconnect()
 
     fun startVpnDenied() = message("Без разрешения на VPN подключиться нельзя. Если включён другой VPN-клиент как «постоянный», отключите его.")
 
@@ -290,39 +289,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun markNotificationPermissionAsked() = uiPrefs.edit { putBoolean("notif_asked", true) }
 
-    /**
-     * Re-applies server/settings to a running tunnel (debounced). In the app
-     * scope: leaving the app during the pause must not lose the change.
-     */
-    private fun reconnectIfRunning(delayMs: Long = 0) {
-        if (!isTunnelUp) return
-        reconnectJob?.cancel()
-        reconnectJob = appScope.launch {
-            delay(delayMs)
-            sendReconnect()
-        }
-    }
-
-    /** [picked]: the user has just chosen the server (see [select]). */
-    private fun sendReconnect(picked: Boolean = false) {
-        try {
-            VpnCommands.reconnect(getApplication<Application>(), picked)
-        } catch (e: Exception) {
-            AppLog.w("could not apply the change to the tunnel", e)
-        }
-    }
-
-    /**
-     * The app left the screen: a change still waiting out its short pause
-     * goes to the tunnel now, as the process may be killed any moment (swiped
-     * away from Recents).
-     */
+    /** The app left the screen; see [TunnelController.flushPending]. */
     fun onAppHidden() {
         onScreen = false
-        val pending = reconnectJob ?: return
-        if (!pending.isActive) return
-        pending.cancel()
-        sendReconnect()
+        tunnel.flushPending()
     }
 
     // ------------------------------------------------------------ profiles
@@ -332,20 +302,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * wins over automatic switches). A running tunnel moves to it, also when
      * it is already the selection but the tunnel runs another (a refresh
      * removed the running one). In the app scope, like the other changes
-     * that reach the tunnel ([reconnectIfRunning]).
+     * that reach the tunnel ([TunnelController.reconnectIfRunning]).
      */
     fun select(id: String) = appScope.launch(saveErrors) {
         val up = isTunnelUp
         if (profiles.value.selectedId == id && (!up || status.value.profileId == id)) return@launch
         // Gone meanwhile: the VPN process replaced the list.
         if (repo.updateProfiles { s -> s.withSelected(id) }.selectedId != id) return@launch
-        if (up) {
-            // Also brings a settings change still waiting out its pause.
-            reconnectJob?.cancel()
-            sendReconnect(picked = true)
-        } else {
-            pickedWhileOff = id
-        }
+        tunnel.picked(id, up)
     }
 
     fun rename(id: String, name: String) = viewModelScope.launch(saveErrors) {
@@ -359,7 +323,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val next = repo.updateProfiles { s -> s.withoutProfile(id) }
         _pings.update { it - id }
         if (wasSelected) {
-            if (next.selected == null) stopVpn() else reconnectIfRunning()
+            if (next.selected == null) stopVpn() else tunnel.reconnectIfRunning()
         }
     }
 
@@ -448,7 +412,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // A manual refresh also renews pinned certificates.
             val outcome = updater.refresh(id, downloader, runningId = status.value.profileId, repin = !quiet) ?: return@launch
             ui.checkWhitelist(outcome.servers)
-            if (outcome.runningChanged) reconnectIfRunning()
+            if (outcome.runningChanged) tunnel.reconnectIfRunning()
             if (!quiet) {
                 message(
                     if (outcome.applied) {
@@ -470,7 +434,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val selectedWasInside = profiles.value.selected?.subscriptionId == id
         val next = repo.updateProfiles { s -> s.withoutSubscription(id) }
         if (selectedWasInside) {
-            if (next.selected == null) stopVpn() else reconnectIfRunning()
+            if (next.selected == null) stopVpn() else tunnel.reconnectIfRunning()
         }
     }
 
@@ -507,12 +471,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun updateSettings(transform: (AppSettings) -> AppSettings) = appScope.launch(saveErrors) {
         val before = settings.value
         val after = repo.updateSettings(transform)
-        if (after != before) reconnectIfRunning(delayMs = 800)
+        if (after != before) tunnel.reconnectIfRunning(delayMs = 800)
     }
-
-    /** The app lists changed while their screen is open; applied when it closes. */
-    @Volatile
-    private var appListsChanged = false
 
     /**
      * Picking apps one by one is saved at once but reaches the tunnel only
@@ -521,16 +481,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun updateAppLists(transform: (AppSettings) -> AppSettings) = appScope.launch(saveErrors) {
         // Set inside the save, so applyAppLists (waiting for the saves) sees it.
-        repo.updateSettings { s -> transform(s).also { if (it != s) appListsChanged = true } }
+        repo.updateSettings { s -> transform(s).also { if (it != s) tunnel.markAppListsChanged() } }
     }
 
-    fun applyAppLists() = appScope.launch(saveErrors) {
-        repo.awaitSaves()
-        if (appListsChanged) {
-            appListsChanged = false
-            reconnectIfRunning()
-        }
-    }
+    fun applyAppLists() = appScope.launch(saveErrors) { tunnel.applyAppLists() }
 
     /** One run at a time in the app ([UiSession.geoUpdate]): runs share their download folder and files. */
     fun updateGeo() {
@@ -547,7 +501,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     ui.refreshGeoVersion()
                 }
                 message("Базы обновлены")
-                reconnectIfRunning()
+                tunnel.reconnectIfRunning()
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 AppLog.e("geo update failed", e)
