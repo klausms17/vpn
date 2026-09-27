@@ -1,4 +1,4 @@
-# Klaus VPN
+# Kirov VPN
 
 Android VPN client on the latest Xray core with Russia split routing.
 Full description in Russian: see `docs/` (to be added) and the release notes.

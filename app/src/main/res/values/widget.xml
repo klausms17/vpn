@@ -7,7 +7,7 @@
     <color name="widget_text_secondary">#99EBEBF5</color>
     <color name="widget_text_tertiary">#4DEBEBF5</color>
 
-    <string name="widget_label">Klaus VPN</string>
+    <string name="widget_label">Kirov VPN</string>
     <string name="widget_description">Включение VPN одним нажатием и проверка пинга</string>
     <string name="widget_ping">Пинг</string>
     <string name="widget_timer_idle">00:00</string>

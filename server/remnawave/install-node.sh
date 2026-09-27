@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Klaus VPN server (Remnawave node) installer.
+# Kirov VPN server (Remnawave node) installer.
 #
 # Run as root on each VPN VPS abroad (Ubuntu 22.04+/Debian 12+). The exact
 # command, with the key, is printed by "klaus-panel add-node" on the panel:
@@ -110,7 +110,7 @@ done
 if [ "$SKIP_SYSTEM" != "1" ] && systemctl is-active --quiet xray 2>/dev/null &&
   { ! command -v ss >/dev/null || grep -q '"xray"' <<<"$(ss -Hltnp "sport = :$VPN_PORT" 2>/dev/null)"; }; then
   if [ "$MIGRATE" != "1" ]; then
-    die "здесь работает прежний сервер Klaus VPN (Xray из install.sh). После перехода на Remnawave его ключи перестанут работать. Когда знакомые получат подписки, запустите: sudo MIGRATE=1 PANEL_IP=… SECRET_KEY='…' bash install-node.sh (вернуть старый: systemctl enable --now xray, предварительно остановив новый: cd $NODE_DIR && docker compose down)"
+    die "здесь работает прежний сервер Kirov VPN (Xray из install.sh). После перехода на Remnawave его ключи перестанут работать. Когда знакомые получат подписки, запустите: sudo MIGRATE=1 PANEL_IP=… SECRET_KEY='…' bash install-node.sh (вернуть старый: systemctl enable --now xray, предварительно остановив новый: cd $NODE_DIR && docker compose down)"
   fi
   say "Выключаю прежний Xray (настройки и ключи остаются в /usr/local/etc/xray)"
   systemctl disable --now xray >/dev/null 2>&1 || true
@@ -161,7 +161,7 @@ put_file() {
 }
 
 put_file "$NODE_DIR/.env" <<EOF
-# Written by Klaus VPN install-node.sh; re-running the script rewrites it.
+# Written by Kirov VPN install-node.sh; re-running the script rewrites it.
 NODE_PORT=$NODE_PORT
 SECRET_KEY=$SECRET_KEY
 # Not used by the node (the panel sets its VPN port); kept for re-runs.
@@ -171,7 +171,7 @@ EOF
 # As remnawave/node docker-compose-prod.yml, with the key in .env and
 # rotated logs.
 put_file "$NODE_DIR/docker-compose.yml" <<'EOF'
-# Written by Klaus VPN install-node.sh; re-running the script rewrites it.
+# Written by Kirov VPN install-node.sh; re-running the script rewrites it.
 name: remnanode
 
 services:
@@ -252,7 +252,7 @@ EOF
     nft -f /etc/klausvpn-node.nft
     cat > /etc/systemd/system/klausvpn-node-firewall.service <<'EOF'
 [Unit]
-Description=Klaus VPN: only the panel may reach the Remnawave node port
+Description=Kirov VPN: only the panel may reach the Remnawave node port
 After=network-pre.target
 Before=network.target docker.service
 

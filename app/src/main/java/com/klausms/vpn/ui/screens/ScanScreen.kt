@@ -122,7 +122,7 @@ private fun CameraScanner(onBack: () -> Unit, onFound: (String) -> Unit) {
             analysisThread,
             QrAnalyzer { text ->
                 if (done.get()) return@QrAnalyzer
-                // "Add to Klaus VPN" links carry the key inside.
+                // "Add to Kirov VPN" links carry the key inside.
                 val payload = DeepLink.payload(text) ?: text.trim()
                 if (ImportText.links(payload).isEmpty()) {
                     if (payload != lastRejected) {

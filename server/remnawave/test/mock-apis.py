@@ -2,7 +2,7 @@
 """Mock Telegram Bot API and GitHub REST API for run-local.sh.
 
   mock-apis.py --port 18090 --tg-token T --gh-token G --repo klausms17/vpn \
-      --tag TAG --bad-tag TAG2 --temp-tag TAG3 --apk KlausVPN-1.0.99.apk
+      --tag TAG --bad-tag TAG2 --temp-tag TAG3 --apk KirovVPN-1.0.99.apk
 
 Telegram (/bot<token>/<method>, GET or POST, JSON or form): getMe,
 getUpdates (serves the messages queued with POST /_mock/tg/say
@@ -61,9 +61,9 @@ def main():
         4: ("SHA256SUMS.txt", ("%s  %s\n" % (bad_sum, name)).encode()),
     }
     releases = {args.tag: [1, 2], args.bad_tag: [3, 4], args.temp_tag: [1, 2]}
-    version = name[len("KlausVPN-"):-len(".apk")]
-    titles = {args.tag: "Klaus VPN %s (%s)" % (version, args.tag), args.bad_tag: "Klaus VPN %s (main)" % version,
-              args.temp_tag: "Klaus VPN %s (main) — временная подпись" % version}
+    version = name[len("KirovVPN-"):-len(".apk")]
+    titles = {args.tag: "Kirov VPN %s (%s)" % (version, args.tag), args.bad_tag: "Kirov VPN %s (main)" % version,
+              args.temp_tag: "Kirov VPN %s (main) — временная подпись" % version}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *a):
@@ -124,7 +124,7 @@ def main():
                 return self.reply(401, {"ok": False, "error_code": 401, "description": "Unauthorized"})
             if method == "getMe":
                 return self.reply(200, {"ok": True, "result": {
-                    "id": 777, "is_bot": True, "first_name": "Klaus VPN alerts", "username": "klaus_e2e_bot"}})
+                    "id": 777, "is_bot": True, "first_name": "Kirov VPN alerts", "username": "klaus_e2e_bot"}})
             if method == "getUpdates":
                 offset = int(p.get("offset") or 0)
                 deadline = time.time() + min(float(p.get("timeout") or 0), 3)

@@ -127,7 +127,7 @@ class ScreenshotTest {
     @Test fun homeUpdate() = home(
         "home-update",
         connected(),
-        update = AppUpdate(27, "1.0.27", "https://sub.example.com/app/KlausVPN-1.0.27.apk"),
+        update = AppUpdate(27, "1.0.27", "https://sub.example.com/app/KirovVPN-1.0.27.apk"),
     )
 
     @Test fun homeConnecting() = home("home-connecting", VpnStatus(VpnState.CONNECTING, profileId = "nl"))

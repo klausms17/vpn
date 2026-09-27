@@ -71,7 +71,7 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
             </intent-filter>
-            <!-- "Add to Klaus VPN" buttons on subscription pages:
+            <!-- "Add to Kirov VPN" buttons on subscription pages:
                  klausvpn://add/<link>, klausvpn://import/<link> and
                  klausvpn://install-config?url=<link>. Like shared text, the
                  link is only shown to the user for confirmation. -->

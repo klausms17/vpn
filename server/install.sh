@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Klaus VPN server installer: Xray (latest release) with VLESS + REALITY.
+# Kirov VPN server installer: Xray (latest release) with VLESS + REALITY.
 #
 #   Copy this file to the server and run: sudo bash install.sh
 #
@@ -18,7 +18,7 @@ set -euo pipefail
 
 PORT="${PORT:-443}"
 XHTTP_PORT="${XHTTP_PORT:-8443}"
-NAME="${NAME:-KlausVPN}"
+NAME="${NAME:-KirovVPN}"
 RESET="${RESET:-0}"
 CONF_DIR=/usr/local/etc/xray
 CONF="$CONF_DIR/config.json"
@@ -215,7 +215,7 @@ if [ "$XHTTP_PORT" != "0" ]; then
 fi
 
 {
-  echo "Klaus VPN — ключи сервера $IP ($(date '+%Y-%m-%d %H:%M'))"
+  echo "Kirov VPN — ключи сервера $IP ($(date '+%Y-%m-%d %H:%M'))"
   echo
   echo "Основной (быстрый):"
   echo "$LINK_VISION"

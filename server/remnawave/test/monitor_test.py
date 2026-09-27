@@ -16,8 +16,8 @@ import time
 import unittest
 
 MONITOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "klaus-monitor.py")
-NOTE = "Klaus VPN: мобильный интернет в режиме белых списков"
-ALERT = "Klaus VPN: сервер «Германия» не отвечает"
+NOTE = "Kirov VPN: мобильный интернет в режиме белых списков"
+ALERT = "Kirov VPN: сервер «Германия» не отвечает"
 
 
 class Now:

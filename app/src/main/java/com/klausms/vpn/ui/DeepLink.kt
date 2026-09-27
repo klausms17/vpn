@@ -3,7 +3,7 @@ package com.klausms.vpn.ui
 import java.io.ByteArrayOutputStream
 
 /**
- * "Add to Klaus VPN" links from subscription pages and messengers:
+ * "Add to Kirov VPN" links from subscription pages and messengers:
  * - klausvpn://add/<link> and klausvpn://import/<link>: the raw text after
  *   the prefix (a subscription URL or a key), encoded or not;
  * - klausvpn://install-config?url=<link>[&name=…] (v2rayNG style), where
