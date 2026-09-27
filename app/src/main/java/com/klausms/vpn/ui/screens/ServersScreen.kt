@@ -329,7 +329,7 @@ private val FLAG_TEXT_START = 60.dp
 private fun RowPing(ping: PingResult?) {
     when (ping) {
         is PingResult.Ok -> {
-            // Same colours as the VPN card and the widget.
+            // Graded like the widget (pingGrade), drawn in the app's own bars and colours.
             val (level, color) = pingLevel(ping.ms)
             SignalBars(level, color)
             Text(

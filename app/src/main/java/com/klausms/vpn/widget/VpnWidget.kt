@@ -18,8 +18,10 @@ import androidx.annotation.VisibleForTesting
 import androidx.core.content.edit
 import com.klausms.vpn.R
 import com.klausms.vpn.core.XrayCore
+import com.klausms.vpn.data.PingGrade
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.Stores
+import com.klausms.vpn.data.pingGrade
 import com.klausms.vpn.service.RuntimeState
 import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.service.VpnStatusHolder
@@ -447,11 +449,11 @@ object VpnWidget {
 
     private fun renderPing(v: RemoteViews, ping: Ping, compact: Boolean) {
         val (bars, color) = when (ping) {
-            is Ping.Ok -> when {
-                ping.ms < 150 -> 4 to GREEN
-                ping.ms < 400 -> 3 to GREEN
-                ping.ms < 1000 -> 3 to YELLOW
-                else -> 1 to RED
+            is Ping.Ok -> when (pingGrade(ping.ms)) {
+                PingGrade.GREAT -> 4 to GREEN
+                PingGrade.GOOD -> 3 to GREEN
+                PingGrade.FAIR -> 3 to YELLOW
+                PingGrade.POOR -> 1 to RED
             }
             Ping.Failed -> 1 to RED
             Ping.Testing, Ping.Unknown -> 0 to GREY

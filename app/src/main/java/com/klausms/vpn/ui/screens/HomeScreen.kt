@@ -54,8 +54,10 @@ import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.klausms.vpn.R
 import com.klausms.vpn.data.AppUpdate
+import com.klausms.vpn.data.PingGrade
 import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
+import com.klausms.vpn.data.pingGrade
 import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.service.VpnStatus
 import com.klausms.vpn.ui.MainViewModel
@@ -412,10 +414,11 @@ private fun SessionTimer(since: Long) {
     )
 }
 
+/** Lit bars (of four) and their colour for a delay of [ms]; the widget draws the same grades its own way. */
 @Composable
-fun pingLevel(ms: Long) = when {
-    ms < 150 -> 4 to kc.green
-    ms < 400 -> 3 to kc.green
-    ms < 1000 -> 2 to kc.orange
-    else -> 1 to kc.red
+fun pingLevel(ms: Long) = when (pingGrade(ms)) {
+    PingGrade.GREAT -> 4 to kc.green
+    PingGrade.GOOD -> 3 to kc.green
+    PingGrade.FAIR -> 2 to kc.orange
+    PingGrade.POOR -> 1 to kc.red
 }
