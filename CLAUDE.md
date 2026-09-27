@@ -119,12 +119,12 @@ and give step-by-step instructions for anything he must do himself.
   45 issues; all are fixed except the ones listed as known limits below.
   The quality refactor is done: the service was split into classes and the
   UI into `UiSession` and `TunnelController`. The latest build is
-  `KirovVPN-1.0.51.apk` on the `build-claude-compassionate-mayer-6jph8m`
+  `KirovVPN-1.0.54.apk` on the `build-claude-compassionate-mayer-6jph8m`
   release, signed with a temporary key.
-- **iPhone:** phases 1–2 of `docs/ios/PLAN.md`. The Go core builds for iOS,
-  and the unsigned app plus the packet tunnel compile on macOS. The last
-  `ios-app.yml` runs failed only on the geo-folder check, which asks for
-  `geo/geoip.dat` inside `PacketTunnel.appex`.
+- **iPhone:** phases 1–2 of `docs/ios/PLAN.md` are done. The Go core builds
+  for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
+  passes its checks (geo files in the extension, no bitcode). The app is
+  still the skeleton: paste a key, connect, disconnect.
 - **Panel:** the scripts are written and pass the Docker e2e, but they are
   not installed on real servers yet.
 - All work so far is on the branch `claude/compassionate-mayer-6jph8m`.
@@ -132,15 +132,16 @@ and give step-by-step instructions for anything he must do himself.
 
 ## Next steps
 
-1. Make `ios-app.yml` green: the geo folder must end up as
-   `PacketTunnel.appex/geo/`.
-2. The owner creates the permanent Android signing key on Windows
+1. The owner creates the permanent Android signing key on Windows
    (`docs/README.ru.md`, section 9: `keytool` from Temurin JDK, secrets
    `ANDROID_KEYSTORE_BASE64` and `ANDROID_KEYSTORE_PASSWORD`). Then:
    - check for "Release key configured" in the CI log;
    - make the first stable build;
    - register `com.klausms.vpn` for Google developer verification with that
      key.
+2. iPhone phases 4–6 (the real tunnel provider, the memory watchdog, the
+   screens and feature parity) can move on in unsigned CI builds while
+   signing waits; testing on a phone needs step 3.
 3. The owner buys the Apple Developer Program ($99/year). Then follow
    `docs/ios/PLAN.md` section 8 (identifiers, certificate, API key, GitHub
    secrets), then phase 3 (signing, Ad Hoc via the App Store Connect API
