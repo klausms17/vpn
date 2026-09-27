@@ -61,7 +61,6 @@ import libxray.Libxray
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * The tunnel. Runs in the ":vpn" process.
@@ -227,10 +226,8 @@ class XrayVpnService : VpnService() {
 
     // ------------------------------------------------------ failover state
 
-    // Changes whenever the running core changes, stops or loses its network:
-    // a check or probe that started before is outdated and its result
-    // discarded.
-    private val epoch = AtomicLong()
+    // The tunnel's generation, and the one traffic check running.
+    private val epoch = Epoch()
 
     @Volatile
     private var runningProfile: StoredProfile? = null
@@ -262,13 +259,6 @@ class XrayVpnService : VpnService() {
     // showed. Another network may reach servers this one could not, and the
     // same network back (Wi-Fi flapping) remembers. Guarded by itself.
     private val fruitless = HashMap<Network?, Pair<Long, String>>()
-
-    @Volatile
-    private var verifyJob: Job? = null
-
-    // Guards verifyJob. Also makes "a new epoch" and "check the epoch, then
-    // replace the pending core restart" atomic with each other.
-    private val verifyLock = Any()
 
     // One probe at a time: a probe's temporary core holds megabytes until it
     // ends, also when its result is no longer wanted.
@@ -550,7 +540,7 @@ class XrayVpnService : VpnService() {
             resetJob?.cancel()
             if (restarting) {
                 // Checks of the old core end here, not with the next one's results.
-                newEpoch()
+                epoch.advance()
                 try {
                     controller?.stop()
                 } catch (e: Exception) {
@@ -569,7 +559,7 @@ class XrayVpnService : VpnService() {
             config = newConfig
             liveController = c
             runningProfile = profile
-            newEpoch()
+            epoch.advance()
             manualPick = when {
                 // An automatic switch.
                 profileOverride != null -> null
@@ -772,7 +762,7 @@ class XrayVpnService : VpnService() {
         resetJob?.cancel()
         liveController = null
         runningProfile = null
-        newEpoch()
+        epoch.advance()
         try {
             controller?.stop()
         } catch (e: Exception) {
@@ -895,7 +885,7 @@ class XrayVpnService : VpnService() {
         if (hint == old) return
         if (hint != null) AppLog.w("strict private DNS is on: lookups bypass the tunnel's DNS rules")
         baseNotice = hint
-        val e = epoch.get()
+        val e = epoch.current
         scope.launch { setNotice(hint, e, replacing = setOf(null, old)) }
     }
 
@@ -906,8 +896,8 @@ class XrayVpnService : VpnService() {
         val previous = lastNetwork
         if (network != null) lastNetwork = network
         // Whatever a check in progress measured belongs to the old network.
-        newEpoch()
-        val e = epoch.get()
+        epoch.advance()
+        val e = epoch.current
         if (network == null) {
             // Nothing to search with: do not claim to be searching.
             scope.launch { setNotice(baseNotice, e, replacing = setOf(Failover.NOTICE_SEARCHING)) }
@@ -939,29 +929,29 @@ class XrayVpnService : VpnService() {
      */
     private fun restartCore(why: String, delayMs: Long = 0, expectedEpoch: Long? = null): Boolean {
         val startId = lastStartId
-        // Under the lock newEpoch() takes: an outdated check (its blocking
-        // test cannot be cancelled) must not cancel the reset a network
-        // change has just queued.
-        synchronized(verifyLock) {
-            if (expectedEpoch != null && epoch.get() != expectedEpoch) return false
+        // Atomic with a new epoch: an outdated check (its blocking test
+        // cannot be cancelled) must not cancel the reset a network change
+        // has just queued.
+        return epoch.locked {
+            if (expectedEpoch != null && !epoch.isCurrent(expectedEpoch)) return@locked false
             resetJob?.cancel()
             resetJob = scope.launch(worker) {
                 if (delayMs > 0) delay(delayMs)
                 serial.withLock {
-                    if (expectedEpoch != null && epoch.get() != expectedEpoch) return@withLock
+                    if (expectedEpoch != null && !epoch.isCurrent(expectedEpoch)) return@withLock
                     val cfg = config ?: return@withLock
                     val fd = tun ?: return@withLock
                     val c = controller ?: return@withLock
                     AppLog.i(why)
                     try {
-                        newEpoch()
+                        epoch.advance()
                         c.stop()
                         // A tunnel that only ever resets never goes through
                         // startTunnel: its log is kept small here too.
                         XrayLog.trim(coreLog)
                         c.start(cfg, fd.fd)
                         connectedAtElapsed = clock.elapsed()
-                        newEpoch()
+                        epoch.advance()
                         scheduleVerify(Reason.NETWORK)
                     } catch (e: Exception) {
                         AppLog.e("core restart failed", e)
@@ -969,24 +959,16 @@ class XrayVpnService : VpnService() {
                         liveController = null
                         runningProfile = null
                         config = null
-                        newEpoch()
+                        epoch.advance()
                         enqueue { if (runtime.shouldRun()) startTunnel(startId, userRequested = false) }
                     }
                 }
             }
+            true
         }
-        return true
     }
 
     // --------------------------------------------------------------- failover
-
-    /** A new core, network or a stop: checks and probes started before are discarded. */
-    private fun newEpoch() {
-        synchronized(verifyLock) {
-            epoch.incrementAndGet()
-            verifyJob?.cancel()
-        }
-    }
 
     private fun failedRecently(id: String): Boolean =
         recentlyFailed[id]?.let { clock.elapsed() - it < Failover.RECENTLY_FAILED_MS } == true
@@ -999,10 +981,8 @@ class XrayVpnService : VpnService() {
      */
     private fun scheduleVerify(reason: Reason, delayMs: Long = 0) {
         if (config == null) return
-        synchronized(verifyLock) {
-            if (verifyJob?.isActive == true) return
-            val e = epoch.get()
-            verifyJob = scope.launch(Dispatchers.IO) {
+        epoch.startCheck { e ->
+            scope.launch(Dispatchers.IO) {
                 try {
                     if (delayMs > 0) delay(delayMs)
                     verify(e, reason)
@@ -1020,13 +1000,13 @@ class XrayVpnService : VpnService() {
         XrayLog.trim(coreLog)
         val c = liveController ?: return
         val running = runningProfile ?: return
-        if (epoch.get() != e || VpnStatusHolder.status.value.state != VpnState.CONNECTED) return
+        if (!epoch.isCurrent(e) || VpnStatusHolder.status.value.state != VpnState.CONNECTED) return
         lastVerifyAt = clock.elapsed()
         // One site failing is not enough: some servers cannot reach Google
         // but carry everything else.
         val ok = answers(c, XrayCore.TEST_URL, VERIFY_TIMEOUT_MS) ||
             answers(c, XrayCore.TEST_URL_ALT, CONFIRM_TIMEOUT_MS)
-        if (epoch.get() != e) return
+        if (!epoch.isCurrent(e)) return
         if (!ok) {
             AppLog.w("no traffic through the server (${reason.name.lowercase()})")
             runFailover(e, c, running, stalled = false)
@@ -1037,12 +1017,12 @@ class XrayVpnService : VpnService() {
         // while short answers still get through.
         val network = activeNetwork()
         if (bulkDue(reason, network) && stalls(c, network)) {
-            if (epoch.get() != e) return
+            if (!epoch.isCurrent(e)) return
             AppLog.w("downloads through the server stall (${reason.name.lowercase()})")
             runFailover(e, c, running, stalled = true)
             return
         }
-        if (epoch.get() != e) return
+        if (!epoch.isCurrent(e)) return
         lastVerifiedOkAt = clock.elapsed()
         clearFailureNotice(e)
         clearSwitchNotice(e, minAgeMs = SWITCH_NOTICE_MS)
@@ -1157,7 +1137,7 @@ class XrayVpnService : VpnService() {
         // server is fine. Not for a stall, which a short answer never shows.
         val control = !stalled
         val delays = probe(c, (if (control) listOf(failed) else emptyList()) + first)
-        if (epoch.get() != e) return
+        if (!epoch.isCurrent(e)) return
         // It answered: whatever happens next, it is not blocked from here.
         val reachable = control && delays.first() >= 0
         if (reachable && recoveredInPlace(e, c)) return
@@ -1176,7 +1156,7 @@ class XrayVpnService : VpnService() {
                     winner = Failover.fastest(second, probe(c, second), tier)
                 }
             }
-            if (epoch.get() != e) return
+            if (!epoch.isCurrent(e)) return
         }
         if (winner == null) {
             AppLog.w("no server answers")
@@ -1200,7 +1180,7 @@ class XrayVpnService : VpnService() {
      */
     private suspend fun recoveredInPlace(e: Long, c: Controller): Boolean {
         if (answers(c, XrayCore.TEST_URL, CONFIRM_TIMEOUT_MS) || answers(c, XrayCore.TEST_URL_ALT, CONFIRM_TIMEOUT_MS)) {
-            if (epoch.get() != e) return true
+            if (!epoch.isCurrent(e)) return true
             AppLog.i("the server answers again: the connection was lost for a moment")
             lastVerifiedOkAt = clock.elapsed()
             clearFailureNotice(e)
@@ -1227,7 +1207,7 @@ class XrayVpnService : VpnService() {
     private suspend fun nothingAnswers(e: Long, failed: StoredProfile, state: ProfilesState, probed: Int, network: Network?, report: Boolean) {
         val online = opensDirectly(DIRECT_URL)
         val whitelist = online && onMobileData() && !opensDirectly(XrayCore.TEST_URL)
-        if (epoch.get() != e) return
+        if (!epoch.isCurrent(e)) return
         val notice = Failover.nothingAnswersNotice(online, whitelist, probed)
         if (online) {
             AppLog.w(
@@ -1286,7 +1266,7 @@ class XrayVpnService : VpnService() {
      */
     private suspend fun switchTo(e: Long, failed: StoredProfile, winnerId: String, returning: Boolean = false, report: Boolean = true) {
         try {
-            if (epoch.get() != e || config == null || !runtime.shouldRun() ||
+            if (!epoch.isCurrent(e) || config == null || !runtime.shouldRun() ||
                 VpnStatusHolder.status.value.state != VpnState.CONNECTED
             ) {
                 AppLog.i("server switch dropped: the tunnel changed meanwhile")
@@ -1429,7 +1409,7 @@ class XrayVpnService : VpnService() {
         // The user chose another server meanwhile; their start follows.
         if (saved.selectedId != running.id || !runtime.allowFailover(take = false)) return
         val answered = probe(c, listOf(home)).first() >= 0
-        if (epoch.get() != e) return
+        if (!epoch.isCurrent(e)) return
         if (!answered) {
             runtime.setAway(Failover.returnFailed(away, now))
             return
@@ -1575,7 +1555,7 @@ class XrayVpnService : VpnService() {
     private suspend fun setNotice(notice: String?, e: Long, replacing: Set<String?>? = null) {
         try {
             withContext(Dispatchers.Main) {
-                if (epoch.get() != e) return@withContext
+                if (!epoch.isCurrent(e)) return@withContext
                 val s = VpnStatusHolder.status.value
                 val current = s.message
                 if (s.state != VpnState.CONNECTED || current == notice) return@withContext
