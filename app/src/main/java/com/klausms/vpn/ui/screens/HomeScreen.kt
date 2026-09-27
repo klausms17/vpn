@@ -328,7 +328,8 @@ private fun openInBrowser(context: Context, url: String): Boolean = try {
     context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri()).addCategory(Intent.CATEGORY_BROWSABLE))
     true
 } catch (e: Exception) {
-    AppLog.w("the update link did not open", e)
+    // The class only: the exception's text repeats the intent, with the panel's host.
+    AppLog.w("the update link did not open: ${e.javaClass.simpleName}")
     false
 }
 
