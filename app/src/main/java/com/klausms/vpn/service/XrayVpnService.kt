@@ -36,7 +36,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
@@ -174,9 +173,6 @@ class XrayVpnService : VpnService() {
     @Volatile
     private var session: TunnelSession? = null
 
-    @Volatile
-    private var resetJob: Job? = null
-
     /** Counts starts; a retry planned for an older one is dropped. Used in the serial queue only. */
     private var startGeneration = 0
 
@@ -188,6 +184,9 @@ class XrayVpnService : VpnService() {
 
     // The tunnel's generation, and the one traffic check running.
     private val epoch = Epoch()
+
+    // The in-place reset waiting to run.
+    private val resets = ResetScheduler(epoch, scope, worker)
 
     // elapsedRealtime of the last check started, and of the last one that got through.
     @Volatile
@@ -485,7 +484,7 @@ class XrayVpnService : VpnService() {
             val (newTun, lockdownConflict) = establishTun(profile, settings, userRequested)
             swapped = true
             val oldTun = tun
-            resetJob?.cancel()
+            resets.cancel()
             if (restarting) {
                 // Checks of the old core end here, not with the next one's results.
                 epoch.advance()
@@ -714,7 +713,7 @@ class XrayVpnService : VpnService() {
      * closes it), apps' traffic waits instead of leaving the VPN.
      */
     private fun haltCore() {
-        resetJob?.cancel()
+        resets.cancel()
         session = null
         LiveCore.current = null
         epoch.advance()
@@ -796,41 +795,32 @@ class XrayVpnService : VpnService() {
      */
     private fun restartCore(why: String, delayMs: Long = 0, expectedEpoch: Long? = null): Boolean {
         val startId = lastStartId
-        // Atomic with a new epoch: an outdated check (its blocking test
-        // cannot be cancelled) must not cancel the reset a network change
-        // has just queued.
-        return epoch.locked {
-            if (expectedEpoch != null && !epoch.isCurrent(expectedEpoch)) return@locked false
-            resetJob?.cancel()
-            resetJob = scope.launch(worker) {
-                if (delayMs > 0) delay(delayMs)
-                serial.withLock {
-                    if (expectedEpoch != null && !epoch.isCurrent(expectedEpoch)) return@withLock
-                    val running = session ?: return@withLock
-                    val fd = tun ?: return@withLock
-                    AppLog.i(why)
-                    try {
-                        epoch.advance()
-                        core.stop()
-                        // A tunnel that only ever resets never goes through
-                        // startTunnel: its log is kept small here too.
-                        XrayLog.trim(coreLog)
-                        core.start(running.config, fd.fd)
-                        // The same profile object: restartOnSaved() compares it by identity.
-                        session = running.copy(connectedAt = clock.elapsed())
-                        epoch.advance()
-                        scheduleVerify(Reason.NETWORK)
-                    } catch (e: Exception) {
-                        AppLog.e("core restart failed", e)
-                        // No core runs now: the restart must not count on the old one.
-                        session = null
-                        LiveCore.current = null
-                        epoch.advance()
-                        enqueue { if (runtime.shouldRun()) startTunnel(startId, userRequested = false) }
-                    }
+        return resets.schedule(delayMs, expectedEpoch) {
+            serial.withLock {
+                if (expectedEpoch != null && !epoch.isCurrent(expectedEpoch)) return@withLock
+                val running = session ?: return@withLock
+                val fd = tun ?: return@withLock
+                AppLog.i(why)
+                try {
+                    epoch.advance()
+                    core.stop()
+                    // A tunnel that only ever resets never goes through
+                    // startTunnel: its log is kept small here too.
+                    XrayLog.trim(coreLog)
+                    core.start(running.config, fd.fd)
+                    // The same profile object: restartOnSaved() compares it by identity.
+                    session = running.copy(connectedAt = clock.elapsed())
+                    epoch.advance()
+                    scheduleVerify(Reason.NETWORK)
+                } catch (e: Exception) {
+                    AppLog.e("core restart failed", e)
+                    // No core runs now: the restart must not count on the old one.
+                    session = null
+                    LiveCore.current = null
+                    epoch.advance()
+                    enqueue { if (runtime.shouldRun()) startTunnel(startId, userRequested = false) }
                 }
             }
-            true
         }
     }
 
