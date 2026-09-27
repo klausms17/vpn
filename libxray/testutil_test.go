@@ -167,11 +167,14 @@ func takeTraffic(t *testing.T, ctrl *Controller) traffic {
 	inst := ctrl.cur.inst
 	ctrl.mu.Unlock()
 	sm := inst.GetFeature(stats.ManagerType()).(stats.Manager)
+	// Xray registers the counters when it creates the outbounds, so a
+	// missing one means the config lacks withStats, not an idle outbound.
 	take := func(tag, dir string) int64 {
-		if c := sm.GetCounter("outbound>>>" + tag + ">>>traffic>>>" + dir); c != nil {
-			return c.Set(0)
+		c := sm.GetCounter("outbound>>>" + tag + ">>>traffic>>>" + dir)
+		if c == nil {
+			t.Fatalf("no %s counter for %q: start the core with a config from withStats", dir, tag)
 		}
-		return 0
+		return c.Set(0)
 	}
 	return traffic{take(ProxyTag, "uplink"), take(ProxyTag, "downlink"), take(DirectTag, "uplink"), take(DirectTag, "downlink")}
 }
