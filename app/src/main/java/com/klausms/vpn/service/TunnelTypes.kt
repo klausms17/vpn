@@ -39,8 +39,8 @@ internal data class NetState(val hasNetwork: Boolean, val captive: Boolean, val 
  * The tunnel that runs: [core] runs [config] for [profile], connected (or
  * last reset in place) at [connectedAt], elapsed time. [lockdownConflict]:
  * "Block connections without VPN" leaves the apps kept outside this tunnel
- * without network. Immutable; the service holds the current one, and none
- * while no core runs.
+ * without network. Immutable; [TunnelEngine] holds the current one, and
+ * none while no core runs.
  */
 internal data class TunnelSession(
     val profile: StoredProfile,
@@ -54,13 +54,14 @@ internal data class TunnelSession(
 }
 
 /**
- * One start of the tunnel. [startId]: the command it answers, whose
- * service stops if the start fails for good. [userRequested]: the user
- * asked just now (the app, the tile, the widget, a reconnect); only such a
- * start may take the VPN over from another app, and it is not retried.
- * [picked]: the user has just chosen the server by hand. [switch]: an
- * automatic move to another server instead of the selected one.
- * [attempt]: 0 for the first try, then the retry's number.
+ * One start of the tunnel. [startId]: the command it answers; a start
+ * that fails for good stops the service unless a newer command arrived.
+ * [userRequested]: the user asked just now (the app, the tile, the widget,
+ * a reconnect); only such a start may take the VPN over from another app,
+ * and a first start the user asked for is not retried (see
+ * [StartFailurePolicy]). [picked]: the user has just chosen the server by
+ * hand. [switch]: an automatic move to another server instead of the
+ * selected one. [attempt]: 0 for the first try, then the retry's number.
  */
 internal data class StartRequest(
     val startId: Int,
