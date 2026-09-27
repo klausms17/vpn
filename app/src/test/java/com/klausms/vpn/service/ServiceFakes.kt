@@ -70,17 +70,22 @@ internal class FakeProfiles(var state: ProfilesState = ProfilesState()) : Profil
         transform(state).also { state = it }
 }
 
-/** A [NoticeSink] that records: [shown] every notice put up, in order, and what was cleared. */
+/** A [NoticeSink] that records every notice put up, in order, and what was cleared. */
 internal class FakeNotices : NoticeSink {
+    data class Shown(val notice: String?, val replacing: Set<String?>?)
+
     override var base: String? = null
-    val shown = mutableListOf<String?>()
+    val calls = mutableListOf<Shown>()
     var failuresCleared = 0
 
     /** The minAgeMs of every [clearSwitch], in order. */
     val switchClears = mutableListOf<Long>()
 
+    /** The notices put up, in order. */
+    val shown: List<String?> get() = calls.map { it.notice }
+
     override suspend fun show(notice: String?, e: Long, replacing: Set<String?>?) {
-        shown += notice
+        calls += Shown(notice, replacing)
     }
 
     override suspend fun clearFailure(e: Long) {

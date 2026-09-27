@@ -4,23 +4,16 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.IBinder
 import androidx.core.app.ServiceCompat
-import com.klausms.vpn.core.CoreHandle
 import com.klausms.vpn.core.XrayCoreHandle
 import com.klausms.vpn.core.XrayDirectNet
 import com.klausms.vpn.data.DiskProfiles
-import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.util.AndroidClock
 import com.klausms.vpn.util.AppLog
-import com.klausms.vpn.util.Clock
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -55,51 +48,11 @@ class XrayVpnService : VpnService() {
 
         /** On CONNECT and RECONNECT: the user has just chosen the server by hand. */
         const val EXTRA_PICKED = "picked"
-
-        private const val NETWORK_SETTLE_MS = 1_500L
-        private const val MIN_UPTIME_FOR_RESET_MS = 3_000L
-
-        /** Unlocking the phone checks at most this often. */
-        private const val UNLOCK_CHECK_MS = 10 * 60_000L
-
-        /** Opening the app checks at most this often. */
-        private const val APP_CHECK_MS = 2 * 60_000L
-
-        /** While the screen is on, a check runs when none ran for this long. */
-        private const val SCREEN_CHECK_MS = 5 * 60_000L
-
-        /** Android's view of the network changing checks at most this often. */
-        private const val LINK_CHECK_MS = 60_000L
-
-        /** A server that answers again after a failed check gets its core restarted at most this often. */
-        private const val CORE_RESTART_GAP_MS = 10 * 60_000L
-
-        /** The "switched to another server" notice goes after a check this long after the switch. */
-        private const val SWITCH_NOTICE_MS = 10 * 60_000L
-
-        /**
-         * The download check: some operators freeze connections to foreign
-         * servers after the first ~16 KB, which a 204 answer never reaches.
-         * 64 KB, not compressed; a stall counts, a refusal does not.
-         * Run on connect, and otherwise at most this often per network (a
-         * new network gets one at its first check).
-         */
-        private const val BULK_URL = "https://speed.cloudflare.com/__down?bytes=65536"
-        private const val BULK_HEADERS = """{"Accept-Encoding":"identity"}"""
-        private const val BULK_TIMEOUT_MS = 12_000
-        private const val BULK_CHECK_MS = 30 * 60_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    private val clock: Clock = AndroidClock
-
     private lateinit var runtime: RuntimeStore
-
-    /** The core's log. */
-    private lateinit var coreLog: File
-
-    private lateinit var netInfo: NetworkInfo
 
     private lateinit var publisher: StatusPublisher
 
@@ -109,11 +62,9 @@ class XrayVpnService : VpnService() {
 
     private lateinit var memory: FailureMemory
 
-    private lateinit var refresher: SubscriptionRefresher
-
-    private lateinit var failover: FailoverSearch
-
     private lateinit var switcher: ServerSwitcher
+
+    private lateinit var health: HealthMonitor
 
     // The newest command's startId. A job only stops the service if no newer
     // command arrived meanwhile, so a quick "off, on" never loses the "on".
@@ -124,54 +75,20 @@ class XrayVpnService : VpnService() {
     @Volatile
     private var lastReconnectId = 0
 
-    // ------------------------------------------------------ failover state
-
-    // The tunnel's generation, and the one traffic check running.
-    private val epoch = Epoch()
-
-    // elapsedRealtime of the last check started, and of the last one that got through.
-    @Volatile
-    private var lastVerifyAt = 0L
-
-    @Volatile
-    private var lastVerifiedOkAt = 0L
-
-    // Per network: when a download check there last showed no stall
-    // (elapsedRealtime). Per network, so a phone going back and forth between
-    // Wi-Fi and mobile data does not download on every change: mobile data
-    // keeps its network across Wi-Fi gaps. Guarded by itself.
-    private val bulkFine = HashMap<NetId?, Long>()
-
-    // elapsedRealtime of the last check started because Android's view of the network changed.
-    @Volatile
-    private var lastLinkCheckAt = 0L
-
-    // elapsedRealtime of the last core restart for a server that answered again.
-    @Volatile
-    private var lastCoreRestartAt = 0L
-
     // A reconnect asked for with EXTRA_PICKED; merged reconnects keep it.
     private val pickPending = AtomicBoolean()
 
     // What the watcher hears, on the main thread.
     private val networkEvents = object : NetworkWatcher.Listener {
-        override fun onNetworkChanged(net: NetId?, previous: NetId?) = onUnderlyingNetworkChanged(net, previous)
+        override fun onNetworkChanged(net: NetId?, previous: NetId?) = health.onNetworkChanged(net, previous)
 
-        override fun onReachability(lost: Boolean) = onReachabilityChanged(lost)
+        override fun onReachability(lost: Boolean) = health.onReachability(lost)
 
         override fun onPrivateDns(host: String?) = publisher.onPrivateDnsChanged(host)
 
-        // Unlocking is when the phone is about to be used: a cheap moment to
-        // find out that the server stopped answering while it was locked.
-        // While the screen stays on, a server blocked mid-session is found
-        // by the checks every few minutes.
-        override fun onUnlock() {
-            if (clock.elapsed() - lastVerifyAt >= UNLOCK_CHECK_MS) scheduleVerify(Reason.UNLOCK)
-        }
+        override fun onUnlock() = health.onUnlock()
 
-        override fun onScreenTick() {
-            if (clock.elapsed() - lastVerifyAt >= SCREEN_CHECK_MS) scheduleVerify(Reason.SCREEN)
-        }
+        override fun onScreenTick() = health.onScreenTick()
     }
 
     // What the engine reports, on its worker.
@@ -184,18 +101,17 @@ class XrayVpnService : VpnService() {
             switcher.afterStart(profile.id, req)
             publisher.connected(profile, req.switch?.notice, before, restarting)
             publisher.publishConnected()
-            scheduleVerify(Reason.START)
+            health.schedule(Reason.START)
         }
 
-        override fun onReset() = scheduleVerify(Reason.NETWORK)
+        override fun onReset() = health.schedule(Reason.NETWORK)
     }
 
     private val binder = object : IVpnController.Stub() {
         override fun registerCallback(callback: IVpnCallback?) {
             callback ?: return
             publisher.register(callback)
-            // The app came on screen: show the truth about the connection.
-            if (clock.elapsed() - lastVerifyAt >= APP_CHECK_MS) scheduleVerify(Reason.APP)
+            health.onAppShown()
             // Should run, but nothing started it: after an update on phones
             // that hold the update broadcast back (MIUI). With the app on
             // screen it may start now; a start already on its way makes
@@ -213,14 +129,16 @@ class XrayVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
+        val clock = AndroidClock
+        val epoch = Epoch()
         runtime = PrefsRuntimeStore(this)
-        coreLog = XrayLog.file(this)
-        val direct = XrayDirectNet(this)
         val profiles = DiskProfiles(this)
-        netInfo = SystemNetworkInfo(this)
+        val coreLog = XrayLog.file(this)
+        val direct = XrayDirectNet(this)
+        val netInfo = SystemNetworkInfo(this)
         publisher = StatusPublisher(this, scope, epoch, clock) { engine.session?.lockdownConflict == true }
         watcher = NetworkWatcher(
-            this, scope, SCREEN_CHECK_MS,
+            this, scope, HealthMonitor.SCREEN_CHECK_MS,
             setUnderlying = { network -> setUnderlyingNetworks(network?.let { arrayOf(it) }) },
             listener = networkEvents,
         )
@@ -233,7 +151,7 @@ class XrayVpnService : VpnService() {
         )
         memory = FailureMemory(clock)
         val mobileWhitelist = WhitelistLookup(scope, Dispatchers.IO, direct)
-        refresher = SubscriptionRefresher(
+        val refresher = SubscriptionRefresher(
             scope, Dispatchers.IO, clock, UpdaterSubscriptionSource(this, profiles),
             session = { engine.session },
             profilesChanged = publisher::profilesChanged,
@@ -245,11 +163,21 @@ class XrayVpnService : VpnService() {
             direct = direct,
             core = { engine.session?.core },
         )
-        failover = FailoverSearch(clock, epoch, netInfo, runtime, profiles, publisher, direct, mobileWhitelist, memory, refresher, reports)
+        val failover = FailoverSearch(clock, epoch, netInfo, runtime, profiles, publisher, direct, mobileWhitelist, memory, refresher, reports)
         switcher = ServerSwitcher(
             engine, profiles, runtime, memory, failover, reports, publisher, clock, epoch,
             status = { VpnStatusHolder.status.value },
             profilesChanged = publisher::profilesChanged,
+        )
+        health = HealthMonitor(
+            scope, Dispatchers.IO, clock, epoch, engine,
+            status = { VpnStatusHolder.status.value },
+            netInfo = netInfo,
+            notices = publisher,
+            failover = failover,
+            switcher = switcher,
+            refresher = refresher,
+            coreLog = coreLog,
         )
         Notifications.ensureChannels(this)
     }
@@ -330,8 +258,7 @@ class XrayVpnService : VpnService() {
                     when {
                         engine.session != null -> {
                             publisher.publishConnected()
-                            // "Connect" while connected: maybe it does not work.
-                            if (clock.elapsed() - lastVerifiedOkAt >= APP_CHECK_MS) scheduleVerify(Reason.APP)
+                            health.onConnectWhileUp()
                         }
                         // Turned off after the resume was sent.
                         resume && !runtime.shouldRun() -> withContext(Dispatchers.Main) { stopIfLatest(startId) }
@@ -384,178 +311,5 @@ class XrayVpnService : VpnService() {
         watcher.stop()
         publisher.clearBase()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-    }
-
-    // --------------------------------------------------------- network change
-
-    /**
-     * Android no longer sees internet on the same network ([lost]: often the
-     * first sign of a blocked server or of a mobile whitelist switched on),
-     * or it came back (a Wi-Fi login, the end of a pause): check again, at
-     * most once a minute. Coming back only matters when the last check failed.
-     */
-    private fun onReachabilityChanged(lost: Boolean) {
-        if (!lost && lastVerifiedOkAt >= lastVerifyAt) return
-        val now = clock.elapsed()
-        if (now - lastLinkCheckAt < LINK_CHECK_MS) return
-        lastLinkCheckAt = now
-        scheduleVerify(Reason.LINK, NETWORK_SETTLE_MS)
-    }
-
-    private fun onUnderlyingNetworkChanged(network: NetId?, previous: NetId?) {
-        // Whatever a check in progress measured belongs to the old network.
-        epoch.advance()
-        val e = epoch.current
-        if (network == null) {
-            // Nothing to search with: do not claim to be searching.
-            scope.launch { publisher.show(publisher.base, e, replacing = setOf(Failover.NOTICE_SEARCHING)) }
-            return
-        }
-        // Another network: why the server was switched no longer applies.
-        if (network != previous) publisher.clearSwitch(e, minAgeMs = 0)
-        // No reset for the first network since the tunnel came up (Always-on
-        // at boot), the same one back after a gap or right after connecting:
-        // still worth a check.
-        val running = engine.session
-        val reset = previous != null && network != previous && running != null &&
-            clock.elapsed() - running.connectedAt >= MIN_UPTIME_FOR_RESET_MS
-        if (!reset) {
-            scheduleVerify(Reason.NETWORK, NETWORK_SETTLE_MS)
-            return
-        }
-        // Connections opened over the old network are dead but would hang
-        // until timeouts. Restarting the core resets them at once, so apps
-        // (messengers, video) reconnect immediately over the new network.
-        engine.resetInPlace("network changed, resetting connections", NETWORK_SETTLE_MS)
-    }
-
-    // --------------------------------------------------------------- failover
-
-    /**
-     * Checks in the background that traffic gets through the tunnel, and
-     * looks for another server if not. Never inside [TunnelEngine.submit]:
-     * it takes seconds, and "off" must not wait for it. One at a time;
-     * [delayMs] lets a new network settle.
-     */
-    private fun scheduleVerify(reason: Reason, delayMs: Long = 0) {
-        if (engine.session == null) return
-        epoch.startCheck { e ->
-            scope.launch(Dispatchers.IO) {
-                try {
-                    if (delayMs > 0) delay(delayMs)
-                    verify(e, reason)
-                } catch (ex: Exception) {
-                    // Anything uncaught here would take the tunnel process down.
-                    if (ex is CancellationException) throw ex
-                    AppLog.w("connection check failed", ex)
-                }
-            }
-        }
-    }
-
-    private suspend fun verify(e: Long, reason: Reason) {
-        // The log grows for as long as the tunnel runs; checks come often enough to keep it small.
-        XrayLog.trim(coreLog)
-        val current = engine.session ?: return
-        val c = current.core
-        val running = current.profile
-        if (!epoch.isCurrent(e) || VpnStatusHolder.status.value.state != VpnState.CONNECTED) return
-        lastVerifyAt = clock.elapsed()
-        val ok = TrafficCheck.passes(c, TrafficCheck.VERIFY_TIMEOUT_MS, TrafficCheck.CONFIRM_TIMEOUT_MS)
-        if (!epoch.isCurrent(e)) return
-        if (!ok) {
-            AppLog.w("no traffic through the server (${reason.name.lowercase()})")
-            search(e, c, running, stalled = false)
-            return
-        }
-        // It answers, but some operators freeze a foreign server's
-        // connections after the first ~16 KB: pages and video then hang
-        // while short answers still get through.
-        val network = netInfo.active()
-        if (bulkDue(reason, network) && stalls(c, network)) {
-            if (!epoch.isCurrent(e)) return
-            AppLog.w("downloads through the server stall (${reason.name.lowercase()})")
-            search(e, c, running, stalled = true)
-            return
-        }
-        if (!epoch.isCurrent(e)) return
-        lastVerifiedOkAt = clock.elapsed()
-        publisher.clearFailure(e)
-        publisher.clearSwitch(e, minAgeMs = SWITCH_NOTICE_MS)
-        refresher.payOwed(c) { switcher.restartOnSaved(running) }
-        // Moments when connections start over anyway.
-        if (reason == Reason.NETWORK || reason == Reason.UNLOCK) switcher.returnHomeIfItAnswers(e, c, running)
-    }
-
-    /**
-     * Whether the download check is due: on connect, otherwise when none
-     * showed downloads working on [network] in the last half hour (a new
-     * network, or a stall seen before).
-     */
-    private fun bulkDue(reason: Reason, network: NetId?): Boolean {
-        if (reason == Reason.START) return true
-        val now = clock.elapsed()
-        return synchronized(bulkFine) {
-            bulkFine.entries.removeIf { now - it.value >= BULK_CHECK_MS || it.value > now }
-            network !in bulkFine
-        }
-    }
-
-    /**
-     * Whether downloads through [c] stop partway: twice in a row, a 64 KB
-     * file stops coming after it began. Any other failure (the site refuses
-     * or cannot be reached from the server) proves nothing and counts as
-     * fine. No app name is sent. Blocking.
-     */
-    private fun stalls(c: CoreHandle, network: NetId?): Boolean {
-        repeat(2) {
-            val stalled = try {
-                c.fetchThroughTunnel(BULK_URL, "", BULK_HEADERS, BULK_TIMEOUT_MS)
-                false
-            } catch (ex: Exception) {
-                Failover.isStall(ex.message)
-            }
-            if (!stalled) {
-                // Also after a refusal: trying again at every check would
-                // only cost time and data.
-                synchronized(bulkFine) { bulkFine[network] = clock.elapsed() }
-                return false
-            }
-        }
-        synchronized(bulkFine) { bulkFine.remove(network) }
-        return true
-    }
-
-    /** Looks for a server to replace [failed] (see [FailoverSearch]) and does what the search came to. */
-    private suspend fun search(e: Long, c: CoreHandle, failed: StoredProfile, stalled: Boolean) {
-        when (val outcome = failover.search(e, c, failed, stalled) { recoveredInPlace(e, c) }) {
-            SearchOutcome.Done -> Unit
-            is SearchOutcome.SwitchTo -> engine.submit { switcher.switchTo(e, failed, outcome.winnerId, report = outcome.report) }
-            SearchOutcome.RestartOnSaved -> switcher.restartOnSaved(failed)
-        }
-    }
-
-    /**
-     * The failed server answered in a new connection. If it now answers
-     * through the running core too, the connection was lost for a moment:
-     * stay. If not, the running core is stuck: restart it on the same
-     * server, at most every 10 minutes. False: treat it as a real failure.
-     * Google first, as the probe that answered, then Cloudflare.
-     */
-    private suspend fun recoveredInPlace(e: Long, c: CoreHandle): Boolean {
-        if (TrafficCheck.passes(c, TrafficCheck.CONFIRM_TIMEOUT_MS, TrafficCheck.CONFIRM_TIMEOUT_MS)) {
-            if (!epoch.isCurrent(e)) return true
-            AppLog.i("the server answers again: the connection was lost for a moment")
-            lastVerifiedOkAt = clock.elapsed()
-            publisher.clearFailure(e)
-            return true
-        }
-        val now = clock.elapsed()
-        if (now - lastCoreRestartAt < CORE_RESTART_GAP_MS) return false
-        // Not queued: the tunnel changed meanwhile, and the gap stays for a real stuck core.
-        if (engine.resetInPlace("the server answers, but not through the running core: restarting it", expectedEpoch = e)) {
-            lastCoreRestartAt = now
-        }
-        return true
     }
 }

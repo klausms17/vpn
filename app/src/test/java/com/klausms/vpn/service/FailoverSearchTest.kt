@@ -80,7 +80,7 @@ class FailoverSearchTest {
         assertEquals(1, w.core.probed.size)
 
         // Moments later on the same network: the same notice, no probe.
-        w.notices.shown.clear()
+        w.notices.calls.clear()
         assertEquals(SearchOutcome.Done, w.searchFromA())
         assertEquals(listOf(NOTICE_ALL_BLOCKED), w.notices.shown)
         assertEquals(1, w.core.probed.size)

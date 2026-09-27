@@ -8,11 +8,12 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import java.io.File
 
 /**
  * The failover logic wired as the service wires it, over fakes and on the
- * virtual time of [scope]. Tests set the fakes, then drive [search] or
- * [switcher]. [profiles] starts with [SERVER_A] (selected and running,
+ * virtual time of [scope]. Tests set the fakes, then drive [search],
+ * [switcher] or [health]. [profiles] starts with [SERVER_A] (selected and running,
  * connected), [SERVER_B] of the same subscription and the own key
  * [SERVER_C]; the subscription was downloaded just now, so it is not
  * downloaded again.
@@ -42,6 +43,20 @@ internal class FailoverWorld(scope: TestScope) {
         tunnel, profiles, runtime, memory, search, reports, notices, clock, epoch,
         status = { status },
         profilesChanged = { reloads++ },
+    )
+
+    // Never written: a check trims the core's log only when it is too long.
+    private val coreLog = File(System.getProperty("java.io.tmpdir"), "klaus-vpn-test-no-log/xray.log")
+
+    val health = HealthMonitor(
+        scope, io, clock, epoch, tunnel,
+        status = { status },
+        netInfo = net,
+        notices = notices,
+        failover = search,
+        switcher = switcher,
+        refresher = refresher,
+        coreLog = coreLog,
     )
 
     init {
