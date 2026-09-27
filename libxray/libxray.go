@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -504,7 +503,8 @@ func timeoutDuration(ms int32) time.Duration {
 func ReleaseMemory() { releaseMemory() }
 
 func releaseMemory() {
-	runtime.GC()
+	// A full collection is part of FreeOSMemory; a runtime.GC() before it
+	// would only run a second one.
 	debug.FreeOSMemory()
 }
 
