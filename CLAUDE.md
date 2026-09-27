@@ -149,7 +149,8 @@ and give step-by-step instructions for anything he must do himself.
 4. The owner installs the panel (`docs/README.ru.md`, section 12): VPS and
    domain, `install-panel.sh`, `klaus-panel telegram-setup`, nodes. Running
    the installers again later applies `connIdle` 1800 and the new
-   whitelist-note texts.
+   whitelist-note texts. The panel publishes only `KirovVPN-*.apk` from the
+   `stable` release, so it needs a stable build first.
 5. The owner once pasted a Telegram bot token into a chat. Make sure he
    revoked it (@BotFather → /revoke) and entered the new one only on the
    panel.
