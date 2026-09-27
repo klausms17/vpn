@@ -254,16 +254,7 @@ class XrayVpnService : VpnService() {
     // A reconnect asked for with EXTRA_PICKED; merged reconnects keep it.
     private val pickPending = AtomicBoolean()
 
-    // The "switched to another server" notice on screen, and since when (elapsedRealtime).
-    @Volatile
-    private var switchNotice: String? = null
-
-    @Volatile
-    private var switchNoticeAt = 0L
-
-    // A hint shown whenever no other notice is (strict Private DNS).
-    @Volatile
-    private var baseNotice: String? = null
+    private val notices = NoticeBoard()
 
     @Volatile
     private var refreshJob: Deferred<Refreshed>? = null
@@ -556,9 +547,8 @@ class XrayVpnService : VpnService() {
             // The session timer goes on when only the settings changed.
             val since = before.connectedSince.takeIf { restarting && it > 0 && before.profileId == profile.id }
                 ?: clock.wall()
-            switchNotice = notice
-            switchNoticeAt = clock.elapsed()
-            setStatus(VpnStatus(VpnState.CONNECTED, profile.id, profile.name, message = notice ?: baseNotice, connectedSince = since))
+            notices.switched(notice, clock.elapsed())
+            setStatus(VpnStatus(VpnState.CONNECTED, profile.id, profile.name, message = notice ?: notices.base, connectedSince = since))
             Notifications.clearError(this)
             AppLog.i("tunnel up: ${profile.protocol}/${profile.network}/${profile.security}; ${PhoneSettings.vpnSummary(this)}")
             publishConnected()
@@ -763,7 +753,7 @@ class XrayVpnService : VpnService() {
         networkMonitor?.stop()
         networkMonitor = null
         lastNetwork = null
-        baseNotice = null
+        notices.base = null
         unregisterScreen()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
     }
@@ -856,10 +846,10 @@ class XrayVpnService : VpnService() {
      */
     private fun onPrivateDnsChanged(host: String?) {
         val hint = if (host.isNullOrBlank()) null else Failover.NOTICE_PRIVATE_DNS
-        val old = baseNotice
+        val old = notices.base
         if (hint == old) return
         if (hint != null) AppLog.w("strict private DNS is on: lookups bypass the tunnel's DNS rules")
-        baseNotice = hint
+        notices.base = hint
         val e = epoch.current
         scope.launch { setNotice(hint, e, replacing = setOf(null, old)) }
     }
@@ -875,7 +865,7 @@ class XrayVpnService : VpnService() {
         val e = epoch.current
         if (network == null) {
             // Nothing to search with: do not claim to be searching.
-            scope.launch { setNotice(baseNotice, e, replacing = setOf(Failover.NOTICE_SEARCHING)) }
+            scope.launch { setNotice(notices.base, e, replacing = setOf(Failover.NOTICE_SEARCHING)) }
             return
         }
         // Another network: why the server was switched no longer applies.
@@ -1513,11 +1503,8 @@ class XrayVpnService : VpnService() {
             withContext(Dispatchers.Main) {
                 if (!epoch.isCurrent(e)) return@withContext
                 val s = VpnStatusHolder.status.value
-                val current = s.message
-                if (s.state != VpnState.CONNECTED || current == notice) return@withContext
-                if (replacing != null && current !in replacing) return@withContext
-                val next = s.copy(message = notice)
-                if (!VpnStatusHolder.compareAndSet(s, next)) return@withContext
+                if (s.state != VpnState.CONNECTED || !NoticeBoard.shouldReplace(s.message, notice, replacing)) return@withContext
+                if (!VpnStatusHolder.compareAndSet(s, s.copy(message = notice))) return@withContext
                 publishStatus()
                 publishConnected()
             }
@@ -1528,21 +1515,15 @@ class XrayVpnService : VpnService() {
     }
 
     /** Traffic gets through (again): "not answering" is no longer true. A switch notice stays. */
-    private suspend fun clearFailureNotice(e: Long) = setNotice(baseNotice, e, replacing = Failover.FAILURE_NOTICES)
+    private suspend fun clearFailureNotice(e: Long) = setNotice(notices.base, e, replacing = Failover.FAILURE_NOTICES)
 
     /**
      * Takes the "switched to another server" notice away once it is
      * [minAgeMs] old; otherwise it would stay for as long as the tunnel runs.
      */
     private fun clearSwitchNotice(e: Long, minAgeMs: Long) {
-        val notice = switchNotice ?: return
-        // Already replaced by another notice: it never comes back.
-        if (VpnStatusHolder.status.value.message != notice) {
-            switchNotice = null
-            return
-        }
-        if (clock.elapsed() - switchNoticeAt < minAgeMs) return
-        scope.launch { setNotice(baseNotice, e, replacing = setOf(notice)) }
+        val notice = notices.switchNoticeToClear(VpnStatusHolder.status.value.message, clock.elapsed(), minAgeMs) ?: return
+        scope.launch { setNotice(notices.base, e, replacing = setOf(notice)) }
     }
 
     // ---------------------------------------------------------------- status
