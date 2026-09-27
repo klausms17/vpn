@@ -2,6 +2,7 @@ package com.klausms.vpn.ui.screens
 
 import android.content.Context
 import android.content.Intent
+import android.util.LruCache
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -36,6 +37,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.lifecycle.Lifecycle
@@ -53,9 +55,22 @@ import com.klausms.vpn.ui.components.navBarClearance
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.withContext
 
 private data class AppEntry(val pkg: String, val label: String)
+
+/**
+ * A few icons at a time: a fast fling over hundreds of apps must not start
+ * dozens of decodes at once on a small phone.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+private val iconLoader = Dispatchers.IO.limitedParallelism(4)
+
+/** Decoded icons, capped by size (a phone can have hundreds of apps). */
+private class IconCache : LruCache<String, ImageBitmap>(8 * 1024 * 1024) {
+    override fun sizeOf(key: String, value: ImageBitmap) = value.width * value.height * 4
+}
 
 private fun loadApps(context: Context): List<AppEntry> {
     val pm = context.packageManager
@@ -77,7 +92,7 @@ fun AppsScreen(vm: MainViewModel, includeMode: Boolean, onBack: () -> Unit) {
     val apps by produceState<List<AppEntry>?>(null) { value = withContext(Dispatchers.IO) { loadApps(context) } }
     var query by rememberSaveable { mutableStateOf("") }
     val selected = if (includeMode) settings.includedApps else settings.excludedApps
-    val icons = remember { HashMap<String, ImageBitmap>() }
+    val icons = remember { IconCache() }
 
     // The tunnel takes the new list once, when this screen closes or the
     // app goes to the background (e.g. Home, to open the app just excluded).
@@ -136,8 +151,12 @@ fun AppsScreen(vm: MainViewModel, includeMode: Boolean, onBack: () -> Unit) {
             }
             item {
                 SectionFooter(
-                    if (includeMode) "Через VPN пойдут только отмеченные приложения. Остальные — напрямую."
-                    else "Отмеченные приложения работают без VPN и не видят его. Российские банки и Госуслуги уже работают без VPN, если включён этот режим в настройках.",
+                    if (includeMode) {
+                        "Через VPN пойдут только отмеченные приложения. Остальные — напрямую."
+                    } else {
+                        "Отмеченные приложения работают без VPN и не видят его. Российские банки и Госуслуги уже работают без VPN, если включён этот режим в настройках.\n\n" +
+                            "Если видеорегистратор, умный дом (Mi Home) или Android Auto не подключается к своей Wi-Fi-сети, отметьте здесь его приложение."
+                    },
                 )
             }
             item { Spacer(Modifier.height(12.dp)) }
@@ -171,16 +190,19 @@ fun AppsScreen(vm: MainViewModel, includeMode: Boolean, onBack: () -> Unit) {
 }
 
 @Composable
-private fun AppIcon(context: Context, pkg: String, cache: HashMap<String, ImageBitmap>) {
-    val bitmap by produceState(cache[pkg], pkg) {
+private fun AppIcon(context: Context, pkg: String, cache: IconCache) {
+    // Decoded at the size it is drawn at, not larger.
+    val px = with(LocalDensity.current) { 40.dp.roundToPx() }
+    val bitmap by produceState<ImageBitmap?>(cache.get(pkg), pkg) {
         if (value == null) {
-            value = withContext(Dispatchers.IO) {
+            value = withContext(iconLoader) {
                 try {
-                    context.packageManager.getApplicationIcon(pkg).toBitmap(96, 96).asImageBitmap()
+                    // Cached here, so a row scrolled away meanwhile does not waste the work.
+                    context.packageManager.getApplicationIcon(pkg).toBitmap(px, px).asImageBitmap().also { cache.put(pkg, it) }
                 } catch (_: Exception) {
                     null
                 }
-            }?.also { cache[pkg] = it }
+            }
         }
     }
     val b = bitmap

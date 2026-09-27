@@ -26,15 +26,13 @@ import com.klausms.vpn.ui.components.NavBar
 import com.klausms.vpn.ui.components.TextAction
 import com.klausms.vpn.ui.theme.kc
 import com.klausms.vpn.util.AppLog
+import com.klausms.vpn.util.PhoneSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-
-private fun tail(file: File, maxLines: Int): List<String> =
-    if (file.exists()) file.readLines().takeLast(maxLines) else emptyList()
 
 private fun readLogs(context: Context): String {
     val dir = AppLog.logDir(context)
@@ -49,11 +47,22 @@ private fun readLogs(context: Context): String {
     val stamp = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.US)
     fun lines(name: String): List<String> {
         val f = File(dir, name)
-        val body = tail(f, 300)
+        // Only the end of each file: the core's log can grow large.
+        val body = AppLog.tail(f, 300)
         if (body.isEmpty() || !name.startsWith("go-crash")) return body
         return listOf("-- $name, записан ${stamp.format(Date(f.lastModified()))}") + body
     }
     return buildString {
+        // The phone and what it allows in the background: most "the VPN
+        // turned itself off" reports come down to these.
+        append("== Телефон ==\n")
+        append(
+            try {
+                PhoneSettings.summary(context)
+            } catch (e: Exception) {
+                "(не удалось прочитать: ${e.javaClass.simpleName})"
+            },
+        ).append("\n\n")
         for ((title, files) in sections) {
             val lines = files.flatMap { lines(it) }.takeLast(300)
             append("== ").append(title).append(" ==\n")

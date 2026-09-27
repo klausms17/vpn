@@ -1,7 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- updatePeriodMillis="0": the widget is never woken up on a timer. The VPN
-     service pushes a new picture when its state changes, and the connection
-     timer is a Chronometer that the launcher ticks itself. -->
+<!-- The VPN service pushes a new picture when its state changes, and the
+     connection timer is a Chronometer that the launcher ticks itself. But a
+     VPN process killed by the system (firmware power managers do it) cannot
+     redraw, and the widget would keep showing "on" over a dead tunnel. So
+     the system also asks for a redraw about every 30 minutes (its minimum,
+     inexact): that starts the VPN process, which draws the real state and
+     lets a pending automatic restart of the tunnel happen at once. The cost
+     is one process start per half hour while the VPN is off. A force-stop
+     is different: Android then starts nothing of the app until it is opened. -->
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/widget_description"
     android:initialLayout="@layout/widget_vpn"
@@ -13,5 +19,5 @@
     android:resizeMode="horizontal|vertical"
     android:targetCellWidth="4"
     android:targetCellHeight="2"
-    android:updatePeriodMillis="0"
+    android:updatePeriodMillis="1800000"
     android:widgetCategory="home_screen" />

@@ -37,6 +37,15 @@ class VpnClient(private val context: Context) {
     private val _status = MutableStateFlow(VpnStatus())
     val status: StateFlow<VpnStatus> = _status.asStateFlow()
 
+    private val _fresh = MutableStateFlow(false)
+
+    /**
+     * [status] is the VPN process's own. False from [unbind] (the app left
+     * the screen: the tunnel may have changed since) until the process says
+     * its state again after [bind], which takes a moment.
+     */
+    val fresh: StateFlow<Boolean> = _fresh.asStateFlow()
+
     private val _traffic = MutableStateFlow(TrafficStats())
     val traffic: StateFlow<TrafficStats> = _traffic.asStateFlow()
 
@@ -55,6 +64,7 @@ class VpnClient(private val context: Context) {
         override fun onStatus(state: Int, profileId: String?, profileName: String?, message: String?, connectedSince: Long) {
             val s = VpnState.of(state)
             _status.value = VpnStatus(s, profileId, profileName, message, connectedSince)
+            _fresh.value = true
             if (s != VpnState.CONNECTED) _traffic.value = TrafficStats()
         }
 
@@ -82,7 +92,9 @@ class VpnClient(private val context: Context) {
             // The VPN process died; Android tears the tunnel down with it.
             AppLog.w("vpn process died")
             controller = null
+            // Known, not guessed: no process, no tunnel.
             _status.value = VpnStatus()
+            _fresh.value = true
             _traffic.value = TrafficStats()
             // Android restarts a crashed service only after a pause (up to
             // half an hour after repeated crashes); binding anew brings it
@@ -112,6 +124,8 @@ class VpnClient(private val context: Context) {
             connection,
             Context.BIND_AUTO_CREATE,
         )
+        // No answer is coming: what is shown is the best there is.
+        if (!bound) _fresh.value = true
     }
 
     fun unbind() {
@@ -126,6 +140,7 @@ class VpnClient(private val context: Context) {
         }
         controller = null
         bound = false
+        _fresh.value = false
     }
 
     /** Latency through the running tunnel in ms, or -1. */

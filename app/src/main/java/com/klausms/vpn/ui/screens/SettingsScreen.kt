@@ -1,8 +1,6 @@
 package com.klausms.vpn.ui.screens
 
-import android.content.Context
 import android.content.Intent
-import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
@@ -21,7 +19,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.core.net.toUri
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.klausms.vpn.BuildConfig
@@ -39,7 +36,7 @@ import com.klausms.vpn.ui.components.NavBar
 import com.klausms.vpn.ui.components.navBarClearance
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
-import com.klausms.vpn.util.AppLog
+import com.klausms.vpn.util.PhoneSettings
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -49,6 +46,8 @@ private val TileIndigo = Color(0xFF5E5CE6)
 private val TileGreen = Color(0xFF30D158)
 private val TileOrange = Color(0xFFFF9F0A)
 private val TileGray = Color(0xFF636366)
+private val TileRed = Color(0xFFFF453A)
+private val TileTeal = Color(0xFF40C8E0)
 
 /**
  * Settings in iOS style. Only what a person can understand and may want to
@@ -59,6 +58,7 @@ private val TileGray = Color(0xFF636366)
 fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit, onNavigate: (String) -> Unit) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val geoVersion by vm.geoVersion.collectAsStateWithLifecycle()
+    val geoUpdating by vm.geoUpdating.collectAsStateWithLifecycle()
     SettingsContent(
         settings = settings,
         geoVersion = geoVersion,
@@ -66,6 +66,7 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit, onNavigate: (String) -
         onUpdateGeo = { vm.updateGeo() },
         onBack = onBack,
         onNavigate = onNavigate,
+        geoUpdating = geoUpdating,
     )
 }
 
@@ -77,12 +78,21 @@ fun SettingsContent(
     onUpdateGeo: () -> Unit,
     onBack: () -> Unit,
     onNavigate: (String) -> Unit,
+    /** «Обновить списки» is running: not offered again until it ends. */
+    geoUpdating: Boolean = false,
 ) {
     val context = LocalContext.current
     var confirmGeo by remember { mutableStateOf(false) }
-    var batteryUnrestricted by remember { mutableStateOf(isIgnoringBatteryOptimizations(context)) }
+    // What the phone allows in the background; read again on return from
+    // the system screens these rows open.
+    var batteryUnrestricted by remember { mutableStateOf(PhoneSettings.batteryUnrestricted(context)) }
+    var backgroundRestricted by remember { mutableStateOf(PhoneSettings.backgroundRestricted(context)) }
+    var notificationsOn by remember { mutableStateOf(PhoneSettings.notificationsEnabled(context)) }
+    val oem = remember { PhoneSettings.oem() }
     LifecycleResumeEffect(Unit) {
-        batteryUnrestricted = isIgnoringBatteryOptimizations(context)
+        batteryUnrestricted = PhoneSettings.batteryUnrestricted(context)
+        backgroundRestricted = PhoneSettings.backgroundRestricted(context)
+        notificationsOn = PhoneSettings.notificationsEnabled(context)
         onPauseOrDispose { }
     }
 
@@ -124,23 +134,55 @@ fun SettingsContent(
                         title = "Постоянный VPN",
                         chevron = true,
                         leading = { IconTile(R.drawable.ic_power_ios, TileGreen) },
-                        onClick = { openSystem(context, Intent(Settings.ACTION_VPN_SETTINGS)) },
+                        onClick = { PhoneSettings.open(context, Intent(Settings.ACTION_VPN_SETTINGS)) },
                     )
                     RowDivider(start = 57.dp)
                     ListRow(
                         title = "Работа в фоне",
-                        value = if (batteryUnrestricted) "Разрешено" else "Разрешить",
-                        valueColor = if (batteryUnrestricted) kc.secondary else kc.orange,
+                        value = when {
+                            backgroundRestricted -> "Ограничено"
+                            batteryUnrestricted -> "Разрешено"
+                            else -> "Разрешить"
+                        },
+                        valueColor = if (batteryUnrestricted && !backgroundRestricted) kc.secondary else kc.orange,
                         chevron = true,
                         leading = { IconTile(R.drawable.ic_battery_ios, TileOrange) },
-                        onClick = { requestUnrestrictedBattery(context) },
+                        onClick = { PhoneSettings.openBatterySettings(context) },
                     )
+                    // Xiaomi, Huawei and others have a switch of their own
+                    // that Android cannot read: always shown there.
+                    if (oem != null) {
+                        RowDivider(start = 57.dp)
+                        ListRow(
+                            title = "Автозапуск",
+                            subtitle = oem.hint,
+                            chevron = true,
+                            leading = { IconTile(R.drawable.ic_autostart_ios, TileTeal) },
+                            onClick = { PhoneSettings.openAutostart(context, oem) },
+                        )
+                    }
+                    if (!notificationsOn) {
+                        RowDivider(start = 57.dp)
+                        ListRow(
+                            title = "Уведомления",
+                            value = "Выключены",
+                            valueColor = kc.orange,
+                            chevron = true,
+                            leading = { IconTile(R.drawable.ic_bell_ios, TileRed) },
+                            onClick = { PhoneSettings.openNotificationSettings(context) },
+                        )
+                    }
                 }
             }
             item {
                 SectionFooter(
                     buildString {
-                        if (!batteryUnrestricted) append("Разрешите работу в фоне, иначе телефон может выключать VPN. ")
+                        when {
+                            backgroundRestricted -> append("Работа в фоне ограничена: в настройках приложения откройте «Батарея» и выберите «Без ограничений», иначе телефон может выключать VPN. ")
+                            !batteryUnrestricted -> append("Разрешите работу в фоне, иначе телефон может выключать VPN. ")
+                        }
+                        if (oem != null) append("На этом телефоне включите и «Автозапуск», а в списке недавних приложений закрепите Klaus VPN замком. ")
+                        if (!notificationsOn) append("Без уведомлений вы не узнаете, что VPN выключился. ")
                         append("В «Постоянном VPN» включите «Постоянная VPN» — VPN сам запустится после перезагрузки. ")
                         append("«Блокировать соединения без VPN» не включайте: банки и Госуслуги останутся без интернета.")
                     },
@@ -159,9 +201,9 @@ fun SettingsContent(
                     RowDivider(start = 57.dp)
                     ListRow(
                         title = "Обновить списки",
-                        subtitle = listsDate(geoVersion)?.let { "Обновлены $it" },
+                        subtitle = if (geoUpdating) "Обновляются…" else listsDate(geoVersion)?.let { "Обновлены $it" },
                         leading = { IconTile(R.drawable.ic_refresh_ios, TileBlue) },
-                        onClick = { confirmGeo = true },
+                        onClick = if (geoUpdating) null else ({ confirmGeo = true }),
                     )
                 }
             }
@@ -212,27 +254,4 @@ private fun listsDate(epochSeconds: Long): String? {
     val ru = Locale.forLanguageTag("ru")
     val thisYear = SimpleDateFormat("yyyy", ru).format(Date()) == SimpleDateFormat("yyyy", ru).format(date)
     return SimpleDateFormat(if (thisYear) "d MMMM" else "d MMMM yyyy", ru).format(date)
-}
-
-private fun isIgnoringBatteryOptimizations(context: Context): Boolean =
-    context.getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(context.packageName) == true
-
-private fun requestUnrestrictedBattery(context: Context) {
-    if (isIgnoringBatteryOptimizations(context)) {
-        openSystem(context, Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-        return
-    }
-    @Suppress("BatteryLife") // A VPN has to survive in the background; the user decides.
-    val request = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, "package:${context.packageName}".toUri())
-    if (!openSystem(context, request)) {
-        openSystem(context, Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-    }
-}
-
-private fun openSystem(context: Context, intent: Intent): Boolean = try {
-    context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-    true
-} catch (e: Exception) {
-    AppLog.w("cannot open system settings", e)
-    false
 }
