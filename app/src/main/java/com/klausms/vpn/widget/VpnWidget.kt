@@ -178,7 +178,9 @@ object VpnWidget {
         if (live != null) release()
 
         val ms = try {
-            live?.measureDelay(XrayCore.TEST_URL, PING_TIMEOUT_MS)
+            // Through the tunnel: Cloudflare when Google does not answer, as
+            // the service's own check, so a working server never shows "no answer".
+            live?.let { XrayVpnService.measureThrough(it, PING_TIMEOUT_MS) }
                 ?: XrayCore.measureDelay(profile.outbounds, PING_TIMEOUT_MS)
         } catch (e: Exception) {
             AppLog.i("widget ping: ${e.message}")

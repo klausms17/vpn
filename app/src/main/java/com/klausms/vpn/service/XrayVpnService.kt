@@ -1,5 +1,6 @@
 package com.klausms.vpn.service
 
+import android.app.ActivityManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -14,6 +15,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.os.RemoteCallbackList
 import android.os.SystemClock
 import androidx.core.app.ServiceCompat
@@ -31,6 +33,7 @@ import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.RussianApps
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.Stores
+import com.klausms.vpn.data.Subscription
 import com.klausms.vpn.data.SubscriptionUpdater
 import com.klausms.vpn.ui.MainActivity
 import com.klausms.vpn.util.AppLog
@@ -68,11 +71,13 @@ import java.util.concurrent.atomic.AtomicLong
  * - This app is always excluded from the tunnel, so the core's own
  *   connections to the server can never loop back into it.
  * - All start/stop work is serialized on one thread.
- * - Nothing runs periodically unless the app UI is open (traffic counters),
- *   so an idle tunnel costs no extra battery.
- * - Whether traffic really gets through is checked on events only (connect,
- *   network change, unlock, app opened); a server that stopped answering is
- *   replaced by one that answers (see [Failover]).
+ * - Nothing runs periodically while the screen is off, so an idle tunnel
+ *   costs no extra battery.
+ * - Whether traffic really gets through is checked on events (connect,
+ *   network change, Android losing or regaining internet on the network,
+ *   unlock, app opened) and every few minutes while the screen is on; a
+ *   server that stopped answering is replaced by one that answers (see
+ *   [Failover]).
  */
 class XrayVpnService : VpnService() {
 
@@ -82,8 +87,14 @@ class XrayVpnService : VpnService() {
         const val ACTION_RECONNECT = "com.klausms.vpn.RECONNECT"
         const val ACTION_BIND = "com.klausms.vpn.BIND"
 
+        /** Start a tunnel that should run (after an app update): nobody asked just now, so never ask for consent. */
+        const val ACTION_RESUME = "com.klausms.vpn.RESUME"
+
         /** Who asked to disconnect, for the log. */
         const val EXTRA_SOURCE = "source"
+
+        /** On CONNECT and RECONNECT: the user has just chosen the server by hand. */
+        const val EXTRA_PICKED = "picked"
 
         private const val NETWORK_SETTLE_MS = 1_500L
 
@@ -101,19 +112,65 @@ class XrayVpnService : VpnService() {
         /** Opening the app checks at most this often. */
         private const val APP_CHECK_MS = 2 * 60_000L
 
-        /** After a search found nothing, the next one waits this long (unless asked for). */
+        /** While the screen is on, a check runs when none ran for this long. */
+        private const val SCREEN_CHECK_MS = 5 * 60_000L
+
+        /** Android's view of the network changing checks at most this often. */
+        private const val LINK_CHECK_MS = 60_000L
+
+        /** After a search found nothing, the next one on that network waits this long (unless asked for). */
         private const val FRUITLESS_RETRY_MS = 2 * 60_000L
+
+        /** A server that answers again after a failed check gets its core restarted at most this often. */
+        private const val CORE_RESTART_GAP_MS = 10 * 60_000L
+
+        /** The "switched to another server" notice goes after a check this long after the switch. */
+        private const val SWITCH_NOTICE_MS = 10 * 60_000L
 
         private const val REFRESH_TIMEOUT_MS = 10_000
 
+        /**
+         * The download check: some operators freeze connections to foreign
+         * servers after the first ~16 KB, which a 204 answer never reaches.
+         * 64 KB, not compressed; a stall counts, a refusal does not.
+         * Run on connect and a manual check, and otherwise at most this
+         * often per network (a new network gets one at its first check).
+         */
+        private const val BULK_URL = "https://speed.cloudflare.com/__down?bytes=65536"
+        private const val BULK_HEADERS = """{"Accept-Encoding":"identity"}"""
+        private const val BULK_TIMEOUT_MS = 12_000
+        private const val BULK_CHECK_MS = 30 * 60_000L
+
+        /**
+         * A Russian site, opened outside the tunnel: tells "servers blocked"
+         * from "no internet". A small file, not the page: this can run every
+         * few minutes while nothing answers.
+         */
+        private const val DIRECT_URL = "https://ya.ru/robots.txt"
+        private const val DIRECT_TIMEOUT_MS = 5_000
+
         /** Hosts looked up in the mobile whitelist per search, and how long to wait for them. */
-        private const val WHITELIST_HOSTS = 12
+        private const val WHITELIST_HOSTS = 32
         private const val WHITELIST_WAIT_MS = 3_000L
 
         /** The running core, for the widget's ping (same process). */
         @Volatile
         var liveController: Controller? = null
             private set
+
+        /**
+         * Delay through the running core [c] in ms: Google first, then
+         * Cloudflare, since some servers cannot reach Google but carry
+         * everything else. Blocking; throws when neither answers.
+         */
+        fun measureThrough(c: Controller, timeoutMs: Int): Long {
+            val ms = try {
+                c.measureDelay(XrayCore.TEST_URL, timeoutMs)
+            } catch (_: Exception) {
+                -1L
+            }
+            return if (ms >= 0) ms else c.measureDelay(XrayCore.TEST_URL_ALT, CONFIRM_TIMEOUT_MS)
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -182,9 +239,24 @@ class XrayVpnService : VpnService() {
     @Volatile
     private var lastVerifiedOkAt = 0L
 
-    // When a search last probed servers and none answered.
+    // Per network: when a download check there last showed no stall
+    // (elapsedRealtime). Per network, so a phone going back and forth between
+    // Wi-Fi and mobile data does not download on every change: mobile data
+    // keeps its network across Wi-Fi gaps. Guarded by itself.
+    private val bulkFine = HashMap<Network?, Long>()
+
+    // elapsedRealtime of the last check started because Android's view of the network changed.
     @Volatile
-    private var lastFruitlessAt = 0L
+    private var lastLinkCheckAt = 0L
+
+    // elapsedRealtime of the last core restart for a server that answered again.
+    @Volatile
+    private var lastCoreRestartAt = 0L
+
+    // Per network: when a search there last found nothing, and the notice it
+    // showed. Another network may reach servers this one could not, and the
+    // same network back (Wi-Fi flapping) remembers. Guarded by itself.
+    private val fruitless = HashMap<Network?, Pair<Long, String>>()
 
     @Volatile
     private var verifyJob: Job? = null
@@ -198,13 +270,32 @@ class XrayVpnService : VpnService() {
     // candidate for [Failover.RECENTLY_FAILED_MS].
     private val recentlyFailed = ConcurrentHashMap<String, Long>()
 
+    // Host -> on the Russian mobile whitelist. Kept while the process lives:
+    // few hosts, and the answer rarely changes.
+    private val whitelistCache = ConcurrentHashMap<String, Boolean>()
+
     // A server the user chose again right after it had been switched away
     // from: their choice wins, it is not switched away from automatically.
     @Volatile
     private var manualPick: String? = null
 
+    // A reconnect asked for with EXTRA_PICKED; merged reconnects keep it.
     @Volatile
-    private var refreshJob: Deferred<Boolean>? = null
+    private var pickPending = false
+
+    // The "switched to another server" notice on screen, and since when (elapsedRealtime).
+    @Volatile
+    private var switchNotice: String? = null
+
+    @Volatile
+    private var switchNoticeAt = 0L
+
+    // A hint shown whenever no other notice is (strict Private DNS).
+    @Volatile
+    private var baseNotice: String? = null
+
+    @Volatile
+    private var refreshJob: Deferred<Refreshed>? = null
 
     // A subscription whose direct download failed during a search: it is
     // downloaded through the tunnel once a server works again.
@@ -213,15 +304,23 @@ class XrayVpnService : VpnService() {
 
     private val blockReporter by lazy { BlockReporter(this) }
 
-    private var unlockRegistered = false
+    private var screenRegistered = false
+
+    // Checks every few minutes while the screen is on; none while it is off.
+    private var screenJob: Job? = null
 
     // Unlocking is when the phone is about to be used: a cheap moment to
-    // find out that the server stopped answering while it was locked.
-    private val unlockReceiver = object : BroadcastReceiver() {
+    // find out that the server stopped answering while it was locked. While
+    // the screen stays on, a server blocked mid-session is found by the
+    // checks every few minutes.
+    private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action != Intent.ACTION_USER_PRESENT) return
-            if (SystemClock.elapsedRealtime() - lastVerifyAt < UNLOCK_CHECK_MS) return
-            scheduleVerify(Reason.UNLOCK)
+            when (intent.action) {
+                Intent.ACTION_USER_PRESENT ->
+                    if (SystemClock.elapsedRealtime() - lastVerifyAt >= UNLOCK_CHECK_MS) scheduleVerify(Reason.UNLOCK)
+                Intent.ACTION_SCREEN_ON -> startScreenChecks()
+                Intent.ACTION_SCREEN_OFF -> stopScreenChecks()
+            }
         }
     }
 
@@ -234,6 +333,13 @@ class XrayVpnService : VpnService() {
             scope.launch { sendStatus(callback, VpnStatusHolder.status.value) }
             // The app came on screen: show the truth about the connection.
             if (SystemClock.elapsedRealtime() - lastVerifyAt >= APP_CHECK_MS) scheduleVerify(Reason.APP)
+            // Should run, but nothing started it: after an update on phones
+            // that hold the update broadcast back (MIUI). With the app on
+            // screen it may start now; a start already on its way makes
+            // this one do nothing.
+            if (config == null && VpnStatusHolder.status.value.state == VpnState.DISCONNECTED) {
+                VpnCommands.resume(this@XrayVpnService)
+            }
         }
 
         override fun unregisterCallback(callback: IVpnCallback?) {
@@ -243,8 +349,9 @@ class XrayVpnService : VpnService() {
 
         override fun testConnection(): Long {
             val c = controller ?: return -1
+            // The same two sites as the check, so the answer never contradicts it.
             val ms = try {
-                c.measureDelay(XrayCore.TEST_URL, 10_000)
+                measureThrough(c, 10_000)
             } catch (e: Exception) {
                 AppLog.w("connection test failed", e)
                 -1L
@@ -252,6 +359,11 @@ class XrayVpnService : VpnService() {
             if (ms < 0) {
                 // The user saw it fail: look for a server that answers.
                 scheduleVerify(Reason.USER)
+            } else if (config != null && bulkDue(Reason.APP, activeNetwork())) {
+                // A quick answer says nothing about downloads that stall
+                // (and must not clear a notice about them): the full check,
+                // with its download, decides.
+                scheduleVerify(Reason.APP)
             } else if (config != null) {
                 val now = SystemClock.elapsedRealtime()
                 lastVerifyAt = now
@@ -285,6 +397,7 @@ class XrayVpnService : VpnService() {
                 val now = VpnStatusHolder.status.value
                 if (now.state == VpnState.CONNECTED) enterForeground("Подключено", now.profileName) else enterForeground("Переподключение…", null)
                 lastReconnectId = startId
+                if (intent.getBooleanExtra(EXTRA_PICKED, false)) pickPending = true
                 AppLog.i("reconnect asked (#$startId)")
                 enqueue {
                     when {
@@ -292,39 +405,65 @@ class XrayVpnService : VpnService() {
                         startId != lastReconnectId -> Unit
                         // A late "apply new settings" must not switch on a
                         // VPN the user has turned off meanwhile.
-                        config == null && !RuntimeState.shouldRun(this) ->
+                        config == null && !RuntimeState.shouldRun(this) -> {
+                            pickPending = false
                             withContext(Dispatchers.Main) { stopIfLatest(startId) }
-                        else -> startTunnel(startId, userRequested = true)
+                        }
+                        else -> {
+                            val picked = pickPending
+                            pickPending = false
+                            startTunnel(startId, userRequested = true, picked = picked)
+                        }
                     }
                 }
             }
-            // ACTION_CONNECT, the system's Always-on VPN (SERVICE_INTERFACE)
-            // and a restart after the process was killed (null intent).
+            // ACTION_CONNECT, ACTION_RESUME, the system's Always-on VPN
+            // (SERVICE_INTERFACE) and a restart after the process was killed
+            // (null intent).
             else -> {
-                if (intent == null && !RuntimeState.shouldRun(this)) {
-                    stopSelf()
+                val restart = intent == null
+                val resume = intent?.action == ACTION_RESUME
+                val alwaysOn = intent?.action == VpnService.SERVICE_INTERFACE
+                // stopSelf(startId), never stopSelf(): a start the system has
+                // just accepted (the widget's) must not be dropped with it.
+                if (restart && !RuntimeState.shouldRun(this)) {
+                    stopSelf(startId)
                     return START_NOT_STICKY
                 }
-                if (intent == null && !RuntimeState.allowAutoRestart(this)) {
+                if (restart && !RuntimeState.allowAutoRestart(this)) {
                     AppLog.e("tunnel keeps crashing, giving up automatic restarts")
                     Notifications.showError(this, "VPN несколько раз аварийно остановился и больше не перезапускается автоматически. Откройте приложение.")
                     RuntimeState.setShouldRun(this, false)
-                    stopSelf()
+                    stopSelf(startId)
                     return START_NOT_STICKY
                 }
-                if (intent == null) AppLog.i("restarted by the system after the process ended")
+                when {
+                    restart -> AppLog.i("restarted by the system after the process ended")
+                    resume -> AppLog.i("resuming the tunnel")
+                    alwaysOn -> {
+                        AppLog.i("started by Always-on VPN")
+                        // The system starts it for the user: failed starts are
+                        // tried again, as for a tunnel that should run.
+                        RuntimeState.setShouldRun(this, true)
+                    }
+                }
                 enterForeground("Подключение…", null)
-                // A null intent is our own restart after the process died;
-                // everything else (the app, tile, widget, Always-on) is a
-                // start someone asked for.
-                val requested = intent != null
+                // Only the app, the tile and the widget ask for a start just
+                // now. Restarts, resumes and Always-on bring back a tunnel
+                // that should run: they never call prepare() (it would take
+                // the VPN over from another app) and are tried again on failure.
+                val requested = intent?.action == ACTION_CONNECT
+                val picked = intent?.getBooleanExtra(EXTRA_PICKED, false) == true
                 enqueue {
-                    if (config == null) {
-                        startTunnel(startId, requested)
-                    } else {
-                        publishConnected()
-                        // "Connect" while connected: maybe it does not work.
-                        if (SystemClock.elapsedRealtime() - lastVerifiedOkAt >= APP_CHECK_MS) scheduleVerify(Reason.APP)
+                    when {
+                        config != null -> {
+                            publishConnected()
+                            // "Connect" while connected: maybe it does not work.
+                            if (SystemClock.elapsedRealtime() - lastVerifiedOkAt >= APP_CHECK_MS) scheduleVerify(Reason.APP)
+                        }
+                        // Turned off after the resume was sent.
+                        resume && !RuntimeState.shouldRun(this) -> withContext(Dispatchers.Main) { stopIfLatest(startId) }
+                        else -> startTunnel(startId, requested, picked = picked)
                     }
                 }
             }
@@ -341,7 +480,7 @@ class XrayVpnService : VpnService() {
     override fun onDestroy() {
         networkMonitor?.stop()
         networkMonitor = null
-        unregisterUnlock()
+        unregisterScreen()
         // Never leave the widget, tile or app showing a tunnel that is gone.
         val state = VpnStatusHolder.status.value.state
         if (state != VpnState.DISCONNECTED && state != VpnState.ERROR) setStatus(VpnStatus(VpnState.DISCONNECTED))
@@ -371,7 +510,7 @@ class XrayVpnService : VpnService() {
      * [profileOverride]: run this server instead of the selected one (an
      * automatic switch away from [failedId], which then becomes the
      * selection unless the user chose another meanwhile). [notice] is shown
-     * once connected.
+     * once connected. [picked]: the user has just chosen this server.
      */
     private suspend fun startTunnel(
         startId: Int,
@@ -381,14 +520,18 @@ class XrayVpnService : VpnService() {
         expectedSelection: String? = null,
         notice: String? = null,
         attempt: Int = 0,
+        picked: Boolean = false,
     ) {
         // Also while a failed start waits to be retried with the interface
         // held: that is a tunnel that should run, not a first start.
         val restarting = config != null || tun != null
+        val previous = runningProfile
         val generation = ++startGeneration
         val before = VpnStatusHolder.status.value
         // From here on the new interface has replaced the old one.
         var swapped = false
+        // The user chose this server (see below); a retry keeps it.
+        var chosen = picked
         // New settings for a running tunnel: it keeps working meanwhile, so
         // it still shows as on (a tap on a "connecting" button would cancel).
         if (restarting && before.state == VpnState.CONNECTED) {
@@ -403,6 +546,7 @@ class XrayVpnService : VpnService() {
                 ?: throw VpnStartException("Не выбран сервер. Добавьте ключ в приложении.")
             val settings = Stores.settings(this).read()
             if (VpnStatusHolder.status.value.state == VpnState.CONNECTING) setStatus(VpnStatus(VpnState.CONNECTING, profile.id, profile.name))
+            chosen = Failover.chosenByUser(picked, userRequested && profileOverride == null, previous?.id, profile.id, profiles)
 
             GeoFiles.ensureInstalled(this)
             XrayCore.init(this)
@@ -450,18 +594,31 @@ class XrayVpnService : VpnService() {
             liveController = c
             runningProfile = profile
             newEpoch()
-            // Picked by hand again after it had stopped answering: the user knows.
-            manualPick = profile.id.takeIf { userRequested && profileOverride == null && failedRecently(profile.id) }
+            manualPick = when {
+                // An automatic switch.
+                profileOverride != null -> null
+                // Picked by hand again after it had stopped answering: the user knows.
+                chosen && failedRecently(profile.id) -> profile.id
+                // The same server with new settings: the choice still stands.
+                manualPick == profile.id -> manualPick
+                else -> null
+            }
             resetOnNetworkChange = settings.resetOnNetworkChange
             connectedAtElapsed = SystemClock.elapsedRealtime()
             RuntimeState.setShouldRun(this, true)
             withContext(Dispatchers.Main) { startNetworkMonitor() }
             // Only a server whose core came up becomes the selection.
-            if (profileOverride != null && failedId != null) saveSwitch(failedId, profile.id, expectedSelection)
+            if (profileOverride != null && failedId != null) {
+                if (saveSwitch(failedId, profile.id, expectedSelection)) trackAway(failedId, profile.id)
+            } else {
+                forgetAwayUnless(profile.id, chosen)
+            }
             // The session timer goes on when only the settings changed.
             val since = before.connectedSince.takeIf { restarting && it > 0 && before.profileId == profile.id }
                 ?: System.currentTimeMillis()
-            setStatus(VpnStatus(VpnState.CONNECTED, profile.id, profile.name, message = notice, connectedSince = since))
+            switchNotice = notice
+            switchNoticeAt = SystemClock.elapsedRealtime()
+            setStatus(VpnStatus(VpnState.CONNECTED, profile.id, profile.name, message = notice ?: baseNotice, connectedSince = since))
             Notifications.clearError(this)
             AppLog.i("tunnel up: ${profile.protocol}/${profile.network}/${profile.security}, mode ${settings.mode.core}")
             publishConnected()
@@ -482,7 +639,7 @@ class XrayVpnService : VpnService() {
             AppLog.e("tunnel start failed (attempt ${attempt + 1}): $message", e.takeIf { it !is VpnStartException })
             val again: (Int) -> Unit = { next ->
                 retryStart(generation, next) {
-                    startTunnel(lastStartId, userRequested = false, profileOverride, failedId, expectedSelection, notice, attempt = next)
+                    startTunnel(lastStartId, userRequested = false, profileOverride, failedId, expectedSelection, notice, attempt = next, picked = chosen)
                 }
             }
             // New settings or another server for a tunnel that works: until
@@ -618,12 +775,8 @@ class XrayVpnService : VpnService() {
     }
 
     private fun prepareLogFile(): File {
-        val dir = File(filesDir, "logs").apply { mkdirs() }
-        val f = File(dir, "xray.log")
-        if (f.length() > 256 * 1024) {
-            File(dir, "xray.log.1").delete()
-            f.renameTo(File(dir, "xray.log.1"))
-        }
+        val f = File(File(filesDir, "logs").apply { mkdirs() }, "xray.log")
+        XrayLog.trim(f)
         return f
     }
 
@@ -688,7 +841,8 @@ class XrayVpnService : VpnService() {
         networkMonitor?.stop()
         networkMonitor = null
         lastNetwork = null
-        unregisterUnlock()
+        baseNotice = null
+        unregisterScreen()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
     }
 
@@ -696,34 +850,96 @@ class XrayVpnService : VpnService() {
 
     private fun startNetworkMonitor() {
         if (networkMonitor != null) return
-        val monitor = UnderlyingNetworkMonitor(this) { network -> onUnderlyingNetworkChanged(network) }
+        val monitor = UnderlyingNetworkMonitor(
+            this,
+            onChanged = { network -> onUnderlyingNetworkChanged(network) },
+            onReachability = { lost -> onReachabilityChanged(lost) },
+            onPrivateDns = { host -> onPrivateDnsChanged(host) },
+        )
         monitor.start()
         lastNetwork = monitor.network
         networkMonitor = monitor
-        registerUnlock()
+        registerScreen()
     }
 
-    private fun registerUnlock() {
-        if (unlockRegistered) return
+    private fun registerScreen() {
+        if (screenRegistered) return
         try {
             // Exported, unlike a receiver for our own broadcasts: SystemUI,
             // not the system server, sends USER_PRESENT, and a not-exported
-            // receiver never gets it. Only the system may send it at all
-            // (a protected broadcast), and it only triggers a throttled check.
-            ContextCompat.registerReceiver(this, unlockReceiver, IntentFilter(Intent.ACTION_USER_PRESENT), ContextCompat.RECEIVER_EXPORTED)
-            unlockRegistered = true
+            // receiver never gets it. Only the system may send these at all
+            // (protected broadcasts), and they only trigger throttled checks.
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_USER_PRESENT)
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_SCREEN_OFF)
+            }
+            ContextCompat.registerReceiver(this, screenReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
+            screenRegistered = true
         } catch (e: Exception) {
-            AppLog.w("unlock receiver", e)
+            AppLog.w("screen receiver", e)
+        }
+        if (getSystemService(PowerManager::class.java)?.isInteractive == true) startScreenChecks()
+    }
+
+    private fun unregisterScreen() {
+        stopScreenChecks()
+        if (!screenRegistered) return
+        screenRegistered = false
+        try {
+            unregisterReceiver(screenReceiver)
+        } catch (_: IllegalArgumentException) {
         }
     }
 
-    private fun unregisterUnlock() {
-        if (!unlockRegistered) return
-        unlockRegistered = false
-        try {
-            unregisterReceiver(unlockReceiver)
-        } catch (_: IllegalArgumentException) {
+    /**
+     * While the screen is on, a server blocked mid-session must not go
+     * unnoticed until the next unlock: check when none ran for a while. On
+     * the main thread; the radio is in use anyway while the phone is.
+     */
+    private fun startScreenChecks() {
+        if (screenJob?.isActive == true) return
+        screenJob = scope.launch {
+            while (true) {
+                delay(SCREEN_CHECK_MS)
+                if (SystemClock.elapsedRealtime() - lastVerifyAt >= SCREEN_CHECK_MS) scheduleVerify(Reason.SCREEN)
+            }
         }
+    }
+
+    private fun stopScreenChecks() {
+        screenJob?.cancel()
+        screenJob = null
+    }
+
+    /**
+     * Android no longer sees internet on the same network ([lost]: often the
+     * first sign of a blocked server or of a mobile whitelist switched on),
+     * or it came back (a Wi-Fi login, the end of a pause): check again, at
+     * most once a minute. Coming back only matters when the last check failed.
+     */
+    private fun onReachabilityChanged(lost: Boolean) {
+        if (!lost && lastVerifiedOkAt >= lastVerifyAt) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastLinkCheckAt < LINK_CHECK_MS) return
+        lastLinkCheckAt = now
+        scheduleVerify(Reason.LINK, NETWORK_SETTLE_MS)
+    }
+
+    /**
+     * A strict «Частный DNS» (a host name) also takes over the DNS of VPN
+     * apps on Android 10+: the phone's lookups then go around the core's
+     * DNS rules, and fail with the server. Only the user can change it, so
+     * say so. The host may name a personal account: never logged.
+     */
+    private fun onPrivateDnsChanged(host: String?) {
+        val hint = if (host.isNullOrBlank()) null else Failover.NOTICE_PRIVATE_DNS
+        val old = baseNotice
+        if (hint == old) return
+        if (hint != null) AppLog.w("strict private DNS is on: lookups bypass the tunnel's DNS rules")
+        baseNotice = hint
+        val e = epoch.get()
+        scope.launch { setNotice(hint, e, replacing = setOf(null, old)) }
     }
 
     private fun onUnderlyingNetworkChanged(network: Network?) {
@@ -734,14 +950,14 @@ class XrayVpnService : VpnService() {
         if (network != null) lastNetwork = network
         // Whatever a check in progress measured belongs to the old network.
         newEpoch()
+        val e = epoch.get()
         if (network == null) {
             // Nothing to search with: do not claim to be searching.
-            val e = epoch.get()
-            scope.launch { setNotice(null, e, replacing = setOf(Failover.NOTICE_SEARCHING)) }
+            scope.launch { setNotice(baseNotice, e, replacing = setOf(Failover.NOTICE_SEARCHING)) }
             return
         }
-        // Another network may reach servers the last one could not.
-        if (network != previous) lastFruitlessAt = 0
+        // Another network: why the server was switched no longer applies.
+        if (network != previous) clearSwitchNotice(e, minAgeMs = 0)
         // No reset for the first network since the tunnel came up (Always-on
         // at boot), the same one back after a gap, right after connecting or
         // with resets turned off: still worth a check.
@@ -754,24 +970,37 @@ class XrayVpnService : VpnService() {
         // Connections opened over the old network are dead but would hang
         // until timeouts. Restarting the core resets them at once, so apps
         // (messengers, video) reconnect immediately over the new network.
+        restartCore("network changed, resetting connections", NETWORK_SETTLE_MS)
+    }
+
+    /**
+     * Restarts the running core on the same server and settings: every
+     * connection is reset at once. [expectedEpoch]: only if nothing changed
+     * since. The TUN interface stays, so no traffic leaves the VPN meanwhile.
+     */
+    private fun restartCore(why: String, delayMs: Long = 0, expectedEpoch: Long? = null) {
         resetJob?.cancel()
         val startId = lastStartId
         resetJob = scope.launch(worker) {
-            delay(NETWORK_SETTLE_MS)
+            if (delayMs > 0) delay(delayMs)
             serial.withLock {
+                if (expectedEpoch != null && epoch.get() != expectedEpoch) return@withLock
                 val cfg = config ?: return@withLock
                 val fd = tun ?: return@withLock
                 val c = controller ?: return@withLock
-                AppLog.i("network changed, resetting connections")
+                AppLog.i(why)
                 try {
                     newEpoch()
                     c.stop()
+                    // A tunnel that only ever resets never goes through
+                    // startTunnel: its log is kept small here too.
+                    XrayLog.trim(File(File(filesDir, "logs"), "xray.log"))
                     c.start(cfg, fd.fd)
                     connectedAtElapsed = SystemClock.elapsedRealtime()
                     newEpoch()
                     scheduleVerify(Reason.NETWORK)
                 } catch (e: Exception) {
-                    AppLog.e("core restart after network change failed", e)
+                    AppLog.e("core restart failed", e)
                     // No core runs now: the restart must not count on the old one.
                     liveController = null
                     runningProfile = null
@@ -821,6 +1050,8 @@ class XrayVpnService : VpnService() {
     }
 
     private suspend fun verify(e: Long, reason: Reason) {
+        // The log grows for as long as the tunnel runs; checks come often enough to keep it small.
+        XrayLog.trim(File(File(filesDir, "logs"), "xray.log"))
         val c = liveController ?: return
         val running = runningProfile ?: return
         if (epoch.get() != e || VpnStatusHolder.status.value.state != VpnState.CONNECTED) return
@@ -830,17 +1061,31 @@ class XrayVpnService : VpnService() {
         val ok = (reason != Reason.USER && answers(c, XrayCore.TEST_URL, VERIFY_TIMEOUT_MS)) ||
             answers(c, XrayCore.TEST_URL_ALT, CONFIRM_TIMEOUT_MS)
         if (epoch.get() != e) return
-        if (ok) {
-            lastVerifiedOkAt = SystemClock.elapsedRealtime()
-            clearFailureNotice(e)
-            owedRefresh?.let { id ->
-                owedRefresh = null
-                refreshThroughTunnel(id, c)
-            }
+        if (!ok) {
+            AppLog.w("no traffic through the server (${reason.name.lowercase()})")
+            runFailover(e, c, running, reason, stalled = false)
             return
         }
-        AppLog.w("no traffic through the server (${reason.name.lowercase()})")
-        runFailover(e, c, running, reason)
+        // It answers, but some operators freeze a foreign server's
+        // connections after the first ~16 KB: pages and video then hang
+        // while short answers still get through.
+        val network = activeNetwork()
+        if (bulkDue(reason, network) && stalls(c, network)) {
+            if (epoch.get() != e) return
+            AppLog.w("downloads through the server stall (${reason.name.lowercase()})")
+            runFailover(e, c, running, reason, stalled = true)
+            return
+        }
+        if (epoch.get() != e) return
+        lastVerifiedOkAt = SystemClock.elapsedRealtime()
+        clearFailureNotice(e)
+        clearSwitchNotice(e, minAgeMs = SWITCH_NOTICE_MS)
+        owedRefresh?.let { id ->
+            owedRefresh = null
+            refreshThroughTunnel(id, c, running)
+        }
+        // Moments when connections start over anyway.
+        if (reason == Reason.NETWORK || reason == Reason.UNLOCK) returnHomeIfItAnswers(e, c, running)
     }
 
     /** Whether [url] answers through the running tunnel. Blocking. */
@@ -851,24 +1096,74 @@ class XrayVpnService : VpnService() {
     }
 
     /**
-     * [failed] passes no traffic: probe other servers, all in one temporary
-     * core, and switch to the fastest that answers. The tunnel stays as it
-     * is meanwhile, and for good when nothing answers: nothing ever leaks
-     * outside the VPN, and the user is told to check the internet.
+     * Whether the download check is due: on connect and when the user asks,
+     * otherwise when none showed downloads working on [network] in the last
+     * half hour (a new network, or a stall seen before).
      */
-    private suspend fun runFailover(e: Long, c: Controller, failed: StoredProfile, reason: Reason) {
-        if (!hasNetwork()) {
+    private fun bulkDue(reason: Reason, network: Network?): Boolean {
+        if (reason == Reason.START || reason == Reason.USER) return true
+        val now = SystemClock.elapsedRealtime()
+        return synchronized(bulkFine) {
+            bulkFine.entries.removeIf { now - it.value >= BULK_CHECK_MS || it.value > now }
+            network !in bulkFine
+        }
+    }
+
+    /**
+     * Whether downloads through [c] stop partway: twice in a row, a 64 KB
+     * file stops coming after it began. Any other failure (the site refuses
+     * or cannot be reached from the server) proves nothing and counts as
+     * fine. No app name is sent. Blocking.
+     */
+    private fun stalls(c: Controller, network: Network?): Boolean {
+        repeat(2) {
+            val stalled = try {
+                c.fetchThroughTunnel(BULK_URL, "", BULK_HEADERS, BULK_TIMEOUT_MS)
+                false
+            } catch (ex: Exception) {
+                Failover.isStall(ex.message)
+            }
+            if (!stalled) {
+                // Also after a refusal: trying again at every check would
+                // only cost time and data.
+                synchronized(bulkFine) { bulkFine[network] = SystemClock.elapsedRealtime() }
+                return false
+            }
+        }
+        synchronized(bulkFine) { bulkFine.remove(network) }
+        return true
+    }
+
+    /**
+     * [failed] passes no traffic ([stalled]: it answers, but downloads
+     * freeze): probe other servers, all in one temporary core, and switch
+     * to the fastest that answers. The tunnel stays as it is meanwhile, and
+     * for good when nothing answers: nothing ever leaks outside the VPN.
+     */
+    private suspend fun runFailover(e: Long, c: Controller, failed: StoredProfile, reason: Reason, stalled: Boolean) {
+        val caps = underlying()
+        if (!hasNetwork(caps)) {
             AppLog.i("no network, not looking for another server")
+            return
+        }
+        // Hotel or metro Wi-Fi before its login page: no server can answer yet.
+        if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL) == true) {
+            AppLog.i("the Wi-Fi asks to sign in, not looking for another server")
+            setNotice(Failover.NOTICE_SIGN_IN, e)
             return
         }
         if (failed.id == manualPick && failedRecently(failed.id)) {
             setNotice(Failover.NOTICE_PICK_ANOTHER, e)
             return
         }
-        if (reason != Reason.USER && SystemClock.elapsedRealtime() - lastFruitlessAt < FRUITLESS_RETRY_MS) {
-            // Nothing answered moments ago: say so again, search later.
-            setNotice(Failover.NOTICE_NONE_ANSWER, e)
-            return
+        val network = activeNetwork()
+        if (reason != Reason.USER) {
+            // Nothing answered on this network moments ago: say so again, search later.
+            val last = fruitlessNotice(network)
+            if (last != null) {
+                setNotice(last, e)
+                return
+            }
         }
         if (!RuntimeState.allowFailover(this, take = false)) {
             AppLog.w("automatic server switches used up for now")
@@ -879,52 +1174,146 @@ class XrayVpnService : VpnService() {
         recentlyFailed.entries.removeIf { now - it.value >= Failover.RECENTLY_FAILED_MS }
         val exclude = recentlyFailed.keys.toSet()
         val state = Stores.profiles(this).read()
-        // The panel may have moved the servers meanwhile (new addresses or keys).
-        val refresh = startFailoverRefresh(state, failed)
         val first = pick(state, failed, exclude, tried = emptyList())
-        if (first.isEmpty() && refresh == null) {
-            AppLog.w("no other server to try")
-            setNotice(Failover.NOTICE_NO_OTHER, e)
-            return
+        // The panel may have moved the servers meanwhile (new addresses or keys).
+        val sub = refreshableSubscription(state, failed)
+        if (first.isNotEmpty() || sub != null) {
+            // Probing servers and downloading the list is what costs.
+            if (reason != Reason.USER && !RuntimeState.allowSearch(this)) {
+                AppLog.w("automatic searches used up for now")
+                setNotice(Failover.NOTICE_PICK_ANOTHER, e)
+                return
+            }
+            setNotice(Failover.NOTICE_SEARCHING, e)
+            AppLog.i("trying ${first.size} other servers")
         }
-        setNotice(Failover.NOTICE_SEARCHING, e)
-        AppLog.i("trying ${first.size} other servers")
-        var probed = first.size
-        var winner = probeBest(c, first)
+        val refresh = sub?.let { startFailoverRefresh(it) }
+        // The failed server goes first, as a control: when it answers here
+        // too, the phone was offline for a moment (a lift, a tunnel) and the
+        // server is fine. Not for a stall, which a short answer never shows.
+        val control = !stalled
+        val delays = probe(c, (if (control) listOf(failed) else emptyList()) + first)
         if (epoch.get() != e) return
-        if (winner == null && refresh != null && refresh.await()) {
-            // Only what the refresh brought: new servers, or new settings of known ones.
-            val second = pick(Stores.profiles(this).read(), failed, exclude, tried = first.map { it.outbounds })
-            if (second.isNotEmpty()) {
-                AppLog.i("subscription refreshed, trying ${second.size} more servers")
-                probed += second.size
-                winner = probeBest(c, second)
+        // It answered: whatever happens next, it is not blocked from here.
+        val reachable = control && delays.first() >= 0
+        if (reachable && recoveredInPlace(e, c)) return
+        val tier = { p: StoredProfile -> Failover.tier(p, failed) }
+        var probed = first.size
+        var winner = Failover.fastest(first, if (control) delays.drop(1) else delays, tier)
+        var refreshed: Refreshed? = null
+        if (winner == null && refresh != null) {
+            refreshed = refresh.await()
+            if (refreshed.applied == true) {
+                // Only what the refresh brought: new servers, or new settings of known ones.
+                val second = pick(Stores.profiles(this).read(), failed, exclude, tried = first.map { it.outbounds })
+                if (second.isNotEmpty()) {
+                    AppLog.i("subscription refreshed, trying ${second.size} more servers")
+                    probed += second.size
+                    winner = Failover.fastest(second, probe(c, second), tier)
+                }
             }
             if (epoch.get() != e) return
         }
         if (winner == null) {
             AppLog.w("no server answers")
-            if (probed == 0) {
-                setNotice(Failover.NOTICE_NO_OTHER, e)
-            } else {
-                lastFruitlessAt = SystemClock.elapsedRealtime()
-                setNotice(Failover.NOTICE_NONE_ANSWER, e)
-            }
+            nothingAnswers(e, failed, state, probed, network, report = !reachable)
+            // The refresh changed or removed the running server: run what is
+            // saved now, so the app and the widget show what really runs.
+            if (refreshed?.runningChanged == true) restartOnSaved(failed)
             return
         }
         val (to, ms) = winner
         AppLog.i("switching to a server that answered in $ms ms")
-        // The same server with new settings from the subscription is no failure.
-        if (to.id != failed.id) recentlyFailed[failed.id] = SystemClock.elapsedRealtime()
-        enqueue { switchTo(e, failed, to.id) }
+        enqueue { switchTo(e, failed, to.id, report = !reachable) }
+    }
+
+    /**
+     * The failed server answered in a new connection. If it now answers
+     * through the running core too, the connection was lost for a moment:
+     * stay. If not, the running core is stuck: restart it on the same
+     * server, at most every 10 minutes. False: treat it as a real failure.
+     * Google first, as the probe that answered, then Cloudflare.
+     */
+    private suspend fun recoveredInPlace(e: Long, c: Controller): Boolean {
+        if (answers(c, XrayCore.TEST_URL, CONFIRM_TIMEOUT_MS) || answers(c, XrayCore.TEST_URL_ALT, CONFIRM_TIMEOUT_MS)) {
+            if (epoch.get() != e) return true
+            AppLog.i("the server answers again: the connection was lost for a moment")
+            lastVerifiedOkAt = SystemClock.elapsedRealtime()
+            clearFailureNotice(e)
+            return true
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastCoreRestartAt < CORE_RESTART_GAP_MS) return false
+        lastCoreRestartAt = now
+        restartCore("the server answers, but not through the running core: restarting it", expectedEpoch = e)
+        return true
+    }
+
+    /**
+     * No other server answers either (or there is none). A Russian site
+     * opened directly, outside the tunnel, tells a block from a phone
+     * without internet: only a block is reported to the owner, and only
+     * with [report] (false: [failed] itself answered a new connection).
+     */
+    private suspend fun nothingAnswers(e: Long, failed: StoredProfile, state: ProfilesState, probed: Int, network: Network?, report: Boolean) {
+        val online = directInternetWorks()
+        if (epoch.get() != e) return
+        val notice = when {
+            online && probed == 0 -> Failover.NOTICE_BLOCKED
+            online -> Failover.NOTICE_ALL_BLOCKED
+            probed == 0 -> Failover.NOTICE_NO_OTHER
+            else -> Failover.NOTICE_NONE_ANSWER
+        }
+        if (online) {
+            AppLog.w("the phone is online, but no server answers from this network")
+            if (report) reportBlocked(failed, state, allDown = true)
+        }
+        markFruitless(network, notice)
+        setNotice(notice, e)
+    }
+
+    /** Whether a Russian site answers outside the tunnel (this app's own traffic never enters it). No app name is sent. Blocking. */
+    private fun directInternetWorks(): Boolean = try {
+        Libxray.fetchWithHeaders(DIRECT_URL, "", "", DIRECT_TIMEOUT_MS, "")
+        true
+    } catch (ex: Exception) {
+        // Any answer at all (a captcha, a refusal) proves the network works.
+        BlockReport.httpStatus(ex.message) != null
+    }
+
+    /** The notice of a search that found nothing on [network] in the last minutes, or null. */
+    private fun fruitlessNotice(network: Network?): String? = synchronized(fruitless) {
+        val now = SystemClock.elapsedRealtime()
+        fruitless.entries.removeIf { now - it.value.first >= FRUITLESS_RETRY_MS || it.value.first > now }
+        fruitless[network]?.second
+    }
+
+    private fun markFruitless(network: Network?, notice: String) {
+        synchronized(fruitless) { fruitless[network] = SystemClock.elapsedRealtime() to notice }
+    }
+
+    /**
+     * Runs the saved selection again, unless [running] no longer runs
+     * (another start came first) or the tunnel was turned off. Not tied to
+     * the check's epoch: a network change during the download resets
+     * connections but leaves the removed server running.
+     */
+    private fun restartOnSaved(running: StoredProfile) {
+        enqueue {
+            if (config == null || !RuntimeState.shouldRun(this) || runningProfile !== running) return@enqueue
+            AppLog.i("the running server changed in the subscription, restarting")
+            startTunnel(lastStartId, userRequested = false)
+        }
     }
 
     /**
      * On [worker], under [serial]: moves the tunnel from [failed] to
      * [winnerId], unless something changed since the probe began: another
      * core or network (epoch), the VPN turned off, another server chosen.
+     * [returning]: back to the user's server, which is no failure of [failed].
+     * [report]: tell the owner's panel that [failed] does not answer here.
      */
-    private suspend fun switchTo(e: Long, failed: StoredProfile, winnerId: String) {
+    private suspend fun switchTo(e: Long, failed: StoredProfile, winnerId: String, returning: Boolean = false, report: Boolean = true) {
         try {
             if (epoch.get() != e || config == null || !RuntimeState.shouldRun(this) ||
                 VpnStatusHolder.status.value.state != VpnState.CONNECTED
@@ -941,10 +1330,10 @@ class XrayVpnService : VpnService() {
                 return
             }
             if (!RuntimeState.allowFailover(this)) {
-                setNotice(Failover.NOTICE_PICK_ANOTHER, e)
+                if (!returning) setNotice(Failover.NOTICE_PICK_ANOTHER, e)
                 return
             }
-            val notice = if (winner.id == failed.id) null else Failover.switchedNotice(winner.name, failed.name)
+            val notice = if (returning || winner.id == failed.id) null else Failover.switchedNotice(winner.name, failed.name)
             startTunnel(
                 lastStartId,
                 userRequested = false,
@@ -953,9 +1342,14 @@ class XrayVpnService : VpnService() {
                 expectedSelection = saved.selectedId,
                 notice = notice,
             )
-            // Up on another server: the phone is online, so the failed one
-            // does not answer from this network.
-            if (winner.id != failed.id && runningProfile?.id == winner.id) reportBlocked(failed, saved)
+            // Only a switch that happened marks the failed server: one dropped
+            // on the way (a reconnect came first) proves nothing about it.
+            if (!returning && winner.id != failed.id && runningProfile?.id == winner.id) {
+                recentlyFailed[failed.id] = SystemClock.elapsedRealtime()
+                // Up on another server: the phone is online, so the failed
+                // one does not answer from this network.
+                if (report) reportBlocked(failed, saved)
+            }
         } catch (ex: Exception) {
             if (ex is CancellationException) throw ex
             AppLog.w("server switch failed", ex)
@@ -967,13 +1361,13 @@ class XrayVpnService : VpnService() {
      * subscription asked for that (see [BlockReporter]). In the background:
      * the switch never waits for it, and nothing it does can fail the tunnel.
      */
-    private fun reportBlocked(failed: StoredProfile, state: ProfilesState) {
+    private fun reportBlocked(failed: StoredProfile, state: ProfilesState, allDown: Boolean = false) {
         val sub = state.subscriptions.firstOrNull { it.id == failed.subscriptionId } ?: return
         if (sub.reportUrl == null) return
         val network = networkMonitor?.network ?: lastNetwork
         scope.launch(Dispatchers.IO) {
             try {
-                blockReporter.report(failed, sub, network) { liveController }
+                blockReporter.report(failed, sub, network, allDown) { liveController }
             } catch (ex: Exception) {
                 if (ex is CancellationException) throw ex
                 AppLog.w("block report failed", ex)
@@ -981,44 +1375,107 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    /** The server the tunnel switched to becomes the selection, unless the user chose another meanwhile. */
-    private fun saveSwitch(failedId: String, winnerId: String, expected: String?) {
+    /**
+     * The server the tunnel switched to becomes the selection, unless the
+     * user chose another meanwhile. Returns whether it did.
+     */
+    private fun saveSwitch(failedId: String, winnerId: String, expected: String?): Boolean {
         try {
             val saved = Stores.profiles(this).update { s -> Failover.selectInstead(s, failedId, winnerId, expected) }
             if (saved.selectedId == winnerId) {
                 notifyProfilesChanged()
-            } else {
-                AppLog.i("another server was chosen meanwhile, selection kept")
+                return true
             }
+            AppLog.i("another server was chosen meanwhile, selection kept")
         } catch (e: Exception) {
             // The tunnel runs anyway; only the next start picks the old server.
             AppLog.w("could not save the new selection", e)
         }
+        return false
     }
 
-    /** Candidates for [failed]; on mobile data, servers on the Russian whitelist first. */
+    // ------------------------------------------------ back to the user's server
+
+    /** An automatic switch from [failedId] to [winnerId] happened: remember the user's server. */
+    private fun trackAway(failedId: String, winnerId: String) {
+        val away = RuntimeState.away(this)
+        val now = SystemClock.elapsedRealtime()
+        if (away != null && winnerId == away.home) RuntimeState.setReturned(this, Failover.Returned(away.home, now, away.backoff))
+        RuntimeState.setAway(this, Failover.afterSwitch(away, RuntimeState.returned(this), failedId, winnerId, now))
+    }
+
+    /**
+     * A start that was no automatic switch: the user's server is no longer
+     * worth going back to once they picked one, or the tunnel runs another
+     * server than the one switched to (a delete or refresh moved it).
+     */
+    private fun forgetAwayUnless(runningId: String, picked: Boolean) {
+        val away = RuntimeState.away(this) ?: return
+        if (picked || runningId != away.to) RuntimeState.setAway(this, null)
+    }
+
+    /**
+     * After an automatic switch the tunnel stays on the other server only
+     * while needed: once the user's own server answers again (at the
+     * earliest 30 minutes later, then less and less often if it keeps
+     * failing), go back to it.
+     */
+    private suspend fun returnHomeIfItAnswers(e: Long, c: Controller, running: StoredProfile) {
+        val away = RuntimeState.away(this) ?: return
+        val now = SystemClock.elapsedRealtime()
+        if (away.to != running.id || !Failover.returnDue(away, now) || failedRecently(away.home)) return
+        val saved = Stores.profiles(this).read()
+        val home = saved.profiles.firstOrNull { it.id == away.home }
+        if (home == null) {
+            RuntimeState.setAway(this, null)
+            return
+        }
+        // The user chose another server meanwhile; their start follows.
+        if (saved.selectedId != running.id || !RuntimeState.allowFailover(this, take = false)) return
+        val answered = probe(c, listOf(home)).first() >= 0
+        if (epoch.get() != e) return
+        if (!answered) {
+            RuntimeState.setAway(this, Failover.returnFailed(away, now))
+            return
+        }
+        AppLog.i("the chosen server answers again, going back to it")
+        enqueue { switchTo(e, running, home.id, returning = true) }
+    }
+
+    // ------------------------------------------------------------ candidates
+
+    /**
+     * Candidates for [failed]. Servers on the Russian mobile whitelist go
+     * first on mobile data, and get a few slots elsewhere (a hotspot or a 4G
+     * router may be under the whitelist too) when not every server is probed.
+     */
     private suspend fun pick(state: ProfilesState, failed: StoredProfile, exclude: Set<String>, tried: List<JsonArray>): List<StoredProfile> {
-        if (!onMobileData()) return Failover.pickCandidates(state, failed, exclude, tried)
-        // Under the mobile whitelist only servers on it get through: make
-        // sure they are among those probed.
         val pool = Failover.pickCandidates(state, failed, exclude, tried, limit = Int.MAX_VALUE)
+        val mobile = onMobileData()
+        // Every one of them is probed anyway.
+        if (!mobile && pool.size <= Failover.MAX_CANDIDATES) return pool
         val preferred = whitelisted(pool.map { Failover.host(it) }.distinct().take(WHITELIST_HOSTS))
-        return Failover.pickCandidates(state, failed, exclude, tried, preferred)
+        val reserve = if (mobile) Failover.MAX_CANDIDATES else Failover.WHITELIST_RESERVED
+        return Failover.pickCandidates(state, failed, exclude, tried, preferred, reserve = reserve)
     }
 
     /** Those of [hosts] on the Russian mobile whitelist; lookups that take too long count as not. */
     private suspend fun whitelisted(hosts: List<String>): Set<String> {
         val found = ConcurrentHashMap.newKeySet<String>()
+        hosts.filterTo(found) { whitelistCache[it] == true }
         val limit = Semaphore(4)
         // In the service scope: a DNS lookup cannot be interrupted, and the
         // search must not wait for a slow one.
-        val lookups = hosts.map { host ->
+        val lookups = hosts.filterNot { whitelistCache.containsKey(it) }.map { host ->
             scope.launch(Dispatchers.IO) {
                 try {
                     limit.withPermit {
-                        if (XrayCore.whitelistStatus(this@XrayVpnService, host) == 1) found.add(host)
+                        val status = XrayCore.whitelistStatus(this@XrayVpnService, host)
+                        whitelistCache[host] = status == 1
+                        if (status == 1) found.add(host)
                     }
                 } catch (ex: Exception) {
+                    // Not remembered: the next search asks again.
                     if (ex is CancellationException) throw ex
                 }
             }
@@ -1031,57 +1488,72 @@ class XrayVpnService : VpnService() {
         return found.toSet()
     }
 
-    /** The fastest of [candidates] and its delay, or null when none answers. */
-    private suspend fun probeBest(c: Controller, candidates: List<StoredProfile>): Pair<StoredProfile, Long>? {
-        if (candidates.isEmpty()) return null
-        val delays = probeLock.withLock {
+    /** The delay through each of [servers] in ms, or -1, in the same order. Never throws. */
+    private suspend fun probe(c: Controller, servers: List<StoredProfile>): List<Long> {
+        if (servers.isEmpty()) return emptyList()
+        return probeLock.withLock {
             try {
-                XrayCore.probe(c, candidates.map { it.outbounds }, timeoutMs = Failover.PROBE_TIMEOUT_MS, parallel = Failover.PARALLEL)
+                XrayCore.probe(c, servers.map { it.outbounds }, timeoutMs = Failover.PROBE_TIMEOUT_MS, parallel = Failover.PARALLEL)
             } catch (ex: Exception) {
                 AppLog.w("probe failed", ex)
-                emptyList()
+                List(servers.size) { -1L }
             }
         }
-        return Failover.fastest(candidates, delays)
+    }
+
+    // ---------------------------------------------------------- subscriptions
+
+    /** [failed]'s subscription, when it may be downloaded again now: at most every 10 minutes and one at a time. */
+    private fun refreshableSubscription(state: ProfilesState, failed: StoredProfile): Subscription? {
+        val sub = state.subscriptions.firstOrNull { it.id == failed.subscriptionId } ?: return null
+        if (refreshJob?.isActive == true || !Failover.refreshDue(sub, System.currentTimeMillis())) return null
+        return sub
     }
 
     /**
-     * Downloads [failed]'s subscription again, directly: the running server
-     * is what fails. At most every 10 minutes and one at a time, on its own
-     * so that a switch meanwhile does not cut it short. Its result: whether
-     * it brought servers.
+     * Downloads [sub] again, directly: the running server is what fails. On
+     * its own, so that a switch meanwhile does not cut it short.
      */
-    private fun startFailoverRefresh(state: ProfilesState, failed: StoredProfile): Deferred<Boolean>? {
-        val sub = state.subscriptions.firstOrNull { it.id == failed.subscriptionId } ?: return null
-        if (refreshJob?.isActive == true || !Failover.refreshDue(sub, System.currentTimeMillis())) return null
+    private fun startFailoverRefresh(sub: Subscription): Deferred<Refreshed> {
         val direct = Downloader { url, headers -> XrayCore.fetch(url, null, headers, REFRESH_TIMEOUT_MS) }
         return scope.async(Dispatchers.IO) {
-            val applied = refreshSubscription(sub.id, direct)
+            val result = refreshSubscription(sub.id, direct)
             // Blocked outside the tunnel: once a server works, through it.
-            if (applied == null) owedRefresh = sub.id
-            applied == true
+            if (result.applied == null) owedRefresh = sub.id
+            result
         }.also { refreshJob = it }
     }
 
-    private fun refreshThroughTunnel(subId: String, c: Controller) {
+    /** After a check of [running] passed: downloads subscription [subId] through the tunnel, and restarts if that changed the running server. */
+    private fun refreshThroughTunnel(subId: String, c: Controller, running: StoredProfile) {
         if (refreshJob?.isActive == true) return
         val tunnel = Downloader { url, headers -> XrayCore.fetchThroughTunnel(c, url, headers) }
-        refreshJob = scope.async(Dispatchers.IO) { refreshSubscription(subId, tunnel) == true }
+        refreshJob = scope.async(Dispatchers.IO) {
+            refreshSubscription(subId, tunnel).also { if (it.runningChanged) restartOnSaved(running) }
+        }
     }
 
     /**
      * Downloads subscription [subId] and saves the result; the old servers
-     * stay when the panel sends none. True: new servers, false: none, null:
-     * the download failed. The app, if open, reloads. Never throws.
+     * stay when the panel sends none. The app, if open, reloads. Never throws.
      */
-    private suspend fun refreshSubscription(subId: String, downloader: Downloader): Boolean? = try {
-        SubscriptionUpdater(this, DiskProfiles(this)).refresh(subId, downloader, runningId = runningProfileId)?.applied ?: false
+    private suspend fun refreshSubscription(subId: String, downloader: Downloader): Refreshed = try {
+        val outcome = SubscriptionUpdater(this, DiskProfiles(this)).refresh(subId, downloader, runningId = runningProfileId)
+        Refreshed(applied = outcome?.applied ?: false, runningChanged = outcome?.runningChanged == true)
     } catch (e: Exception) {
         if (e is CancellationException) throw e
         AppLog.w("subscription refresh failed: ${e.userMessage()}")
-        null
+        Refreshed(applied = null, runningChanged = false)
     } finally {
         notifyProfilesChanged()
+    }
+
+    // ---------------------------------------------------------------- network
+
+    private fun activeNetwork(): Network? = try {
+        getSystemService(ConnectivityManager::class.java)?.activeNetwork
+    } catch (_: Exception) {
+        null
     }
 
     /** The network under the tunnel (this app's own traffic never enters it). */
@@ -1092,27 +1564,29 @@ class XrayVpnService : VpnService() {
         null
     }
 
-    private fun hasNetwork(): Boolean = underlying() != null
+    /** A network, and not paused for a moment (mobile data in a lift or a tunnel: the same one comes back). */
+    private fun hasNetwork(caps: NetworkCapabilities?): Boolean = caps != null &&
+        (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED))
 
     private fun onMobileData(): Boolean = underlying()?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true
 
     /**
      * Shows [notice] (null clears it) while connected, unless the tunnel
-     * changed since [e]; with [replacing], only in place of one of those.
-     * On the main thread with a compare-and-set, so it never overwrites a
-     * newer status.
+     * changed since [e]; with [replacing], only in place of one of those
+     * (null in it: also when no notice is shown). On the main thread with a
+     * compare-and-set, so it never overwrites a newer status.
      */
-    private suspend fun setNotice(notice: String?, e: Long, replacing: Set<String>? = null) {
+    private suspend fun setNotice(notice: String?, e: Long, replacing: Set<String?>? = null) {
         try {
             withContext(Dispatchers.Main) {
                 if (epoch.get() != e) return@withContext
                 val s = VpnStatusHolder.status.value
                 val current = s.message
                 if (s.state != VpnState.CONNECTED || current == notice) return@withContext
-                if (replacing != null && (current == null || current !in replacing)) return@withContext
+                if (replacing != null && current !in replacing) return@withContext
                 val next = s.copy(message = notice)
                 if (!VpnStatusHolder.compareAndSet(s, next)) return@withContext
-                publishStatus(next)
+                publishStatus()
                 publishConnected()
             }
         } catch (ex: Exception) {
@@ -1122,7 +1596,22 @@ class XrayVpnService : VpnService() {
     }
 
     /** Traffic gets through (again): "not answering" is no longer true. A switch notice stays. */
-    private suspend fun clearFailureNotice(e: Long) = setNotice(null, e, replacing = Failover.FAILURE_NOTICES)
+    private suspend fun clearFailureNotice(e: Long) = setNotice(baseNotice, e, replacing = Failover.FAILURE_NOTICES)
+
+    /**
+     * Takes the "switched to another server" notice away once it is
+     * [minAgeMs] old; otherwise it would stay for as long as the tunnel runs.
+     */
+    private fun clearSwitchNotice(e: Long, minAgeMs: Long) {
+        val notice = switchNotice ?: return
+        // Already replaced by another notice: it never comes back.
+        if (VpnStatusHolder.status.value.message != notice) {
+            switchNotice = null
+            return
+        }
+        if (SystemClock.elapsedRealtime() - switchNoticeAt < minAgeMs) return
+        scope.launch { setNotice(baseNotice, e, replacing = setOf(notice)) }
+    }
 
     // ------------------------------------------------------ status & traffic
 
@@ -1174,13 +1663,16 @@ class XrayVpnService : VpnService() {
 
     private fun setStatus(status: VpnStatus) {
         VpnStatusHolder.set(status)
-        publishStatus(status)
+        publishStatus()
     }
 
-    /** Shows [status] in the widget and the app, if open. */
-    private fun publishStatus(status: VpnStatus) {
+    /** Shows the status in the widget and the app, if open. */
+    private fun publishStatus() {
         VpnWidget.update(this)
         scope.launch {
+            // The newest status, read when it is sent: a send posted from the
+            // worker must never arrive after a newer one sent on the main thread.
+            val status = VpnStatusHolder.status.value
             val n = callbacks.beginBroadcast()
             try {
                 for (i in 0 until n) sendStatus(callbacks.getBroadcastItem(i), status)
@@ -1203,16 +1695,24 @@ class XrayVpnService : VpnService() {
 
 private class VpnStartException(message: String) : Exception(message)
 
-/** What made the service check that traffic gets through. */
-private enum class Reason { START, NETWORK, UNLOCK, APP, USER }
+/**
+ * What made the service check that traffic gets through: a start, another
+ * network, Android's view of the same network (LINK), unlocking, the app
+ * opened, the screen on for a while, the user's "Проверить".
+ */
+private enum class Reason { START, NETWORK, LINK, UNLOCK, APP, SCREEN, USER }
+
+/** What a subscription refresh in the VPN process did: [applied] is null when the download failed. */
+private class Refreshed(val applied: Boolean?, val runningChanged: Boolean)
 
 /** An automatic restart found another app's VPN in place. */
 private class AnotherVpnException : Exception("another VPN is active")
 
 /**
  * Small state private to the VPN process: whether the tunnel should be up
- * (for restarts after the process was killed), a crash-loop guard and the
- * budget of automatic server switches.
+ * (for restarts after the process was killed), a crash-loop guard, the
+ * budgets of automatic server switches and searches, and the user's server
+ * while an automatic switch keeps the tunnel on another one.
  */
 internal object RuntimeState {
     private const val PREFS = "vpn_runtime"
@@ -1248,16 +1748,80 @@ internal object RuntimeState {
         return true
     }
 
-    /** Allows at most 3 automatic restarts within 5 minutes. */
-    fun allowAutoRestart(context: Context): Boolean {
+    /** Whether a search for another server nobody asked for is allowed now (see [Failover.MAX_SEARCHES]); counts one. */
+    fun allowSearch(context: Context): Boolean {
         val p = prefs(context)
-        val now = System.currentTimeMillis()
-        val recent = (p.getString("restarts", "") ?: "").split(',')
-            .mapNotNull { it.toLongOrNull() }
-            .filter { now - it < 5 * 60_000 }
-        if (recent.size >= 3) return false
-        p.edit { putString("restarts", (recent + now).joinToString(",")) }
+        val next = Failover.countSearch(p.getString("searches", "") ?: "", SystemClock.elapsedRealtime()) ?: return false
+        p.edit { putString("searches", next) }
         return true
+    }
+
+    /**
+     * Whether the system may restart the tunnel after the process ended:
+     * at most 3 times in 5 minutes after crashes (see [RestartGuard]).
+     * Android 11+ tells why the process ended; on older ones every end
+     * counts. By time since boot, so a clock change cannot fool it.
+     */
+    fun allowAutoRestart(context: Context): Boolean {
+        val reason = lastExitReason(context)
+        if (reason != null && !RestartGuard.isCrash(reason)) {
+            AppLog.i("the system ended the vpn process (reason $reason), not a crash")
+            return true
+        }
+        val p = prefs(context)
+        val next = RestartGuard.countRestart(p.getString("restarts", "") ?: "", SystemClock.elapsedRealtime()) ?: return false
+        p.edit { putString("restarts", next) }
+        return true
+    }
+
+    /** Why the last VPN process before this one ended (ApplicationExitInfo.REASON_*), or null when unknown. */
+    private fun lastExitReason(context: Context): Int? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return try {
+            context.getSystemService(ActivityManager::class.java)
+                ?.getHistoricalProcessExitReasons(context.packageName, 0, 5)
+                ?.firstOrNull { it.processName.endsWith(":vpn") }
+                ?.reason
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun away(context: Context): Failover.Away? {
+        val p = prefs(context)
+        val home = p.getString("away_home", null) ?: return null
+        val to = p.getString("away_to", null) ?: return null
+        return Failover.Away(home, to, p.getLong("away_retry", 0), p.getInt("away_backoff", 0))
+    }
+
+    fun setAway(context: Context, away: Failover.Away?) {
+        prefs(context).edit {
+            if (away == null) {
+                remove("away_home")
+                remove("away_to")
+                remove("away_retry")
+                remove("away_backoff")
+            } else {
+                putString("away_home", away.home)
+                putString("away_to", away.to)
+                putLong("away_retry", away.retryAt)
+                putInt("away_backoff", away.backoff)
+            }
+        }
+    }
+
+    fun returned(context: Context): Failover.Returned? {
+        val p = prefs(context)
+        val id = p.getString("returned_id", null) ?: return null
+        return Failover.Returned(id, p.getLong("returned_at", 0), p.getInt("returned_backoff", 0))
+    }
+
+    fun setReturned(context: Context, returned: Failover.Returned) {
+        prefs(context).edit {
+            putString("returned_id", returned.id)
+            putLong("returned_at", returned.at)
+            putInt("returned_backoff", returned.backoff)
+        }
     }
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
