@@ -9,23 +9,17 @@ import com.klausms.vpn.core.DirectNet
 import com.klausms.vpn.core.XrayCore
 import com.klausms.vpn.core.XrayCoreHandle
 import com.klausms.vpn.core.XrayDirectNet
-import com.klausms.vpn.core.userMessage
 import com.klausms.vpn.data.DiskProfiles
-import com.klausms.vpn.data.Downloader
 import com.klausms.vpn.data.ProfilesAccess
 import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
-import com.klausms.vpn.data.Subscription
-import com.klausms.vpn.data.SubscriptionUpdater
 import com.klausms.vpn.util.AndroidClock
 import com.klausms.vpn.util.AppLog
 import com.klausms.vpn.util.Clock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -93,8 +87,6 @@ class XrayVpnService : VpnService() {
         /** The "switched to another server" notice goes after a check this long after the switch. */
         private const val SWITCH_NOTICE_MS = 10 * 60_000L
 
-        private const val REFRESH_TIMEOUT_MS = 10_000
-
         /**
          * The download check: some operators freeze connections to foreign
          * servers after the first ~16 KB, which a 204 answer never reaches.
@@ -132,6 +124,8 @@ class XrayVpnService : VpnService() {
     private lateinit var memory: FailureMemory
 
     private lateinit var mobileWhitelist: WhitelistLookup
+
+    private lateinit var refresher: SubscriptionRefresher
 
     // The newest command's startId. A job only stops the service if no newer
     // command arrived meanwhile, so a quick "off, on" never loses the "on".
@@ -179,14 +173,6 @@ class XrayVpnService : VpnService() {
 
     // A reconnect asked for with EXTRA_PICKED; merged reconnects keep it.
     private val pickPending = AtomicBoolean()
-
-    @Volatile
-    private var refreshJob: Deferred<Refreshed>? = null
-
-    // A subscription whose direct download failed during a search: it is
-    // downloaded through the tunnel once a server works again.
-    @Volatile
-    private var owedRefresh: String? = null
 
     private val blockReporter by lazy { BlockReporter(this) }
 
@@ -276,6 +262,11 @@ class XrayVpnService : VpnService() {
         )
         memory = FailureMemory(clock)
         mobileWhitelist = WhitelistLookup(scope, Dispatchers.IO, direct)
+        refresher = SubscriptionRefresher(
+            scope, Dispatchers.IO, clock, UpdaterSubscriptionSource(this, profiles),
+            session = { engine.session },
+            profilesChanged = publisher::profilesChanged,
+        )
         Notifications.ensureChannels(this)
     }
 
@@ -507,10 +498,7 @@ class XrayVpnService : VpnService() {
         lastVerifiedOkAt = clock.elapsed()
         publisher.clearFailure(e)
         publisher.clearSwitch(e, minAgeMs = SWITCH_NOTICE_MS)
-        owedRefresh?.let { id ->
-            owedRefresh = null
-            refreshThroughTunnel(id, c, running)
-        }
+        refresher.payOwed(c) { restartOnSaved(running) }
         // Moments when connections start over anyway.
         if (reason == Reason.NETWORK || reason == Reason.UNLOCK) returnHomeIfItAnswers(e, c, running)
     }
@@ -592,7 +580,7 @@ class XrayVpnService : VpnService() {
         val state = profiles.snapshot()
         val first = pick(state, failed, exclude, tried = emptyList())
         // The panel may have moved the servers meanwhile (new addresses or keys).
-        val sub = refreshableSubscription(state, failed)
+        val sub = refresher.refreshable(state, failed)
         if (first.isNotEmpty() || sub != null) {
             // Probing servers and downloading the list is what costs.
             if (!runtime.allowSearch()) {
@@ -603,7 +591,7 @@ class XrayVpnService : VpnService() {
             publisher.show(Failover.NOTICE_SEARCHING, e)
             AppLog.i("trying ${first.size} other servers")
         }
-        val refresh = sub?.let { startFailoverRefresh(it) }
+        val refresh = sub?.let { refresher.startDirect(it) }
         // The failed server goes first, as a control: when it answers here
         // too, the phone was offline for a moment (a lift, a tunnel) and the
         // server is fine. Not for a stall, which a short answer never shows.
@@ -909,53 +897,6 @@ class XrayVpnService : VpnService() {
                 List(servers.size) { -1L }
             }
         }
-    }
-
-    // ---------------------------------------------------------- subscriptions
-
-    /** [failed]'s subscription, when it may be downloaded again now: at most every 10 minutes and one at a time. */
-    private fun refreshableSubscription(state: ProfilesState, failed: StoredProfile): Subscription? {
-        val sub = state.subscriptions.firstOrNull { it.id == failed.subscriptionId } ?: return null
-        if (refreshJob?.isActive == true || !Failover.refreshDue(sub, clock.wall())) return null
-        return sub
-    }
-
-    /**
-     * Downloads [sub] again, directly: the running server is what fails. On
-     * its own, so that a switch meanwhile does not cut it short.
-     */
-    private fun startFailoverRefresh(sub: Subscription): Deferred<Refreshed> {
-        val directly = Downloader { url, headers -> XrayCore.fetch(url, null, headers, REFRESH_TIMEOUT_MS) }
-        return scope.async(Dispatchers.IO) {
-            val result = refreshSubscription(sub.id, directly)
-            // Blocked outside the tunnel: once a server works, through it.
-            if (result.applied == null) owedRefresh = sub.id
-            result
-        }.also { refreshJob = it }
-    }
-
-    /** After a check of [running] passed: downloads subscription [subId] through the tunnel, and restarts if that changed the running server. */
-    private fun refreshThroughTunnel(subId: String, c: CoreHandle, running: StoredProfile) {
-        if (refreshJob?.isActive == true) return
-        val tunnel = c.downloader()
-        refreshJob = scope.async(Dispatchers.IO) {
-            refreshSubscription(subId, tunnel).also { if (it.runningChanged) restartOnSaved(running) }
-        }
-    }
-
-    /**
-     * Downloads subscription [subId] and saves the result; the old servers
-     * stay when the panel sends none. The app, if open, reloads. Never throws.
-     */
-    private suspend fun refreshSubscription(subId: String, downloader: Downloader): Refreshed = try {
-        val outcome = SubscriptionUpdater(this, profiles).refresh(subId, downloader, runningId = engine.session?.profile?.id)
-        Refreshed(applied = outcome?.applied ?: false, runningChanged = outcome?.runningChanged == true)
-    } catch (e: Exception) {
-        if (e is CancellationException) throw e
-        AppLog.w("subscription refresh failed: ${e.userMessage()}")
-        Refreshed(applied = null, runningChanged = false)
-    } finally {
-        publisher.profilesChanged()
     }
 
     // ---------------------------------------------------------------- network
