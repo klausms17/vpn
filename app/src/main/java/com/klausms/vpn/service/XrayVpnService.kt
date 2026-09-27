@@ -20,8 +20,10 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.klausms.vpn.core.BuildOptions
 import com.klausms.vpn.core.CoreHandle
+import com.klausms.vpn.core.DirectNet
 import com.klausms.vpn.core.XrayCore
 import com.klausms.vpn.core.XrayCoreHandle
+import com.klausms.vpn.core.XrayDirectNet
 import com.klausms.vpn.core.userMessage
 import com.klausms.vpn.data.AppSettings
 import com.klausms.vpn.data.DiskProfiles
@@ -58,7 +60,6 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
-import libxray.Libxray
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -137,15 +138,6 @@ class XrayVpnService : VpnService() {
         private const val BULK_TIMEOUT_MS = 12_000
         private const val BULK_CHECK_MS = 30 * 60_000L
 
-        /**
-         * A Russian site, opened outside the tunnel: tells "servers blocked"
-         * from "no internet", and the mobile whitelist from a block. A small
-         * file, not the page: this can run every few minutes while nothing
-         * answers.
-         */
-        private const val DIRECT_URL = "https://ya.ru/robots.txt"
-        private const val DIRECT_TIMEOUT_MS = 5_000
-
         /** Hosts looked up in the mobile whitelist per search, and how long to wait for them. */
         private const val WHITELIST_HOSTS = 32
         private const val WHITELIST_WAIT_MS = 3_000L
@@ -159,6 +151,8 @@ class XrayVpnService : VpnService() {
 
     /** The core's log. */
     private lateinit var coreLog: File
+
+    private lateinit var direct: DirectNet
 
     @OptIn(ExperimentalCoroutinesApi::class)
     private val worker = Dispatchers.IO.limitedParallelism(1)
@@ -326,6 +320,7 @@ class XrayVpnService : VpnService() {
         super.onCreate()
         runtime = PrefsRuntimeStore(this)
         coreLog = XrayLog.file(this)
+        direct = XrayDirectNet(this)
         Notifications.ensureChannels(this)
     }
 
@@ -1170,8 +1165,8 @@ class XrayVpnService : VpnService() {
      * itself answered a new connection).
      */
     private suspend fun nothingAnswers(e: Long, failed: StoredProfile, state: ProfilesState, probed: Int, network: Network?, report: Boolean) {
-        val online = opensDirectly(DIRECT_URL)
-        val whitelist = online && onMobileData() && !opensDirectly(XrayCore.TEST_URL)
+        val online = direct.opens(DirectNet.DIRECT_URL)
+        val whitelist = online && onMobileData() && !direct.opens(XrayCore.TEST_URL)
         if (!epoch.isCurrent(e)) return
         val notice = Failover.nothingAnswersNotice(online, whitelist, probed)
         if (online) {
@@ -1186,15 +1181,6 @@ class XrayVpnService : VpnService() {
         }
         markFruitless(network, notice)
         setNotice(notice, e)
-    }
-
-    /** Whether [url] answers outside the tunnel (this app's own traffic never enters it). No app name is sent. Blocking. */
-    private fun opensDirectly(url: String): Boolean = try {
-        Libxray.fetchWithHeaders(url, "", "", DIRECT_TIMEOUT_MS, "")
-        true
-    } catch (ex: Exception) {
-        // Any answer at all (a captcha, a refusal) proves the site can be reached.
-        BlockReport.httpStatus(ex.message) != null
     }
 
     /** The notice of a search that found nothing on [network] in the last minutes, or null. */
@@ -1313,7 +1299,7 @@ class XrayVpnService : VpnService() {
         val failedHost = Failover.host(failed)
         val listed = whitelisted(listOf(winnerHost, failedHost).distinct())
         return winnerHost in listed && failedHost !in listed &&
-            !opensDirectly(XrayCore.TEST_URL) && opensDirectly(DIRECT_URL)
+            !direct.opens(XrayCore.TEST_URL) && direct.opens(DirectNet.DIRECT_URL)
     }
 
     /**
@@ -1411,7 +1397,7 @@ class XrayVpnService : VpnService() {
             scope.launch(Dispatchers.IO) {
                 try {
                     limit.withPermit {
-                        val status = XrayCore.whitelistStatus(this@XrayVpnService, host)
+                        val status = direct.whitelistStatus(host)
                         whitelistCache[host] = status == 1
                         if (status == 1) found.add(host)
                     }
