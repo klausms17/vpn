@@ -171,15 +171,16 @@ class XrayVpnService : VpnService() {
             direct = direct,
             core = { engine.session?.core },
         )
+        val status = { VpnStatusHolder.status.value }
         val failover = FailoverSearch(clock, epoch, netInfo, runtime, profiles, publisher, direct, mobileWhitelist, memory, refresher, reports)
         switcher = ServerSwitcher(
             engine, profiles, runtime, memory, failover, reports, publisher, clock, epoch,
-            status = { VpnStatusHolder.status.value },
+            status = status,
             profilesChanged = publisher::profilesChanged,
         )
         health = HealthMonitor(
             scope, Dispatchers.IO, clock, epoch, engine,
-            status = { VpnStatusHolder.status.value },
+            status = status,
             netInfo = netInfo,
             notices = publisher,
             failover = failover,

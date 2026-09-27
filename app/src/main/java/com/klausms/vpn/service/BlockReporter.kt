@@ -10,6 +10,7 @@ import android.os.SystemClock
 import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import com.klausms.vpn.BuildConfig
+import com.klausms.vpn.core.CoreErrors
 import com.klausms.vpn.core.CoreHandle
 import com.klausms.vpn.core.XrayCore
 import com.klausms.vpn.core.userMessage
@@ -90,7 +91,7 @@ internal class BlockReporter(context: Context) {
             return true
         } catch (e: Exception) {
             // The panel answered: through the tunnel it would say the same.
-            val status = BlockReport.httpStatus(e.message)
+            val status = CoreErrors.httpStatus(e.message)
             if (status != null) {
                 AppLog.w("block report refused: ${e.userMessage()}")
                 return status in 400..499
@@ -104,7 +105,7 @@ internal class BlockReporter(context: Context) {
             true
         } catch (e: Exception) {
             AppLog.w("block report failed: ${e.userMessage()}")
-            BlockReport.httpStatus(e.message) in 400..499
+            CoreErrors.httpStatus(e.message) in 400..499
         }
     }
 
@@ -181,12 +182,6 @@ internal object BlockReport {
             .map { if (it in ' '..'~' || it in '\u0400'..'\u04FF') it else ' ' }
             .joinToString("").split(' ').filter { it.isNotEmpty() }.joinToString(" ")
             .take(OPERATOR_MAX).trim()
-
-    /** The status of an "HTTP 503 Service Unavailable" error from the core, or null for other errors. */
-    fun httpStatus(message: String?): Int? {
-        val m = Regex("""^HTTP (\d{3})\b""").find(message ?: return null) ?: return null
-        return m.groupValues[1].toInt()
-    }
 
     /** One report per server, whatever its protocol: the panel counts by address and port. */
     fun serverKey(host: String, port: Int): String = "${host.trim().lowercase(Locale.ROOT)}:$port"

@@ -1,7 +1,6 @@
 package com.klausms.vpn.core
 
 import android.content.Context
-import com.klausms.vpn.service.BlockReport
 import libxray.Libxray
 
 /**
@@ -48,7 +47,7 @@ internal class XrayDirectNet(context: Context) : DirectNet {
         true
     } catch (ex: Exception) {
         // Any answer at all (a captcha, a refusal) proves the site can be reached.
-        BlockReport.httpStatus(ex.message) != null
+        CoreErrors.httpStatus(ex.message) != null
     }
 
     override fun whitelistStatus(host: String): Int = XrayCore.whitelistStatus(appContext, host)

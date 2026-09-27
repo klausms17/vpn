@@ -158,14 +158,4 @@ class BlockReportTest {
         assertFalse(t.claim(key, 3_000L))
     }
 
-    @Test
-    fun theCoresHttpErrorsGiveTheirStatus() {
-        assertEquals(403, BlockReport.httpStatus("HTTP 403 Forbidden"))
-        assertEquals(503, BlockReport.httpStatus("HTTP 503 Service Unavailable"))
-        assertEquals(502, BlockReport.httpStatus("HTTP 502"))
-        assertNull(BlockReport.httpStatus("dial tcp: i/o timeout"))
-        assertNull(BlockReport.httpStatus("HTTP/2 stream error"))
-        assertNull(BlockReport.httpStatus("HTTP 50"))
-        assertNull(BlockReport.httpStatus(null))
-    }
 }
