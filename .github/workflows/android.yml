@@ -1,0 +1,282 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    # A v* tag makes the stable build friends get (see "Publish stable
+    # release"); tags are built whatever files changed.
+    tags: ["v*"]
+    # The iPhone app has its own workflows (ios.yml, ios-app.yml); docs/
+    # and tools/ (a local check, see tools/jvm-check) change no APK.
+    paths-ignore: ["**.md", "docs/**", "tools/**", "ios/**", ".github/workflows/ios*.yml"]
+  workflow_dispatch:
+    inputs:
+      stable:
+        description: "Стабильная сборка (stable): её раздаст знакомым панель"
+        type: boolean
+        default: false
+  schedule:
+    # Weekly rebuild so the bundled Russian databases stay fresh (GitHub
+    # runs schedules only from the default branch).
+    - cron: "23 4 * * 1"
+
+permissions:
+  contents: read
+
+# Test builds of a branch replace each other. A stable build (a v* tag or
+# the ticked box) is never cancelled by a later push to its branch: stable
+# builds wait for each other instead, as they all replace one release.
+concurrency:
+  group: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.stable) && 'build-stable' || format('build-{0}', github.ref) }}
+  cancel-in-progress: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.stable) }}
+
+jobs:
+  core:
+    name: Core (Go) tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: libxray/go.mod
+          cache-dependency-path: libxray/go.sum
+
+      - name: Download Russian routing databases
+        run: scripts/fetch-geo.sh geo-upstream
+
+      - name: Vet
+        working-directory: libxray
+        run: go vet ./...
+
+      # The Go half of run-local.sh's Remnawave test: its own module on top
+      # of libxray, so a libxray API change must not break it unnoticed.
+      - name: Vet the Remnawave end-to-end tool
+        working-directory: server/remnawave/test/e2e
+        run: go vet ./...
+
+      # Standard library only, like klaus-monitor itself: nothing to install.
+      - name: Block report monitor tests
+        run: python3 -B server/remnawave/test/monitor_test.py
+
+      - name: Unit and end-to-end tests (real Xray servers)
+        working-directory: libxray
+        env:
+          GEO_DIR: ${{ github.workspace }}/geo-upstream
+        run: go test -count=1 -timeout 15m ./...
+
+      - name: Start-up time and memory budget
+        working-directory: libxray
+        env:
+          GEO_DIR: ${{ github.workspace }}/geo-upstream
+          MEM_TEST: "1"
+        run: go test -count=1 -run TestStartupCost -v ./...
+
+      - name: Keep the tested databases for the APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: geo-upstream
+          path: geo-upstream/
+          retention-days: 3
+
+  android:
+    name: Android APK
+    needs: core
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      VERSION_CODE: ${{ github.run_number }}
+      VERSION_NAME: 1.0.${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: libxray/go.mod
+          cache-dependency-path: libxray/go.sum
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: geo-upstream
+          path: geo-upstream
+
+      - name: NDK version
+        run: echo "NDK_VERSION=$(basename "$ANDROID_NDK_LATEST_HOME")" >> "$GITHUB_ENV"
+
+      # gomobile takes about five minutes; the library changes only with the
+      # Go code, its modules, the build script or the NDK it is linked with.
+      - name: Core library from the cache
+        id: core-lib
+        uses: actions/cache@v6
+        with:
+          path: app/libs/libxray.aar
+          key: libxray-android-${{ env.NDK_VERSION }}-${{ hashFiles('libxray/*.go', '!libxray/*_test.go', 'libxray/go.mod', 'libxray/go.sum', 'scripts/build-libxray.sh') }}
+
+      - name: Build Xray core library (gomobile)
+        if: steps.core-lib.outputs.cache-hit != 'true'
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          scripts/build-libxray.sh
+
+      - name: Bundle Russian routing databases
+        run: scripts/prepare-geo.sh geo-upstream
+
+      - name: Signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            {
+              echo "SIGNING_KEYSTORE_PATH=$RUNNER_TEMP/release.jks"
+              echo "SIGNING_STORE_PASSWORD=$STORE_PASSWORD"
+              echo "SIGNING_KEY_ALIAS=${KEY_ALIAS:-release}"
+              echo "SIGNING_KEY_PASSWORD=${KEY_PASSWORD:-$STORE_PASSWORD}"
+            } >> "$GITHUB_ENV"
+            echo "Release key configured."
+          else
+            echo "::warning::ANDROID_KEYSTORE_BASE64 secret is not set: the APK is signed with a temporary debug key and cannot update a previous install."
+          fi
+
+      - name: Build APKs
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: Lint
+        run: |
+          ./gradlew --no-daemon lintRelease || {
+            cat app/build/intermediates/lint_intermediate_text_report/release/lintReportRelease/lint-results-release.txt
+            exit 1
+          }
+
+      # Every JVM test of the app, new ones included, except the screenshots:
+      # app/build.gradle.kts leaves those out unless -Pscreenshots is given
+      # (their own step below).
+      - name: Unit tests
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      - name: Check native library 16 KB alignment
+        run: |
+          readelf="$(ls "$ANDROID_NDK_LATEST_HOME"/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf)"
+          apk=app/build/outputs/apk/release/app-release.apk
+          unzip -o -q "$apk" 'lib/*' -d /tmp/apk
+          for so in /tmp/apk/lib/*/*.so; do
+            "$readelf" -lW "$so" | awk -v f="$so" '/LOAD/ { if ($NF != "0x4000" && $NF != "0x10000") { print "bad alignment " $NF " in " f; bad=1 } } END { exit bad }'
+          done
+          echo "All native libraries are 16 KB aligned."
+
+      - name: Collect APKs
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk "dist/KirovVPN-${VERSION_NAME}.apk"
+          (cd dist && sha256sum *.apk > SHA256SUMS.txt)
+          ls -la dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: KirovVPN-${{ env.VERSION_NAME }}
+          path: dist/
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-release.html
+          if-no-files-found: ignore
+
+      # For your own phone: every push replaces its branch's build-* release.
+      # The panel never gives these to friends (it takes "stable" below). A
+      # stable run leaves it alone: it may run next to that branch's push
+      # runs, and two runs replacing one release fail each other.
+      - name: Publish test build
+        if: github.ref_type == 'branch' && !inputs.stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          tag="build-$(echo "$BRANCH" | tr '/' '-')"
+          gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+          notes="Сборка ${VERSION_NAME} из ветки ${BRANCH} (${GITHUB_SHA::7}).
+
+          Скачайте KirovVPN-${VERSION_NAME}.apk — один файл для любого телефона
+          с Android 8 и новее."
+          title="Kirov VPN ${VERSION_NAME} (${BRANCH})"
+          if [ -z "${SIGNING_KEYSTORE_PATH:-}" ]; then
+            # Without the release key every build has a different signature:
+            # installing the next one over it needs an uninstall first.
+            title="$title — временная подпись"
+            notes="$notes
+
+          ВНИМАНИЕ: сборка подписана временным ключом. Следующую сборку не получится
+          поставить поверх — придётся удалить приложение (серверы и настройки пропадут).
+          Чтобы обновления ставились поверх, добавьте ключ подписи (docs/README.ru.md, раздел 9)."
+          fi
+          gh release create "$tag" dist/* \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "$title" \
+            --notes "$notes"
+
+      # The build friends get: the panel publishes only this release
+      # (RELEASE_TAG=stable in install-panel.sh). Made on purpose, for a
+      # commit whose test build has run on your own phone for a while: push
+      # a v* tag on it, or "Run workflow" on its branch with "stable" ticked.
+      - name: Publish stable release
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.stable)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE: ${{ github.ref_name }}
+        run: |
+          notes="Стабильная сборка ${VERSION_NAME} (${SOURCE}, ${GITHUB_SHA::7}): её раздаёт знакомым панель.
+
+          Скачайте KirovVPN-${VERSION_NAME}.apk — один файл для любого телефона
+          с Android 8 и новее."
+          title="Kirov VPN ${VERSION_NAME} (stable)"
+          if [ -z "${SIGNING_KEYSTORE_PATH:-}" ]; then
+            # klaus-panel publish-apk refuses builds marked like this: they
+            # cannot be installed over the app friends have.
+            title="$title — временная подпись"
+          fi
+          # Replaced as a whole; meanwhile the panel finds no release and
+          # simply looks again an hour later.
+          gh release delete stable --yes --cleanup-tag 2>/dev/null || true
+          gh release create stable dist/* \
+            --target "$GITHUB_SHA" \
+            --title "$title" \
+            --notes "$notes"
+
+      # A look at the real screens and the widget without a phone: drawn by
+      # Robolectric into PNGs and kept on the ui-screenshots branch. Never
+      # blocks the build above. -Pscreenshots runs ScreenshotTest alone.
+      - name: Screenshots of the screens and the widget
+        id: screenshots
+        continue-on-error: true
+        timeout-minutes: 20
+        run: ./gradlew --no-daemon testDebugUnitTest -Pscreenshots
+
+      - name: Publish screenshots
+        if: always() && steps.screenshots.outcome != 'skipped'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dir=app/build/screenshots
+          if [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then echo "No screenshots."; exit 0; fi
+          cd "$dir"
+          git init -q -b ui-screenshots
+          git add -A
+          git -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+            commit -q -m "Screenshots of ${GITHUB_SHA::7} (${GITHUB_REF_NAME})"
+          git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/ui-screenshots

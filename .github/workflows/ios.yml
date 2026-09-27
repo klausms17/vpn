@@ -1,0 +1,49 @@
+name: iPhone
+
+# Phase 1: the Go core compiles for iOS and its iOS-only code passes vet.
+# Runs on Linux only (no macOS minutes). The Xcode build comes next.
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "libxray/**"
+      - "ios/**"
+      - "scripts/build-libxray-ios.sh"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  core:
+    name: Core for iOS (compile check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: libxray/go.mod
+          cache-dependency-path: libxray/go.sum
+
+      - name: Build for iOS (arm64, without the final link)
+        working-directory: libxray
+        run: GOOS=ios GOARCH=arm64 CGO_ENABLED=0 go build .
+
+      - name: Vet the iOS-only code
+        working-directory: libxray
+        run: GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go vet -tags ios .
+
+      - name: Tunnel settings for iOS
+        working-directory: libxray
+        run: go test -count=1 -run 'TestTunSettingsApple' .

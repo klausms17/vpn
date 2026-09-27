@@ -1,0 +1,102 @@
+name: iPhone app
+
+# Builds the iPhone app on a macOS runner. macOS minutes are expensive
+# (they count 10x on private repositories), so this runs only when the app
+# itself changes, or by hand; core changes are checked on Linux (ios.yml).
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "ios/**"
+      - "scripts/build-libxray-ios.sh"
+      - "scripts/fetch-geo.sh"
+      - "scripts/prepare-geo.sh"
+      - ".github/workflows/ios-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-app-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build (unsigned)
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: libxray/go.mod
+          cache-dependency-path: libxray/go.sum
+
+      - name: Xcode version
+        id: xcode
+        run: |
+          xcodebuild -version
+          echo "build=$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
+
+      - name: Core framework from the cache
+        id: core
+        uses: actions/cache@v6
+        with:
+          path: ios/Frameworks/Libxray.xcframework
+          key: libxray-ios-${{ steps.xcode.outputs.build }}-${{ hashFiles('libxray/*.go', 'libxray/go.mod', 'libxray/go.sum', 'scripts/build-libxray-ios.sh') }}
+
+      - name: Build the core framework (gomobile)
+        if: steps.core.outputs.cache-hit != 'true'
+        run: scripts/build-libxray-ios.sh
+
+      - name: Routing databases for the tunnel extension
+        run: |
+          scripts/fetch-geo.sh "$RUNNER_TEMP/geo-upstream"
+          scripts/prepare-geo.sh "$RUNNER_TEMP/geo-upstream" ios/PacketTunnel/Resources/geo
+
+      - name: Install XcodeGen
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen"
+          bin="$(find "$RUNNER_TEMP/xcodegen" -type f -name xcodegen -perm -u+x | head -n 1)"
+          echo "XCODEGEN=$bin" >> "$GITHUB_ENV"
+
+      - name: Generate the Xcode project
+        run: '"$XCODEGEN" generate --spec ios/project.yml'
+
+      - name: Build
+        run: |
+          xcodebuild build \
+            -project ios/KlausVPN.xcodeproj -scheme KlausVPN -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            COMPILER_INDEX_STORE_ENABLE=NO -quiet
+
+      - name: Check the app
+        run: |
+          app="$(find "$RUNNER_TEMP/dd" -name KlausVPN.app -type d -print -quit)"
+          appex="$app/PlugIns/PacketTunnel.appex"
+          fail() { echo "::error::$*"; ls -laR "$app" 2>/dev/null | head -n 60 || true; exit 1; }
+          [ -n "$app" ] || fail "KlausVPN.app was not built"
+          [ -d "$appex" ] || fail "the packet tunnel extension is missing"
+          point="$(plutil -extract NSExtension.NSExtensionPointIdentifier raw "$appex/Info.plist")"
+          [ "$point" = com.apple.networkextension.packet-tunnel ] || fail "wrong extension point: $point"
+          for f in geoip.dat geosite.dat; do
+            [ -s "$appex/geo/$f" ] || fail "geo/$f is not in the extension"
+          done
+          # Apple refuses executables that still carry bitcode. The load
+          # commands are captured first: a grep -q that stops reading early
+          # would fail the pipe under pipefail and hide a match.
+          for bin in "$app/KlausVPN" "$appex/PacketTunnel"; do
+            [ -f "$bin" ] || fail "$bin is missing"
+            commands="$(otool -l "$bin")"
+            if grep -q "segname __LLVM" <<<"$commands"; then fail "$bin still contains bitcode"; fi
+          done
+          du -sh "$app" "$appex"

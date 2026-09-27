@@ -1,0 +1,1092 @@
+#!/usr/bin/env bash
+# klaus-panel: friends and VPN servers of the Kirov VPN Remnawave panel.
+#
+# Installed to /usr/local/bin by install-panel.sh. Talks to the panel API on
+# 127.0.0.1:3000 with the token from /opt/remnawave/klaus-panel.env (the
+# KLAUS_PANEL_CONF variable points elsewhere). Run "klaus-panel help".
+set -euo pipefail
+umask 077
+
+CONF="${KLAUS_PANEL_CONF:-/opt/remnawave/klaus-panel.env}"
+PROFILE_NAME="KlausVPN"   # config profile shared by all VPN servers
+SQUAD_NAME="KlausVPN"     # internal squad every friend is in
+PANEL_SQUAD="Default-Squad" # the panel's own squad, for its own profile's servers
+INBOUND_TAG="VLESS_REALITY"
+# The response rule for the app is found by this name, and it matches the
+# app's User-Agent "KlausVPN/…": both keep the app's former name on purpose.
+RULE_NAME="Klaus VPN"
+APP_NAME="Kirov VPN"
+OLD_APP_NAME="Klaus VPN" # the former name: setup replaces the page entry and remark made with it
+NEVER="2099-12-31T00:00:00.000Z" # the panel needs an expiry date
+BACKUP_DIR="${BACKUP_DIR:-/root/remnawave-backups}"
+# A Telegram API address given on the command line wins over the saved one
+# (the local test's mock); telegram-setup saves it.
+TELEGRAM_API_BASE_ENV="${TELEGRAM_API_BASE:-}"
+
+say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33mВнимание:\033[0m %s\n' "$*" >&2; }
+die() { printf '\033[1;31mОшибка:\033[0m %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+klaus-panel — управление панелью Kirov VPN
+
+Знакомые:
+  add-user ИМЯ [--devices N]   новая подписка: ссылка, QR-код и ссылка для приложения
+                               (--devices — сколько устройств разрешить, когда включён лимит)
+  link ИМЯ                     снова показать ссылку и QR-код
+  list-users                   все подписки: статус, устройства, трафик
+  disable-user ИМЯ             временно отключить (ссылка перестанет работать)
+  enable-user ИМЯ              включить обратно
+  delete-user ИМЯ [--yes]      удалить совсем
+  tidy-users                   добавленным в веб-панели за последние двое суток: дать
+                               серверы и снять срок «до завтра» (раз в 20 секунд само)
+
+VPN-серверы:
+  add-node ИМЯ IP [СТРАНА] [--title НАЗВАНИЕ] [--host АДРЕС] [--node-port 2222]
+                               добавить сервер и показать команду для его установки
+                               (СТРАНА — код из двух букв, например DE; --title — как
+                               сервер называется в приложении, по умолчанию ИМЯ; --host —
+                               адрес для приложений, если он не совпадает с IP, например домен)
+  list-nodes                   серверы и их состояние
+  disable-node ИМЯ             убрать сервер из подписок (например, заблокирован)
+  enable-node ИМЯ              вернуть сервер
+
+Оповещения и приложение:
+  telegram-setup [ТОКЕН]       оповещения в Telegram: токен бота от @BotFather, затем
+                               откройте показанную ссылку и нажмите «Запустить»
+  telegram-test                отправить проверочное сообщение
+  publish-apk [--tag РЕЛИЗ]    выложить новую сборку приложения на адрес подписки (из
+                               RELEASE_TAG, по умолчанию стабильные — релиз stable; нужен
+                               GITHUB_TOKEN; раз в час это делается само)
+
+Прочее:
+  hwid-limit N [--yes]         включить лимит устройств (N на человека); off — выключить
+  backup                       резервная копия базы и настроек в /root/remnawave-backups
+EOF
+}
+
+load_conf() {
+  [ -r "$CONF" ] || die "не найден $CONF: запустите от root (sudo) после install-panel.sh"
+  # shellcheck disable=SC1090
+  . "$CONF"
+  : "${API_URL:?}" "${API_TOKEN:?}" "${RW_DIR:?}"
+  command -v jq >/dev/null || die "нужна программа jq (apt install jq)"
+  TELEGRAM_API_BASE="${TELEGRAM_API_BASE_ENV:-${TELEGRAM_API_BASE:-https://api.telegram.org}}"
+  APP_DIR="$RW_DIR/app"
+}
+
+# ---------------------------------------------------------------- files
+# Replace a file only when its content changes (stdin -> FILE).
+write_file() {
+  local tmp
+  tmp="$(mktemp "$1.XXXXXX")"
+  cat > "$tmp"
+  if [ -f "$1" ] && cmp -s "$1" "$tmp"; then rm -f "$tmp"; return 0; fi
+  if [ -f "$1" ]; then chmod --reference="$1" "$tmp"; fi
+  mv "$tmp" "$1"
+}
+# KEY=VALUE in place of the file's KEY line (added at the end when missing).
+# install-panel.sh writes the same lines, so its next run changes nothing.
+set_line() { # FILE KEY VALUE; the value (a token) goes to awk through the
+  # environment: arguments show in "ps", and -v would change backslashes.
+  K="$2" V="$3" awk 'BEGIN { k = ENVIRON["K"]; v = ENVIRON["V"] }
+    index($0, k "=") == 1 { if (!done) print k "=" v; done = 1; next }
+    { print } END { if (!done) print k "=" v }' "$1" | write_file "$1"
+}
+
+# The monitor's settings, from klaus-panel.env (install-panel.sh and
+# telegram-setup call this).
+write_monitor_env() {
+  write_file "$RW_DIR/klaus-monitor.env" <<EOF
+# Written by klaus-panel from klaus-panel.env; rewritten on every change.
+PANEL_URL=http://remnawave:3000
+PANEL_TOKEN=${MONITOR_TOKEN:-}
+TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+TELEGRAM_API_BASE=$TELEGRAM_API_BASE
+REPORT_THRESHOLD=${REPORT_THRESHOLD:-2}
+REPORT_WINDOW_MIN=${REPORT_WINDOW_MIN:-20}
+REPORT_COOLDOWN_MIN=${REPORT_COOLDOWN_MIN:-180}
+EOF
+}
+
+# docker compose in the panel's folder, quiet unless it fails.
+compose() {
+  local log
+  log="$(mktemp)"
+  if ! (cd "$RW_DIR" && docker compose "$@") >"$log" 2>&1; then
+    tail -n 30 "$log" >&2
+    rm -f "$log"
+    return 1
+  fi
+  rm -f "$log"
+}
+
+# ---------------------------------------------------------------- API
+# Every call must look like it came through the HTTPS reverse proxy (the
+# panel drops anything else). The token and body go through files, so they
+# never show up in "ps".
+api() { # METHOD PATH [BODY]; sets RESP and HTTP_CODE
+  local tmp data=()
+  tmp="$(mktemp -d)"
+  printf 'X-Forwarded-For: 127.0.0.1\nX-Forwarded-Proto: https\nContent-Type: application/json\nAuthorization: Bearer %s\n' \
+    "$API_TOKEN" > "$tmp/h"
+  if [ -n "${3:-}" ]; then printf '%s' "$3" > "$tmp/b"; data=(--data-binary "@$tmp/b"); fi
+  HTTP_CODE="$(curl -sS --noproxy '*' --max-time 60 -o "$tmp/o" -w '%{http_code}' -X "$1" \
+    -H "@$tmp/h" "${data[@]}" "$API_URL$2" 2>/dev/null)" || HTTP_CODE=000
+  RESP="$(cat "$tmp/o" 2>/dev/null || true)"
+  rm -rf "$tmp"
+}
+api_ok() { # like api, but stops on an error
+  api "$@"
+  check_resp "$1" "$2"
+}
+check_resp() { # METHOD PATH: stops if the last answer was an error
+  case "$HTTP_CODE" in
+    2??) return 0 ;;
+    000) die "панель не отвечает на $API_URL (docker ps: запущен ли контейнер remnawave?)" ;;
+  esac
+  local msg
+  msg="$(jq -r '[.message // empty, (.errors // empty | tostring)] | join(": ")' <<<"$RESP" 2>/dev/null || true)"
+  die "панель ответила $HTTP_CODE на $1 $2${msg:+: ${msg:0:400}}"
+}
+
+valid_name() { [[ "$1" =~ ^[A-Za-z0-9_-]{3,36}$ ]]; }
+
+user_json() { # NAME -> RESP (user object) or dies
+  valid_name "$1" || die "имя может содержать только латинские буквы, цифры, _ и - (3–36 символов)"
+  api GET "/api/users/by-username/$1"
+  [ "$HTTP_CODE" != "404" ] || die "нет пользователя $1 (список: klaus-panel list-users)"
+  check_resp GET "/api/users/by-username/$1"
+}
+
+profile_uuid() {
+  api_ok GET /api/config-profiles
+  PROFILE_UUID="$(jq -r --arg n "$PROFILE_NAME" 'first(.response.configProfiles[] | select(.name == $n) | .uuid) // empty' <<<"$RESP")"
+  [ -n "$PROFILE_UUID" ] || die "в панели нет профиля $PROFILE_NAME: запустите install-panel.sh ещё раз"
+  api_ok GET "/api/config-profiles/$PROFILE_UUID/inbounds"
+  INBOUND_UUID="$(jq -r --arg t "$INBOUND_TAG" 'first(.response.inbounds[] | select(.tag == $t) | .uuid) // empty' <<<"$RESP")"
+  INBOUND_PORT="$(jq -r --arg t "$INBOUND_TAG" 'first(.response.inbounds[] | select(.tag == $t) | .port) // empty' <<<"$RESP")"
+  [ -n "$INBOUND_UUID" ] || die "в профиле $PROFILE_NAME нет входа $INBOUND_TAG: запустите install-panel.sh ещё раз"
+}
+
+squad_uuid() {
+  api_ok GET /api/internal-squads
+  SQUAD_UUID="$(jq -r --arg n "$SQUAD_NAME" 'first(.response.internalSquads[] | select(.name == $n) | .uuid) // empty' <<<"$RESP")"
+  [ -n "$SQUAD_UUID" ] || die "в панели нет группы $SQUAD_NAME: запустите install-panel.sh ещё раз"
+}
+
+node_json() { # NAME -> NODE (node object) or dies
+  api_ok GET /api/nodes
+  NODE="$(jq -c --arg n "$1" 'first(.response[] | select(.name == $n)) // empty' <<<"$RESP")"
+  [ -n "$NODE" ] || die "нет сервера $1 (список: klaus-panel list-nodes)"
+}
+
+table() { if command -v column >/dev/null; then column -t -s "$(printf '\t')"; else cat; fi; }
+
+confirm() { # QUESTION; --yes on the command line skips it
+  [ "${YES:-0}" = "1" ] && return 0
+  [ -t 0 ] || die "нужно подтверждение: добавьте --yes"
+  local a
+  read -r -p "$1 [y/N] " a
+  case "$a" in y | Y | yes | д | Д | да) return 0 ;; esac
+  die "отменено"
+}
+
+# ---------------------------------------------------------------- setup
+# Called by install-panel.sh; safe to run again (e.g. after changing
+# APK_URL): keeps keys and anything added in the panel by hand. The support
+# link is the exception: it always follows SUPPORT_URL, also when that is
+# removed.
+
+profile_config() { # CURRENT_CONFIG_JSON PRIVATE_KEY SHORT_ID
+  local target="${REALITY_TARGET:-$REALITY_SNI:443}"
+  jq -c --arg tag "$INBOUND_TAG" --argjson port "$REALITY_PORT" --arg sni "$REALITY_SNI" \
+    --arg target "$target" --arg key "$2" --arg sid "$3" '
+    def ours: {
+      tag: $tag, listen: "0.0.0.0", port: $port, protocol: "vless",
+      settings: {clients: [], decryption: "none"},
+      sniffing: {enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: true},
+      streamSettings: {network: "raw", security: "reality",
+        realitySettings: {target: $target, serverNames: [$sni], privateKey: $key, shortIds: [$sid]}}
+    };
+    (if . == null then {
+      log: {loglevel: "warning"},
+      inbounds: [ours],
+      outbounds: [{tag: "DIRECT", protocol: "freedom"}, {tag: "BLOCK", protocol: "blackhole"}],
+      routing: {rules: [
+        # Friends must not reach local services of the server; torrents
+        # bring abuse complaints to the hoster.
+        {ip: ["geoip:private"], outboundTag: "BLOCK"},
+        {protocol: ["bittorrent"], outboundTag: "BLOCK"}
+      ]}
+    } else
+      (.inbounds[] | select(.tag == $tag)) |= (.port = $port
+        | .streamSettings.realitySettings.target = $target
+        | .streamSettings.realitySettings.serverNames = [$sni])
+    end)
+    # Xray closes a connection after 5 idle minutes by default, and phones
+    # keep push channels (Google push, mail) quiet for 15-28 minutes: each
+    # would be cut and redone every 5 minutes, waking the phone. 30 minutes
+    # outlasts them. The node keeps level 0 settings next to its own
+    # statistics switches. A value set by hand in the panel stays.
+    | .policy.levels["0"].connIdle //= 1800' <<<"$1"
+}
+
+setup_profile() {
+  local cur new key sid
+  api_ok GET /api/config-profiles
+  PROFILE_UUID="$(jq -r --arg n "$PROFILE_NAME" 'first(.response.configProfiles[] | select(.name == $n) | .uuid) // empty' <<<"$RESP")"
+  if [ -z "$PROFILE_UUID" ]; then
+    say "Создаю профиль $PROFILE_NAME (VLESS + REALITY, порт $REALITY_PORT, маскировка под $REALITY_SNI)"
+    api_ok GET /api/system/tools/x25519/generate
+    key="$(jq -r '.response.keypairs[0].privateKey' <<<"$RESP")"
+    sid="$(openssl rand -hex 8)"
+    new="$(profile_config null "$key" "$sid")"
+    api_ok POST /api/config-profiles "$(jq -nc --arg n "$PROFILE_NAME" --argjson c "$new" '{name: $n, config: $c}')"
+    PROFILE_UUID="$(jq -r '.response.uuid' <<<"$RESP")"
+  else
+    api_ok GET "/api/config-profiles/$PROFILE_UUID"
+    cur="$(jq -c '.response.config' <<<"$RESP")"
+    jq -e --arg t "$INBOUND_TAG" '.inbounds[]? | select(.tag == $t)' <<<"$cur" >/dev/null ||
+      die "в профиле $PROFILE_NAME нет входа $INBOUND_TAG (его удалили в панели?)"
+    new="$(profile_config "$cur" "" "")"
+    if ! jq -en --argjson a "$cur" --argjson b "$new" '$a == $b' >/dev/null; then
+      say "Обновляю профиль $PROFILE_NAME (порт $REALITY_PORT, маскировка под $REALITY_SNI)"
+      api_ok PATCH /api/config-profiles "$(jq -nc --arg u "$PROFILE_UUID" --argjson c "$new" '{uuid: $u, config: $c}')"
+    fi
+  fi
+  profile_uuid
+}
+
+setup_squad() {
+  api_ok GET /api/internal-squads
+  SQUAD_UUID="$(jq -r --arg n "$SQUAD_NAME" 'first(.response.internalSquads[] | select(.name == $n) | .uuid) // empty' <<<"$RESP")"
+  if [ -z "$SQUAD_UUID" ]; then
+    say "Создаю группу $SQUAD_NAME"
+    api_ok POST /api/internal-squads "$(jq -nc --arg n "$SQUAD_NAME" --arg i "$INBOUND_UUID" '{name: $n, inbounds: [$i]}')"
+    return
+  fi
+  local inbounds
+  inbounds="$(jq -c --arg n "$SQUAD_NAME" 'first(.response.internalSquads[] | select(.name == $n)) | [.inbounds[].uuid]' <<<"$RESP")"
+  if ! jq -e --arg i "$INBOUND_UUID" 'index($i) != null' <<<"$inbounds" >/dev/null; then
+    api_ok PATCH /api/internal-squads "$(jq -nc --arg u "$SQUAD_UUID" --arg i "$INBOUND_UUID" --argjson in "$inbounds" '{uuid: $u, inbounds: ($in + [$i])}')"
+  fi
+}
+
+setup_subscription_settings() {
+  api_ok GET /api/subscription-settings
+  local body
+  body="$(jq -c --arg support "${SUPPORT_URL:-}" --arg rule "$RULE_NAME" --arg sub "$SUB_DOMAIN" --arg old "$OLD_APP_NAME" '.response
+    | {
+        # English defaults of the panel; replaced only while untouched.
+        seed: {
+          expiredUsers: ["⌛ Subscription expired", "Contact support"],
+          limitedUsers: ["🚧 Subscription limited", "Contact support"],
+          disabledUsers: ["🚫 Subscription disabled", "Contact support"],
+          emptyHosts: ["→ Remnawave", "→ No hosts found", "→ Check Hosts tab", "→ Check Internal Squads tab"],
+          HWIDMaxDevicesExceeded: ["Limit of devices reached"],
+          HWIDNotSupported: ["App not supported"]
+        },
+        ru: {
+          expiredUsers: ["Подписка закончилась", "Напишите тому, кто дал вам ссылку"],
+          limitedUsers: ["Трафик по подписке закончился", "Напишите тому, кто дал вам ссылку"],
+          disabledUsers: ["Подписка отключена", "Напишите тому, кто дал вам ссылку"],
+          emptyHosts: ["Серверов пока нет", "Обновите подписку позже"],
+          HWIDMaxDevicesExceeded: ["Достигнут лимит устройств"],
+          HWIDNotSupported: ["Обновите приложение Kirov VPN"]
+        },
+        rule: {
+          name: $rule,
+          description: "Kirov VPN for Android: base64 list of links",
+          enabled: true,
+          operator: "AND",
+          # The User-Agent of the app keeps its former name on purpose.
+          conditions: [{headerName: "user-agent", operator: "REGEX", value: "^KlausVPN/", caseSensitive: true}],
+          responseType: "XRAY_BASE64",
+          responseModifications: {ignoreServeJsonAtBaseSubscription: true}
+        },
+        cur: .
+      }
+    | .cur as $c | .rule as $r
+    | {
+        uuid: $c.uuid,
+        # Random picks from comma lists would make the app reconnect on
+        # every refresh.
+        randomizeHosts: false,
+        # support-url follows SUPPORT_URL; without it there is none (the
+        # panel starts with a placeholder that leads nowhere). The app sends
+        # block reports to klaus-report-url and looks for updates at
+        # klaus-app-url.
+        customResponseHeaders: (($c.customResponseHeaders // {})
+          + {"profile-title": "Kirov VPN", "profile-update-interval": "1",
+             "klaus-report-url": "https://\($sub)/klaus/report",
+             "klaus-app-url": "https://\($sub)/app/version.json"}
+          | if $support != "" then .["support-url"] = $support else del(.["support-url"]) end),
+        # Ours from before the app was renamed count as untouched too.
+        customRemarks: (if $c.customRemarks == .seed or $c.customRemarks == (.ru | .HWIDNotSupported = ["Обновите приложение \($old)"])
+          then .ru else $c.customRemarks end),
+        # Devices are recorded even while the limit is off (the panel
+        # stores every valid x-hwid); "klaus-panel hwid-limit N" turns the
+        # limit on later. Turning it on now would cut off app versions that
+        # do not send x-hwid yet.
+        hwidSettings: (($c.hwidSettings // {enabled: false, fallbackDeviceLimit: 999, maxDevicesAnnounce: null})
+          | .maxDevicesAnnounce //= "Достигнут лимит устройств. Напишите тому, кто дал вам ссылку: он может удалить старое устройство."),
+        # Our rule goes right after the browser rule, before the fallback.
+        responseRules: (($c.responseRules // {version: "1", rules: []})
+          | .rules |= (map(select(.name != $r.name))
+            | (map(.responseType == "BROWSER") | index(true)) as $b
+            | if $b == null then [$r] + . else .[:$b + 1] + [$r] + .[$b + 1:] end))
+      }' <<<"$RESP")"
+  api_ok PATCH /api/subscription-settings "$body"
+}
+
+setup_subpage() {
+  api_ok GET /api/subscription-page-configs
+  local uuid cfg apk="${APK_URL:-}"
+  uuid="$(jq -r 'first((.response.configs[] | select(.uuid == "00000000-0000-0000-0000-000000000000")), .response.configs[0]) | .uuid // empty' <<<"$RESP")"
+  [ -n "$uuid" ] || die "в панели нет настроек страницы подписки"
+  api_ok GET "/api/subscription-page-configs/$uuid"
+  # The app published on the subscription address, unless APK_URL says
+  # otherwise.
+  if [ -z "$apk" ] && [ -f "$APP_DIR/KirovVPN.apk" ]; then apk="https://$SUB_DOMAIN/app/KirovVPN.apk"; fi
+  cfg="$(jq -c --arg apk "$apk" --arg support "${SUPPORT_URL:-}" --arg sub "$SUB_DOMAIN" --arg app "$APP_NAME" --arg old "$OLD_APP_NAME" '.response.config
+    | .locales as $locales
+    # Every text needs every language of the page: Russian for ru,
+    # English for the rest.
+    | def t($ru; $en): reduce $locales[] as $l ({}; .[$l] = (if $l == "ru" then $ru else $en end));
+    # Samsung Auto Blocker and Huawei/Honor Pure mode refuse app files from
+    # a browser or a messenger, which a first install always comes from.
+    " Samsung, Huawei или Honor не дают поставить файл? На время выключите «Автоблокировщик» (Samsung) или «Чистый режим» (Huawei, Honor): их можно найти поиском в настройках." as $tip_ru
+    | " Samsung, Huawei or Honor refuse the file? Turn off Auto Blocker (Samsung) or Pure mode (Huawei, Honor) for a moment: search for it in Settings." as $tip_en
+    | {
+      name: $app, featured: true, svgIconKey: "KlausVPN",
+      blocks: [
+        {
+          svgIconKey: "DownloadIcon", svgIconColor: "cyan",
+          title: t("Установите приложение"; "Install the app"),
+          description: (if $apk != "" then
+              t("Скачайте Kirov VPN и откройте файл. Если телефон спросит, разрешите установку из этого источника." + $tip_ru;
+                "Download Kirov VPN and open the file. If asked, allow installing from this source." + $tip_en)
+            else
+              t("Попросите файл Kirov VPN у того, кто дал вам эту ссылку, и установите его." + $tip_ru;
+                "Ask the person who gave you this link for the Kirov VPN file and install it." + $tip_en)
+            end),
+          buttons: (if $apk != "" then
+              [{type: "external", link: $apk, text: t("Скачать приложение"; "Download the app"), svgIconKey: "DownloadIcon"}]
+            else [] end)
+        },
+        {
+          svgIconKey: "CloudDownload", svgIconColor: "cyan",
+          title: t("Добавьте подписку"; "Add the subscription"),
+          description: t("Нажмите кнопку: откроется Kirov VPN и предложит добавить подписку. Если ничего не произошло, скопируйте ссылку и вставьте её в приложении (кнопка «+»).";
+            "Tap the button: Kirov VPN opens and offers to add the subscription. If nothing happens, copy the link and paste it in the app (the + button)."),
+          buttons: [
+            {type: "subscriptionLink", link: "klausvpn://add/{{SUBSCRIPTION_LINK}}",
+              text: t("Добавить в Kirov VPN"; "Add to Kirov VPN"), svgIconKey: "Plus"},
+            {type: "copyButton", link: "{{SUBSCRIPTION_LINK}}",
+              text: t("Скопировать ссылку"; "Copy the link"), svgIconKey: "Copy"}
+          ]
+        },
+        {
+          svgIconKey: "Check", svgIconColor: "teal",
+          title: t("Подключайтесь"; "Connect"),
+          description: t("Нажмите большую кнопку в приложении. Список серверов обновляется сам.";
+            "Tap the big button in the app. The server list updates by itself."),
+          buttons: []
+        }
+      ]
+    } as $klaus
+    | .svgLibrary.KlausVPN = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z\"/><path d=\"M9 12l2 2 4-4\"/></svg>"
+    | .svgLibrary.Copy = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"8\" y=\"8\" width=\"12\" height=\"12\" rx=\"2\"/><path d=\"M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2\"/></svg>"
+    | .brandingSettings.title = $app
+    # The support button cannot be hidden (the panel wants a link here).
+    # Without SUPPORT_URL it leads to a note on the subscription address
+    # (Caddy answers it) instead of the placeholder of the panel.
+    | .brandingSettings.supportUrl = (if $support != "" then $support else "https://\($sub)/" end)
+    | .baseSettings.metaTitle = $app
+    | .baseSettings.metaDescription = $app
+    | .platforms.android //= {displayName: t("Android"; "Android"), svgIconKey: "Android", apps: []}
+    # The other apps stay available, Kirov VPN comes first and is preselected.
+    | .platforms.android.apps = [$klaus] + (.platforms.android.apps | map(select(.name != $app and .name != $old) | .featured = false))
+  ' <<<"$RESP")"
+  # Unchanged settings: no restart (friends' refreshes would fail meanwhile).
+  [ "$(jq -S -c '.response.config' <<<"$RESP")" != "$(jq -S -c . <<<"$cfg")" ] || return 0
+  api_ok PATCH /api/subscription-page-configs "$(jq -c --arg u "$uuid" '{uuid: $u, config: .}' <<<"$cfg")"
+  # The page reads its settings only when it starts.
+  if grep -qx remnawave-subscription-page <<<"$(docker ps --format '{{.Names}}' 2>/dev/null)"; then
+    docker restart remnawave-subscription-page >/dev/null
+  fi
+}
+
+# version.json names the APK with the subscription address: follow a new
+# SUB_DOMAIN.
+refresh_version_json() {
+  [ -f "$APP_DIR/version.json" ] || return 0
+  jq --arg sub "$SUB_DOMAIN" '.apk = "https://\($sub)/app/" + (.apk | split("/") | last)' "$APP_DIR/version.json" |
+    write_file "$APP_DIR/version.json"
+}
+
+# A build published before the app was renamed gets the new fixed name
+# too: the page keeps its download button until publish-apk brings a new
+# build (which then removes the old names).
+link_former_apk() {
+  if [ -f "$APP_DIR/KlausVPN.apk" ] && [ ! -e "$APP_DIR/KirovVPN.apk" ]; then
+    ln "$APP_DIR/KlausVPN.apk" "$APP_DIR/KirovVPN.apk"
+  fi
+}
+
+cmd_setup() {
+  : "${REALITY_SNI:?}" "${REALITY_PORT:?}" "${SUB_DOMAIN:?}"
+  command -v openssl >/dev/null || die "нужна программа openssl"
+  setup_profile
+  setup_squad
+  setup_subscription_settings
+  refresh_version_json
+  link_former_apk
+  setup_subpage
+  write_monitor_env
+  say "Настройки панели применены"
+}
+
+# ---------------------------------------------------------------- users
+show_link() { # USER_JSON
+  local name link
+  name="$(jq -r '.response.username' <<<"$1")"
+  link="$(jq -r '.response.subscriptionUrl' <<<"$1")"
+  echo
+  echo "Подписка $name. Отправьте ссылку знакомому (лично, не в общий чат):"
+  echo
+  echo "  $link"
+  echo
+  echo "Ссылка сразу для Kirov VPN (откроет приложение, если оно установлено):"
+  echo
+  echo "  klausvpn://add/$link"
+  echo
+  if command -v qrencode >/dev/null; then
+    echo "QR-код (сфотографируйте камерой телефона — откроется страница с кнопками):"
+    qrencode -t ANSIUTF8 -m 2 "$link"
+  fi
+}
+
+cmd_add_user() {
+  local name="${1:-}" devices="" body
+  [ -n "$name" ] || die "укажите имя: klaus-panel add-user ИМЯ [--devices N]"
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --devices) devices="${2:-}"; shift 2 ;;
+      *) die "непонятный параметр: $1" ;;
+    esac
+  done
+  valid_name "$name" || die "имя может содержать только латинские буквы, цифры, _ и - (3–36 символов), например ivan или masha_k"
+  case "$devices" in "" ) ;; *[!0-9]*) die "--devices: нужно число" ;; esac
+  api GET "/api/users/by-username/$name"
+  [ "$HTTP_CODE" = "200" ] && die "пользователь $name уже есть; его ссылка: klaus-panel link $name"
+  squad_uuid
+  body="$(jq -nc --arg n "$name" --arg exp "$NEVER" --arg s "$SQUAD_UUID" --arg d "$devices" '{
+      username: $n, expireAt: $exp, trafficLimitBytes: 0, trafficLimitStrategy: "NO_RESET",
+      activeInternalSquads: [$s], description: "klaus-panel"
+    } + (if $d != "" then {hwidDeviceLimit: ($d | tonumber)} else {} end)')"
+  api_ok POST /api/users "$body"
+  show_link "$RESP"
+}
+
+cmd_link() {
+  [ -n "${1:-}" ] || die "укажите имя: klaus-panel link ИМЯ"
+  user_json "$1"
+  show_link "$RESP"
+}
+
+# Lists can be long (hundreds of users), so they go through files: jq
+# arguments are limited to 128 KB.
+TMPD=""
+tmpdir() { [ -n "$TMPD" ] || { TMPD="$(mktemp -d)"; trap 'rm -rf "$TMPD"' EXIT; }; }
+
+fetch_all() { # PATH KEY FILE: all pages of a list into FILE as one array
+  local start=0 total
+  tmpdir
+  : > "$3.pages"
+  while :; do
+    api_ok GET "$1?start=$start&size=500"
+    jq -c --arg k "$2" '.response[$k]' <<<"$RESP" >> "$3.pages"
+    total="$(jq -r '.response.total' <<<"$RESP")"
+    start=$((start + 500))
+    [ "$start" -lt "$total" ] || break
+  done
+  jq -cs 'add // []' "$3.pages" > "$3"
+}
+
+cmd_list_users() {
+  tmpdir
+  fetch_all /api/users users "$TMPD/users.json"
+  fetch_all /api/hwid/devices devices "$TMPD/devices.json"
+  jq -r --slurpfile dev "$TMPD/devices.json" '
+    def gb: . / 1073741824 * 100 | round / 100 | tostring + " ГБ";
+    ($dev[0] | group_by(.userId) | map({key: (.[0].userId | tostring), value: length}) | from_entries) as $count
+    | ["ИМЯ", "СТАТУС", "УСТРОЙСТВ", "ЛИМИТ", "ТРАФИК", "БЫЛ В СЕТИ"],
+      (sort_by(.username)[] | [
+        .username, .status, ($count[.id | tostring] // 0 | tostring),
+        (.hwidDeviceLimit // "общий" | tostring),
+        (.userTraffic.lifetimeUsedTrafficBytes | gb),
+        (.userTraffic.onlineAt // "никогда" | sub("\\.[0-9]+Z$"; "") | sub("T"; " "))
+      ])
+    | @tsv' "$TMPD/users.json" | table
+  echo
+  echo "Всего: $(jq length "$TMPD/users.json")"
+}
+
+user_action() { # ACTION NAME
+  [ -n "${2:-}" ] || die "укажите имя"
+  local id
+  user_json "$2"
+  id="$(jq -r '.response.id' <<<"$RESP")"
+  case "$1" in
+    disable) api_ok POST "/api/users/$id/actions/disable"; say "$2 отключён: подписка и подключения больше не работают" ;;
+    enable) api_ok POST "/api/users/$id/actions/enable"; say "$2 снова включён" ;;
+    delete)
+      confirm "Удалить $2 насовсем? Его ссылка перестанет работать."
+      api_ok DELETE "/api/users/$id"
+      say "$2 удалён"
+      ;;
+  esac
+}
+
+# The panel's web form starts a new user with no squad and an end date of
+# tomorrow: without a fix the friend gets no servers, and the link stops
+# working the next day. The timer runs this every 20 seconds. Only users
+# made in the last two days are looked at, so a change made on purpose
+# later stays.
+TIDY_WINDOW=$((48 * 3600))
+cmd_tidy_users() {
+  local quiet=0 start=0 from failed=0 u body name what
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --quiet) quiet=1; shift ;;
+      *) die "непонятный параметр: $1" ;;
+    esac
+  done
+  from=$(($(date +%s) - TIDY_WINDOW))
+  tmpdir
+  : > "$TMPD/tidy"
+  # Newest first, a page at a time, while the page is still inside the window.
+  while :; do
+    api GET "/api/users?start=$start&size=100&sorting=%5B%7B%22id%22%3A%22id%22%2C%22desc%22%3Atrue%7D%5D"
+    # A panel that is restarting: the timer tries again in 20 seconds.
+    if [ "$quiet" = "1" ] && [[ "$HTTP_CODE" =~ ^(000|5..)$ ]]; then return 0; fi
+    check_resp GET /api/users
+    # Default-Squad is the panel's own: its servers are none of ours.
+    jq -c --argjson from "$from" --arg panel_squad "$PANEL_SQUAD" '
+      def t: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+      .response.users[] | select((.createdAt | t) >= $from)
+      | {id, username,
+         squad: ([.activeInternalSquads[]? | select(.name != $panel_squad)] | length == 0),
+         end: ((.expireAt | t) - (.createdAt | t) < 36 * 3600)}
+      | select(.squad or .end)' <<<"$RESP" >> "$TMPD/tidy"
+    jq -e --argjson from "$from" '.response.users | length == 100
+      and (last.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) >= $from' <<<"$RESP" >/dev/null || break
+    start=$((start + 100))
+  done
+  if [ ! -s "$TMPD/tidy" ]; then
+    if [ "$quiet" != "1" ]; then say "Исправлять нечего: у всех, кого добавили за двое суток, есть серверы и нет срока «до завтра»"; fi
+    return 0
+  fi
+  if grep -q '"squad":true' "$TMPD/tidy"; then squad_uuid; fi
+  while read -r u; do
+    body="$(jq -c --arg s "${SQUAD_UUID:-}" --arg never "$NEVER" '{id}
+      + (if .squad then {activeInternalSquads: [$s]} else {} end)
+      + (if .end then {expireAt: $never} else {} end)' <<<"$u")"
+    name="$(jq -r '.username' <<<"$u")"
+    what="$(jq -r --arg g "$SQUAD_NAME" '[if .squad then "добавлены серверы (группа \($g))" else empty end,
+      if .end then "подписка теперь бессрочная" else empty end] | join(", ")' <<<"$u")"
+    api PATCH /api/users "$body"
+    if [[ "$HTTP_CODE" =~ ^2 ]]; then
+      echo "$name: $what"
+    else
+      failed=1
+      warn "$name: панель не приняла исправление (ответ $HTTP_CODE)"
+    fi
+  done < "$TMPD/tidy"
+  [ "$failed" = "0" ]
+}
+
+# ---------------------------------------------------------------- nodes
+valid_address() { [[ "$1" =~ ^[A-Za-z0-9.:-]+$ ]]; }
+
+cmd_add_node() {
+  local name="" address="" country="XX" host="" title="" node_port=2222 body node_uuid secret
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --host) host="${2:-}"; shift 2 ;;
+      --title) title="${2:-}"; shift 2 ;;
+      --node-port) node_port="${2:-}"; shift 2 ;;
+      -*) die "непонятный параметр: $1" ;;
+      *)
+        if [ -z "$name" ]; then name="$1"
+        elif [ -z "$address" ]; then address="$1"
+        else country="$1"; fi
+        shift ;;
+    esac
+  done
+  if [ -z "$name" ] || [ -z "$address" ]; then die "пример: klaus-panel add-node de-1 203.0.113.10 DE"; fi
+  [[ "$name" =~ ^[A-Za-z0-9_.-]{3,30}$ ]] || die "имя сервера: 3–30 латинских букв, цифр, _ . -"
+  host="${host:-$address}"
+  title="${title:-$name}"
+  [ "${#title}" -le 100 ] || die "--title: не длиннее 100 символов"
+  # One exact address per server: the panel would pick a random entry from
+  # a comma list (or random text for *) on every refresh, and the app would
+  # reconnect each time.
+  for a in "$address" "$host"; do
+    valid_address "$a" || die "адрес «$a»: только IP или домен, без запятых, пробелов и *"
+  done
+  [[ "$country" =~ ^[A-Za-z]{2}$ ]] || die "страна — две латинские буквы, например DE или NL"
+  country="$(printf '%s' "$country" | tr '[:lower:]' '[:upper:]')"
+  [[ "$node_port" =~ ^[0-9]+$ ]] || die "--node-port: нужно число"
+  api_ok GET /api/nodes
+  jq -e --arg n "$name" 'any(.response[]; .name == $n)' <<<"$RESP" >/dev/null && die "сервер $name уже есть"
+  profile_uuid
+
+  body="$(jq -nc --arg n "$name" --arg a "$address" --argjson p "$node_port" --arg c "$country" \
+    --arg pu "$PROFILE_UUID" --arg iu "$INBOUND_UUID" '{
+      name: $n, address: $a, port: $p, countryCode: $c,
+      configProfile: {activeConfigProfileUuid: $pu, activeInbounds: [$iu]}
+    }')"
+  api_ok POST /api/nodes "$body"
+  node_uuid="$(jq -r '.response.uuid' <<<"$RESP")"
+  # The host is what friends get in their subscription; "nodes" links it to
+  # the server so disable-node can take it out.
+  body="$(jq -nc --arg t "$title" --arg h "$host" --argjson port "$INBOUND_PORT" --arg pu "$PROFILE_UUID" \
+    --arg iu "$INBOUND_UUID" --arg nu "$node_uuid" '{
+      inbound: {configProfileUuid: $pu, configProfileInboundUuid: $iu},
+      remark: $t, address: $h, port: $port, nodes: [$nu]
+    }')"
+  api_ok POST /api/hosts "$body"
+  api_ok GET /api/keygen
+  secret="$(jq -r '.response.secretKey' <<<"$RESP")"
+
+  local extra=""
+  [ "$node_port" != "2222" ] && extra+=" NODE_PORT=$node_port"
+  [ "$INBOUND_PORT" != "443" ] && extra+=" VPN_PORT=$INBOUND_PORT"
+  echo
+  say "Сервер $name добавлен. Теперь на нём ($address) выполните (install-node.sh копируется так же, как install-panel.sh):"
+  echo
+  echo "sudo PANEL_IP=${PANEL_IP:-IP_ПАНЕЛИ}$extra SECRET_KEY='$secret' bash install-node.sh"
+  echo
+  echo "Через минуту после установки проверьте: klaus-panel list-nodes (должно быть «на связи»)."
+  echo "Знакомые получат этот сервер сами при следующем обновлении подписки."
+}
+
+cmd_list_nodes() {
+  local nodes
+  tmpdir
+  api_ok GET /api/nodes
+  nodes="$RESP"
+  api_ok GET /api/hosts
+  printf '%s' "$RESP" > "$TMPD/hosts.json"
+  jq -r --slurpfile hosts "$TMPD/hosts.json" '
+    ["ИМЯ", "СТРАНА", "IP", "АДРЕС ДЛЯ ПРИЛОЖЕНИЙ", "СОСТОЯНИЕ", "ОНЛАЙН", "XRAY"],
+    (.response[] | .uuid as $u | [
+      .name, .countryCode, .address,
+      ([$hosts[0].response[] | select(.nodes | index($u)) | "\(.address):\(.port)\(if .isDisabled then " (выкл.)" else "" end)"] | join(" ") | if . == "" then "-" else . end),
+      (if .isDisabled then "отключён" elif .isConnected then "на связи" elif .isConnecting then "подключается" else "нет связи" end),
+      (.usersOnline | tostring),
+      (.versions.xray // "-")
+    ]) | @tsv' <<<"$nodes" | table
+}
+
+node_action() { # enable|disable NAME
+  [ -n "${2:-}" ] || die "укажите имя сервера"
+  local uuid host_uuids
+  node_json "$2"
+  uuid="$(jq -r '.uuid' <<<"$NODE")"
+  api_ok GET /api/hosts
+  host_uuids="$(jq -c --arg u "$uuid" '[.response[] | select(.nodes | index($u)) | .uuid]' <<<"$RESP")"
+  # The panel hands out hosts regardless of their server's state, so the
+  # host has to be switched together with the server.
+  api_ok POST "/api/nodes/$uuid/actions/$1"
+  if [ "$(jq length <<<"$host_uuids")" -gt 0 ]; then
+    api_ok POST "/api/hosts/bulk/$1" "$(jq -nc --argjson h "$host_uuids" '{uuids: $h}')"
+  fi
+  if [ "$1" = "disable" ]; then
+    say "$2 убран из подписок; приложения знакомых переключатся на другие серверы при обновлении подписки"
+  else
+    say "$2 снова в подписках"
+  fi
+}
+
+# ---------------------------------------------------------------- misc
+cmd_hwid_limit() {
+  local n="${1:-}" body missing
+  case "$n" in
+    off)
+      api_ok GET /api/subscription-settings
+      body="$(jq -c '.response | {uuid, hwidSettings: (.hwidSettings | .enabled = false)}' <<<"$RESP")"
+      api_ok PATCH /api/subscription-settings "$body"
+      say "Лимит устройств выключен (устройства по-прежнему записываются)"
+      return ;;
+    "" | *[!0-9]*) die "пример: klaus-panel hwid-limit 3   (или off)" ;;
+  esac
+  [ "$n" -ge 1 ] || die "лимит должен быть не меньше 1"
+  # Friends whose app has never sent a device id would be cut off.
+  tmpdir
+  fetch_all /api/users users "$TMPD/users.json"
+  fetch_all /api/hwid/devices devices "$TMPD/devices.json"
+  missing="$(jq -r --slurpfile dev "$TMPD/devices.json" '($dev[0] | map(.userId)) as $ids
+    | [.[] | select(.status == "ACTIVE") | select(.id as $i | $ids | index($i) | not) | .username] | join(", ")' "$TMPD/users.json")"
+  echo "Лимит устройств на человека: $n (кроме тех, кому задан свой через --devices)."
+  echo "Включайте, только когда у всех стоит версия Kirov VPN, которая сообщает панели"
+  echo "устройство, и сборки подписаны постоянным ключом (раздел «Подпись приложения»)."
+  if [ -n "$missing" ]; then
+    warn "у этих подписок ещё нет ни одного устройства — они сразу перестанут получать серверы: $missing"
+  fi
+  confirm "Включить лимит?"
+  api_ok GET /api/subscription-settings
+  body="$(jq -c --argjson n "$n" '.response | {uuid, hwidSettings: (.hwidSettings | .enabled = true | .fallbackDeviceLimit = $n)}' <<<"$RESP")"
+  api_ok PATCH /api/subscription-settings "$body"
+  say "Лимит устройств включён. Освободить место: панель → пользователь → устройства → удалить старое"
+}
+
+cmd_backup() {
+  local tmp out stamp pg_user pg_db
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$BACKUP_DIR"
+  chmod 700 "$BACKUP_DIR"
+  tmpdir
+  tmp="$TMPD"
+  pg_user="$(sed -n 's/^POSTGRES_USER=//p' "$RW_DIR/.env")"
+  pg_db="$(sed -n 's/^POSTGRES_DB=//p' "$RW_DIR/.env")"
+  say "Копирую базу (пользователи, серверы, ключи)"
+  docker exec remnawave-db pg_dump -U "${pg_user:-postgres}" -d "${pg_db:-postgres}" -Fc > "$tmp/remnawave-db.dump" ||
+    die "pg_dump не сработал (запущен ли контейнер remnawave-db?)"
+  # .env holds APP_SECRET: without it the restored panel would not accept
+  # the servers' and tokens' signatures.
+  for f in .env subscription.env klaus-panel.env klaus-monitor.env docker-compose.yml Caddyfile; do
+    if [ -f "$RW_DIR/$f" ]; then cp -p "$RW_DIR/$f" "$tmp/"; fi
+  done
+  # The published app: version.json and the APK it names (KirovVPN.apk is
+  # the same file, one more name for it: cp -a keeps them one file).
+  if [ -f "$APP_DIR/version.json" ]; then
+    local apk files=("$APP_DIR/version.json")
+    apk="$(jq -r '.apk // "" | split("/") | last' "$APP_DIR/version.json")"
+    if [[ "$apk" =~ ^KirovVPN-[0-9A-Za-z._-]+\.apk$ ]] && [ -f "$APP_DIR/$apk" ]; then files+=("$APP_DIR/$apk"); fi
+    if [ -f "$APP_DIR/KirovVPN.apk" ]; then files+=("$APP_DIR/KirovVPN.apk"); fi
+    mkdir -p "$tmp/app"
+    cp -a "${files[@]}" "$tmp/app/"
+  fi
+  if [ -n "${ADMIN_FILE:-}" ] && [ -f "$ADMIN_FILE" ]; then cp -p "$ADMIN_FILE" "$tmp/admin.txt"; fi
+  if grep -qx caddy <<<"$(docker ps --format '{{.Names}}')"; then
+    docker exec caddy tar -C /data -cf - . > "$tmp/caddy-data.tar" || warn "не удалось скопировать сертификаты Caddy (не страшно: получит новые)"
+  fi
+  out="$BACKUP_DIR/klausvpn-panel-$stamp.tar.gz"
+  (umask 077 && tar -C "$tmp" -czf "$out" .)
+  say "Готово: $out ($(du -h "$out" | cut -f1))"
+  echo "Скачайте файл к себе (scp root@сервер:$out .) и храните в надёжном месте: в нём все ключи."
+}
+
+# ---------------------------------------------------------------- telegram
+# Telegram Bot API; the token is part of the URL, so the URL goes to curl
+# through a file (never in "ps").
+tg() { # METHOD [JSON]; uses TG_TOKEN, sets TG_RESP and TG_CODE
+  local tmp
+  tmp="$(mktemp -d)"
+  printf 'url = "%s/bot%s/%s"\n' "$TELEGRAM_API_BASE" "$TG_TOKEN" "$1" > "$tmp/c"
+  printf '%s' "${2:-"{}"}" > "$tmp/b"
+  TG_CODE="$(curl -sS --max-time 40 -K "$tmp/c" -o "$tmp/o" -w '%{http_code}' \
+    -H 'Content-Type: application/json' --data-binary "@$tmp/b" 2>/dev/null)" || TG_CODE=000
+  TG_RESP="$(cat "$tmp/o" 2>/dev/null || true)"
+  rm -rf "$tmp"
+}
+
+tg_send() { # TEXT: to the saved chat ("chat" or "chat:topic", as the panel takes it), or dies
+  tg sendMessage "$(jq -nc --arg c "$TELEGRAM_CHAT_ID" --arg t "$1" '($c | split(":")) as $ct
+    | {chat_id: $ct[0], text: $t, link_preview_options: {is_disabled: true}}
+    + (if ($ct | length) > 1 then {message_thread_id: ($ct[1] | tonumber)} else {} end)')"
+  { [ "$TG_CODE" = "200" ] && [ "$(jq -r '.ok' <<<"$TG_RESP" 2>/dev/null)" = "true" ]; } ||
+    die "Telegram не принял сообщение (ответ $TG_CODE${TG_RESP:+: $(jq -r '.description // empty' <<<"$TG_RESP" 2>/dev/null)})"
+}
+
+# The panel of an older install-panel.sh has no monitor and no Telegram
+# lines to fill in.
+need_new_panel() {
+  { grep -q '^TELEGRAM_BOT_API_ROOT=' "$RW_DIR/.env" 2>/dev/null && grep -q 'klaus-monitor:' "$RW_DIR/docker-compose.yml" 2>/dev/null; } ||
+    die "панель установлена старой версией install-panel.sh: запустите новую версию ещё раз (sudo bash install-panel.sh), затем повторите"
+}
+
+cmd_telegram_setup() {
+  local token="${1:-}" bot code chat="" who="" offset=0 deadline upd
+  if [ -z "$token" ]; then
+    [ -t 0 ] || die "укажите токен бота: klaus-panel telegram-setup ТОКЕН"
+    read -r -s -p "Токен бота (его выдаёт @BotFather): " token
+    echo
+  fi
+  [[ "$token" =~ ^[0-9]{5,}:[A-Za-z0-9_-]{30,}$ ]] || die "это не токен бота (он выглядит так: 123456789:AAE…); его выдаёт @BotFather"
+  [[ "$TELEGRAM_API_BASE" =~ ^https?://[A-Za-z0-9.:_-]+(/[A-Za-z0-9._/-]*)?$ ]] || die "странный адрес $TELEGRAM_API_BASE"
+  need_new_panel
+  TG_TOKEN="$token"
+  tg getMe
+  case "$TG_CODE" in
+    200) ;;
+    401 | 404) die "Telegram не принял токен: скопируйте его ещё раз (@BotFather → /mybots → бот → API Token)" ;;
+    000) die "нет связи с $TELEGRAM_API_BASE" ;;
+    *) die "Telegram ответил $TG_CODE" ;;
+  esac
+  bot="$(jq -r '.result.username // empty' <<<"$TG_RESP")"
+  # Messages the bot got before (the owner's old ones, or anybody's: bots
+  # can be found by name) do not count: the queue is emptied first, and
+  # only a message with this one-time code is taken.
+  code="$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+  [[ "$code" =~ ^[0-9a-f]{12}$ ]] || die "не удалось получить случайный код"
+  tg getUpdates '{"offset": -1, "timeout": 0}'
+  case "$TG_CODE" in
+    200) offset="$(jq -r '[.result[]?.update_id] | max | if . == null then 0 else . + 1 end' <<<"$TG_RESP" 2>/dev/null || echo 0)" ;;
+    409) die "этот бот уже подключён к другой программе (вебхук): создайте для оповещений отдельного бота" ;;
+  esac
+  [[ "$offset" =~ ^[0-9]+$ ]] || offset=0
+  say "Бот @$bot. Откройте ссылку https://t.me/$bot?start=$code и нажмите «Запустить» (или отправьте боту код $code)."
+  echo "Чтобы оповещения приходили в группу, откройте https://t.me/$bot?startgroup=$code и выберите группу. Жду до 10 минут…"
+  deadline=$((SECONDS + 600))
+  while [ -z "$chat" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || die "сообщение с кодом так и не пришло; запустите команду ещё раз"
+    tg getUpdates "$(jq -nc --argjson o "$offset" '{offset: $o, timeout: 20, allowed_updates: ["message"]}')"
+    case "$TG_CODE" in
+      200) ;;
+      409) die "этот бот уже подключён к другой программе (вебхук): создайте для оповещений отдельного бота" ;;
+      *) sleep 3; continue ;;
+    esac
+    offset="$(jq -r --argjson o "$offset" '[.result[].update_id] | max | if . == null then $o else . + 1 end' <<<"$TG_RESP")"
+    upd="$(jq -c --arg c "$code" '[.result[] | select(.message.chat.id != null and ((.message.text // "") | contains($c)))] | last // empty' <<<"$TG_RESP")"
+    if [ -n "$upd" ]; then
+      chat="$(jq -r '.message.chat.id' <<<"$upd")"
+      who="$(jq -r '.message.chat | .title // ([.first_name, .last_name, (if .username then "@" + .username else null end)] | map(select(. != null)) | join(" "))' <<<"$upd")"
+    elif [ "$(jq '[.result[] | select(.message.chat.id != null)] | length' <<<"$TG_RESP")" != "0" ]; then
+      echo "Пришло сообщение без кода — пропускаю. Откройте ссылку выше или отправьте боту код $code"
+    fi
+  done
+  [[ "$chat" =~ ^-?[0-9]{1,20}$ ]] || die "странный номер чата: $chat"
+  # Mark the messages as read, so the next setup does not pick them up.
+  tg getUpdates "$(jq -nc --argjson o "$offset" '{offset: $o, timeout: 0}')"
+  say "Сообщение пришло из чата «$who» ($chat): оповещения будут приходить туда"
+
+  TELEGRAM_BOT_TOKEN="$token"
+  TELEGRAM_CHAT_ID="$chat"
+  set_line "$CONF" TELEGRAM_BOT_TOKEN "$(printf '%q' "$token")"
+  set_line "$CONF" TELEGRAM_CHAT_ID "$(printf '%q' "$chat")"
+  set_line "$CONF" TELEGRAM_API_BASE "$(printf '%q' "$TELEGRAM_API_BASE")"
+  # The panel's own messages (servers lost and back): the same lines as
+  # install-panel.sh writes.
+  set_line "$RW_DIR/.env" IS_TELEGRAM_NOTIFICATIONS_ENABLED true
+  set_line "$RW_DIR/.env" TELEGRAM_BOT_TOKEN "$token"
+  set_line "$RW_DIR/.env" TELEGRAM_BOT_API_ROOT "$TELEGRAM_API_BASE"
+  set_line "$RW_DIR/.env" TELEGRAM_NOTIFY_NODES "$chat"
+  write_monitor_env
+  say "Перезапускаю панель и монитор блокировок с новыми настройками"
+  # Exactly what install-panel.sh would start: every container whose
+  # settings changed is recreated.
+  compose up -d || die "контейнеры не перезапустились (подробности выше)"
+  local i
+  for i in $(seq 1 60); do
+    api GET /api/auth/status
+    [ "$HTTP_CODE" = "200" ] && break
+    [ "$i" -eq 60 ] && die "панель не запустилась после перезапуска: docker logs remnawave"
+    sleep 3
+  done
+  tg_send "Kirov VPN: оповещения включены.
+Сюда придёт сообщение, если VPN-сервер потеряет связь с панелью или если у знакомых он перестанет открываться (похоже на блокировку)."
+  say "Готово: проверочное сообщение отправлено в Telegram"
+}
+
+cmd_telegram_test() {
+  { [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; } ||
+    die "оповещения ещё не настроены: klaus-panel telegram-setup ТОКЕН"
+  TG_TOKEN="$TELEGRAM_BOT_TOKEN"
+  tg_send "Kirov VPN: проверка оповещений. Всё работает."
+  say "Проверочное сообщение отправлено"
+}
+
+# ---------------------------------------------------------------- app
+# New builds of the app from the GitHub releases (private repository: a
+# read-only token) go to https://SUB_DOMAIN/app/: KirovVPN.apk,
+# KirovVPN-<version>.apk and version.json, which the app checks for updates.
+# Only from RELEASE_TAG, "stable" by default: CI makes it on purpose, never
+# on every push like the build-<branch> test builds.
+gh_get() { # URL FILE [ACCEPT] [SECONDS]; sets GH_CODE. The token goes to curl
+  # through a file; curl does not pass it on when GitHub redirects a
+  # download to its file storage.
+  local tmp
+  tmp="$(mktemp -d)"
+  printf 'Authorization: Bearer %s\nAccept: %s\nX-GitHub-Api-Version: 2022-11-28\n' \
+    "$GITHUB_TOKEN" "${3:-application/vnd.github+json}" > "$tmp/h"
+  GH_CODE="$(curl -sS -L --max-time "${4:-60}" --max-filesize 314572800 -A klaus-panel \
+    -H "@$tmp/h" -o "$2" -w '%{http_code}' "$1" 2>/dev/null)" || GH_CODE=000
+  rm -rf "$tmp"
+}
+
+page_button() { # the page's download button; if the panel cannot take it
+  # now, only a warning: the build is out, the next run tries again.
+  local rc
+  set +e
+  (
+    set -e
+    setup_subpage
+  )
+  rc=$?
+  set -e
+  [ "$rc" = "0" ] || warn "кнопку «Скачать приложение» на странице подписки поставить не удалось, попробую при следующей проверке"
+}
+
+cmd_publish_apk() {
+  local tag="${RELEASE_TAG:-stable}" repo="${GITHUB_REPO:-klausms17/vpn}"
+  local gh="${GITHUB_API:-https://api.github.com}" quiet=0
+  local apk apk_url sums_url ver code sha cur_code=0 cur_sha="" cur_apk="" got staging
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tag) tag="${2:-}"; shift 2 ;;
+      --quiet) quiet=1; shift ;;
+      *) die "непонятный параметр: $1" ;;
+    esac
+  done
+  if [ -z "${GITHUB_TOKEN:-}" ]; then
+    # The hourly timer: nothing to do until a token is given.
+    [ "$quiet" = "1" ] && return 0
+    die "нет GITHUB_TOKEN: создайте токен только для чтения (инструкция, раздел 12) и запустите sudo GITHUB_TOKEN=… bash install-panel.sh"
+  fi
+  [[ "$tag" =~ ^[A-Za-z0-9._/-]+$ ]] || die "странное имя релиза: $tag"
+  note() { if [ "$quiet" != "1" ]; then say "$@"; fi; }
+  mkdir -p "$APP_DIR"
+  # One at a time (the timer and a manual run).
+  exec 9>"$RW_DIR/.publish-apk.lock"
+  if command -v flock >/dev/null; then flock -n 9 || die "публикация уже идёт"; fi
+  tmpdir
+
+  gh_get "$gh/repos/$repo/releases/tags/$tag" "$TMPD/release.json"
+  case "$GH_CODE" in
+    200) ;;
+    401) die "GitHub не принял GITHUB_TOKEN (истёк или отозван?)" ;;
+    404)
+      # GitHub says the same about a repository the token cannot see; the
+      # repository itself tells the two apart.
+      gh_get "$gh/repos/$repo" "$TMPD/repo.json"
+      [ "$GH_CODE" = "200" ] ||
+        die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)"
+      # No stable build made yet, or CI is replacing it right now: the
+      # timer looks again in an hour.
+      [ "$quiet" = "1" ] && return 0
+      if [ "$tag" = "stable" ]; then
+        die "в $repo ещё нет релиза stable: стабильную сборку выпускает GitHub Actions по тегу v… или по кнопке Run workflow с галочкой stable (инструкция, раздел 12)"
+      fi
+      die "в $repo нет релиза $tag" ;;
+    403) die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)" ;;
+    000) die "нет связи с $gh" ;;
+    *) die "GitHub ответил $GH_CODE" ;;
+  esac
+  # CI marks builds signed with a throwaway key (no signing key in its
+  # secrets): every one has another signature, so Android refuses to put
+  # it over the installed app. Friends are not offered such builds.
+  if jq -e '(.name // "") | contains("временная подпись")' "$TMPD/release.json" >/dev/null &&
+    [ "${ALLOW_TEMP_KEY:-0}" != "1" ]; then
+    [ "$quiet" = "1" ] && return 0
+    die "сборка в релизе $tag подписана временным ключом: приложения знакомых не смогут на неё обновиться. Добавьте постоянный ключ подписи (инструкция, раздел 9) и дождитесь новой сборки. Выложить всё равно: ALLOW_TEMP_KEY=1 klaus-panel publish-apk"
+  fi
+  apk="$(jq -r 'first(.assets[]? | select(.name | test("^KirovVPN-[0-9A-Za-z._-]+\\.apk$")) | .name) // empty' "$TMPD/release.json")"
+  apk_url="$(jq -r --arg n "$apk" 'first(.assets[]? | select(.name == $n) | .url) // empty' "$TMPD/release.json")"
+  sums_url="$(jq -r 'first(.assets[]? | select(.name == "SHA256SUMS.txt") | .url) // empty' "$TMPD/release.json")"
+  { [ -n "$apk" ] && [ -n "$apk_url" ]; } || die "в релизе $tag нет файла KirovVPN-….apk"
+  [ -n "$sums_url" ] || die "в релизе $tag нет SHA256SUMS.txt: без контрольной суммы файл не публикуется"
+  ver="${apk#KirovVPN-}"
+  ver="${ver%.apk}"
+  # CI names builds 1.0.<run number>: the last number is the versionCode.
+  [[ "$ver" =~ ([0-9]+)$ ]] || die "из имени $apk не понять номер версии"
+  code=$((10#${BASH_REMATCH[1]}))
+
+  gh_get "$sums_url" "$TMPD/sums" application/octet-stream
+  [ "$GH_CODE" = "200" ] || die "не удалось скачать SHA256SUMS.txt (ответ $GH_CODE)"
+  sha="$(awk -v f="$apk" '($2 == f || $2 == "*" f) && $1 ~ /^[0-9A-Fa-f]+$/ && length($1) == 64 { print tolower($1); exit }' "$TMPD/sums")"
+  [ -n "$sha" ] || die "в SHA256SUMS.txt нет контрольной суммы $apk"
+
+  if [ -f "$APP_DIR/version.json" ]; then
+    cur_code="$(jq -r '.versionCode // 0' "$APP_DIR/version.json")"
+    cur_sha="$(jq -r '.sha256 // ""' "$APP_DIR/version.json")"
+    cur_apk="$(jq -r '.apk // "" | split("/") | last' "$APP_DIR/version.json")"
+    [[ "$cur_code" =~ ^[0-9]+$ ]] || cur_code=0
+  fi
+  if [ "$cur_sha" = "$sha" ] && [ -f "$APP_DIR/$apk" ] && [ -f "$APP_DIR/KirovVPN.apk" ]; then
+    # A run that could not reach the panel left the page without its button.
+    page_button
+    note "Версия $ver уже опубликована: https://$SUB_DOMAIN/app/KirovVPN.apk"
+    return 0
+  fi
+  if [ "$cur_code" -gt "$code" ]; then
+    note "На сервере уже версия новее ($cur_apk), чем $apk в релизе $tag: оставляю её"
+    return 0
+  fi
+
+  note "Скачиваю $apk из релиза $tag"
+  staging="$RW_DIR/.app-staging"
+  rm -rf "$staging"
+  mkdir -p "$staging"
+  gh_get "$apk_url" "$staging/$apk" application/octet-stream 900
+  if [ "$GH_CODE" != "200" ]; then rm -rf "$staging"; die "не удалось скачать $apk (ответ $GH_CODE)"; fi
+  got="$(sha256sum "$staging/$apk" | cut -d' ' -f1)"
+  if [ "$got" != "$sha" ]; then
+    rm -rf "$staging"
+    die "контрольная сумма $apk не совпала с SHA256SUMS.txt: файл повреждён или подменён. Ничего не опубликовано"
+  fi
+  # The versioned file first, then the fixed name, then version.json: it
+  # never names a file that is not there yet.
+  chmod 644 "$staging/$apk"
+  mv -f "$staging/$apk" "$APP_DIR/$apk"
+  ln -f "$APP_DIR/$apk" "$staging/KirovVPN.apk"
+  mv -f "$staging/KirovVPN.apk" "$APP_DIR/KirovVPN.apk"
+  jq -n --argjson c "$code" --arg n "$ver" --arg a "https://$SUB_DOMAIN/app/$apk" --arg s "$sha" \
+    '{versionCode: $c, versionName: $n, apk: $a, sha256: $s}' > "$staging/version.json"
+  chmod 644 "$staging/version.json"
+  mv -f "$staging/version.json" "$APP_DIR/version.json"
+  rm -rf "$staging"
+  # An app shows the update it found for up to 12 hours before it checks
+  # again, so a replaced build stays 13 hours (its file's time says when
+  # it was replaced), then goes.
+  if [[ "$cur_apk" =~ ^KirovVPN-[0-9A-Za-z._-]+\.apk$ ]] && [ "$cur_apk" != "$apk" ] && [ -f "$APP_DIR/$cur_apk" ]; then
+    touch "$APP_DIR/$cur_apk"
+  fi
+  # Files of the app's former name (KlausVPN*.apk) go too, once 13 hours
+  # old; their links lead to the current build.
+  find "$APP_DIR" -maxdepth 1 -type f \( -name 'KirovVPN-*.apk' ! -name "$apk" -o -name 'KlausVPN*.apk' \) -mmin +780 -delete
+  page_button
+  note "Опубликована версия $ver: https://$SUB_DOMAIN/app/KirovVPN.apk (приложения знакомых предложат обновиться)"
+}
+
+# ---------------------------------------------------------------- main
+cmd="${1:-help}"
+[ $# -gt 0 ] && shift
+YES=0
+args=()
+for a in "$@"; do
+  if [ "$a" = "--yes" ] || [ "$a" = "-y" ]; then YES=1; else args+=("$a"); fi
+done
+set -- "${args[@]}"
+
+case "$cmd" in
+  help | -h | --help) usage; exit 0 ;;
+esac
+load_conf
+case "$cmd" in
+  setup) cmd_setup ;;
+  add-user) cmd_add_user "$@" ;;
+  link) cmd_link "$@" ;;
+  list-users) cmd_list_users ;;
+  disable-user) user_action disable "$@" ;;
+  enable-user) user_action enable "$@" ;;
+  delete-user) user_action delete "$@" ;;
+  tidy-users) cmd_tidy_users "$@" ;;
+  add-node) cmd_add_node "$@" ;;
+  list-nodes) cmd_list_nodes ;;
+  disable-node) node_action disable "$@" ;;
+  enable-node) node_action enable "$@" ;;
+  hwid-limit) cmd_hwid_limit "$@" ;;
+  backup) cmd_backup ;;
+  telegram-setup) cmd_telegram_setup "$@" ;;
+  telegram-test) cmd_telegram_test ;;
+  publish-apk) cmd_publish_apk "$@" ;;
+  *) usage >&2; exit 1 ;;
+esac

@@ -1,0 +1,54 @@
+# DRAFT (not tested against Apple): .github/workflows/ios-devices.yml
+# Ubuntu only (1x minutes). Registers new iPhones, rebuilds the two Ad Hoc
+# profiles from ALL enabled devices, re-signs the last IPA built on macOS and
+# publishes it as a new release the panel pulls (like publish-apk).
+name: iOS devices
+on:
+  workflow_dispatch:
+    inputs:
+      devices:
+        description: 'JSON: [{"udid":"...","name":"..."}] (from klaus-panel)'
+        required: false
+        default: '[]'
+  schedule:
+    - cron: '17 4 * * 1'   # weekly safety net: profile state / expiry check
+concurrency: { group: ios-signing, cancel-in-progress: false }
+permissions: { contents: write }   # to create the release
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # environment: ios-signing   # if the plan allows environments on a private repo
+    steps:
+      - uses: actions/checkout@v5
+      - name: Register new devices
+        env:
+          DEVICES: ${{ inputs.devices }}          # never ${{ }} inside run: (script injection)
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          umask 077; printf '%s' "$ASC_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          export ASC_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          # validates every UDID (regex), caps new devices per run (e.g. 5) and
+          # in total (e.g. 95), prints counts only
+          python3 scripts/ios/asc.py register-batch
+      - name: Rebuild Ad Hoc profiles if the device set changed
+        run: python3 scripts/ios/asc.py profiles --out "$RUNNER_TEMP/profiles"   # app + tunnel
+      - name: Re-sign last IPA with the new profiles
+        env:
+          P12_B64: ${{ secrets.IOS_DIST_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.IOS_DIST_P12_PASSWORD }}
+        run: |
+          umask 077
+          printf '%s' "$P12_B64" | base64 -d > "$RUNNER_TEMP/dist.p12"
+          printf '%s' "$P12_PASSWORD" > "$RUNNER_TEMP/p12pw"
+          # download KlausVPN-<ver>.ipa from the latest ios release, unzip,
+          # copy profiles/app.mobileprovision  -> Payload/Klaus.app/embedded.mobileprovision
+          #      profiles/tunnel.mobileprovision -> Payload/Klaus.app/PlugIns/Tunnel.appex/embedded.mobileprovision
+          # rcodesign sign --p12-file "$RUNNER_TEMP/dist.p12" --p12-password-file "$RUNNER_TEMP/p12pw" Payload/Klaus.app
+          #   (rcodesign keeps each binary's existing entitlements when re-signing)
+          # zip -qr KlausVPN-<ver>.ipa Payload; sha256sum > SHA256SUMS.txt; write manifest.plist
+      - name: Publish release (panel timer pulls it)
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: echo "gh release create ios-<ver>-d<devicecount> ... KlausVPN-<ver>.ipa SHA256SUMS.txt"
