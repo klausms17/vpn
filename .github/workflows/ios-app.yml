@@ -83,7 +83,7 @@ jobs:
         run: |
           app="$(find "$RUNNER_TEMP/dd" -name KlausVPN.app -type d -print -quit)"
           appex="$app/PlugIns/PacketTunnel.appex"
-          fail() { echo "::error::$*"; ls -la "$app" "$appex" 2>/dev/null || true; exit 1; }
+          fail() { echo "::error::$*"; ls -laR "$app" 2>/dev/null | head -n 60 || true; exit 1; }
           [ -n "$app" ] || fail "KlausVPN.app was not built"
           [ -d "$appex" ] || fail "the packet tunnel extension is missing"
           point="$(plutil -extract NSExtension.NSExtensionPointIdentifier raw "$appex/Info.plist")"

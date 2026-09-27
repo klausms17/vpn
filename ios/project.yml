@@ -63,7 +63,8 @@ targets:
     type: app-extension
     platform: iOS
     sources:
-      - PacketTunnel
+      - path: PacketTunnel
+        excludes: ["Resources/geo"]  # added once below, as a folder
       - Shared
       - path: PacketTunnel/Resources/geo
         type: folder
