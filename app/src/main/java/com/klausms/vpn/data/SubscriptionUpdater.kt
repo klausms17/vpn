@@ -97,16 +97,31 @@ class SubscriptionUpdater(context: Context, private val profiles: ProfilesAccess
      * server the tunnel runs (default: the selected one), for
      * [Outcome.runningChanged]. [repin]: fetch pinned certificates again
      * instead of keeping those of unchanged links (a manual refresh).
+     * [repinId]: only this server's certificate is fetched again, e.g. the
+     * one that just failed: its operator may have issued a new one, and the
+     * old pin would keep it broken.
      * Returns null when the subscription is gone; throws, after saving the
      * error on the subscription, when the download or parsing fails.
      */
-    suspend fun refresh(id: String, downloader: Downloader, runningId: String? = null, repin: Boolean = false): Outcome? {
+    suspend fun refresh(
+        id: String,
+        downloader: Downloader,
+        runningId: String? = null,
+        repin: Boolean = false,
+        repinId: String? = null,
+    ): Outcome? {
         val snapshot = profiles.snapshot()
         val sub = snapshot.subscriptions.firstOrNull { it.id == id } ?: return null
         // Certificates pinned before: reused for unchanged servers, and kept
         // when a server cannot be reached right now (it is not deleted).
-        val known = Pinned.of(snapshot.profiles.filter { it.subscriptionId == id })
-        val reuse = if (repin) Pinned.NONE else known
+        val servers = snapshot.profiles.filter { it.subscriptionId == id }
+        val known = Pinned.of(servers)
+        val stale = servers.firstOrNull { it.id == repinId }?.link
+        val reuse = when {
+            repin -> Pinned.NONE
+            stale != null -> known.without(stale)
+            else -> known
+        }
         val fetched = try {
             download(sub.url, downloader, reuse, known)
         } catch (e: Exception) {
@@ -333,6 +348,12 @@ class Pinned private constructor(
 
     /** The same server, maybe with other settings: only when it cannot be pinned now. */
     fun sameServer(p: ParsedProfile): JsonArray? = sameLink(p) ?: byEndpoint[endpointKey(p.protocol, p.address, p.port)]
+
+    /**
+     * These pins, but [sameLink] gives none for [link] (whatever its name),
+     * so its certificate is fetched again; [sameServer] still has it.
+     */
+    fun without(link: String) = Pinned(byLink - linkKey(link), byEndpoint)
 
     companion object {
         val NONE = Pinned(emptyMap(), emptyMap())

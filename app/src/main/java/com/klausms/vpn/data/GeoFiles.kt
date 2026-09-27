@@ -22,11 +22,29 @@ object GeoFiles {
     fun file(context: Context, name: String) = File(activeDir(context), name)
 
     /** Epoch seconds of the installed databases, 0 if none. */
-    fun installedVersion(context: Context): Long =
-        File(activeDir(context), VERSION).takeIf { it.exists() }?.readText()?.trim()?.toLongOrNull() ?: 0
+    fun installedVersion(context: Context): Long = readStamp(activeDir(context)).version
 
     private fun bundledVersion(context: Context): Long =
-        context.assets.open("geo/$VERSION").bufferedReader().use { it.readText().trim().toLongOrNull() ?: 0 }
+        context.assets.open("geo/$VERSION").bufferedReader().use { Stamp.parse(it.readText()).version }
+
+    /**
+     * What version.txt holds: when the databases were made (epoch seconds)
+     * and, on a second line, the categories they were trimmed to. Files
+     * installed before that line existed have none.
+     */
+    internal data class Stamp(val version: Long, val codes: String?) {
+        fun format(): String = if (codes == null) "$version" else "$version\n$codes"
+
+        companion object {
+            fun parse(text: String): Stamp {
+                val lines = text.lines()
+                return Stamp(lines.first().trim().toLongOrNull() ?: 0, lines.getOrNull(1)?.trim()?.ifEmpty { null })
+            }
+        }
+    }
+
+    /** The categories this version of the app loads from the databases. */
+    private fun wantedCodes() = "geoip=${XrayCore.geoipCodes};geosite=${XrayCore.geositeCodes}"
 
     /** Makes sure usable databases are installed; cheap when they are. */
     @Synchronized
@@ -34,7 +52,8 @@ object GeoFiles {
         val dir = activeDir(context).apply { mkdirs() }
         val bundled = bundledVersion(context)
         val complete = File(dir, GEOIP).length() > 0 && File(dir, GEOSITE).length() > 0
-        if (complete && installedVersion(context) >= bundled) return
+        val installed = readStamp(dir)
+        if (complete && installed.version >= bundled && hasWantedCodes(dir, installed)) return
         for (name in listOf(GEOIP, GEOSITE)) {
             // Per-process temp name: the UI and VPN processes may race here.
             val tmp = File(dir, "$name.${Process.myPid()}.tmp")
@@ -44,8 +63,35 @@ object GeoFiles {
                 throw IllegalStateException("Не удалось установить базы маршрутизации")
             }
         }
-        writeVersion(dir, bundled)
+        writeStamp(dir, Stamp(bundled, wantedCodes()))
         AppLog.i("geo databases installed from APK (version $bundled)")
+    }
+
+    /**
+     * Whether the installed databases hold every category this version
+     * loads. Databases updated in the app are newer than the APK's copy and
+     * stay, but a category added in an app update would be missing from
+     * them, and the core would then fail on every start. The stamp answers
+     * quickly; without a matching one (written by an older version) the
+     * files themselves are checked, once.
+     */
+    private fun hasWantedCodes(dir: File, stamp: Stamp): Boolean {
+        val wanted = wantedCodes()
+        if (stamp.codes == wanted) return true
+        try {
+            XrayCore.checkGeoFile(File(dir, GEOIP).absolutePath, XrayCore.geoipCodes)
+            XrayCore.checkGeoFile(File(dir, GEOSITE).absolutePath, XrayCore.geositeCodes)
+        } catch (e: Exception) {
+            AppLog.w("installed geo databases lack categories, reinstalling from APK", e)
+            return false
+        }
+        try {
+            writeStamp(dir, stamp.copy(codes = wanted))
+        } catch (e: Exception) {
+            // Only costs another check on the next start.
+            AppLog.w("geo version not saved", e)
+        }
+        return true
     }
 
     /**
@@ -72,7 +118,10 @@ object GeoFiles {
             for ((from, to) in staged) {
                 if (!from.renameTo(to)) throw IllegalStateException("Не удалось заменить ${to.name}")
             }
-            writeVersion(dir, System.currentTimeMillis() / 1000)
+            // Never older than the APK's copy, even with the phone's clock set
+            // back: ensureInstalled would otherwise swap these fresh files for it.
+            val version = maxOf(System.currentTimeMillis() / 1000, bundledVersion(context))
+            writeStamp(dir, Stamp(version, wantedCodes()))
             AppLog.i("geo databases updated")
         } finally {
             work.deleteRecursively()
@@ -95,9 +144,12 @@ object GeoFiles {
         throw last ?: IllegalStateException("download failed")
     }
 
-    private fun writeVersion(dir: File, version: Long) {
+    private fun readStamp(dir: File): Stamp =
+        File(dir, VERSION).takeIf { it.exists() }?.readText()?.let(Stamp::parse) ?: Stamp(0, null)
+
+    private fun writeStamp(dir: File, stamp: Stamp) {
         val tmp = File(dir, "$VERSION.${Process.myPid()}.tmp")
-        tmp.writeText(version.toString())
+        tmp.writeText(stamp.format())
         tmp.renameTo(File(dir, VERSION))
     }
 }
