@@ -19,7 +19,6 @@ import android.os.RemoteCallbackList
 import android.os.SystemClock
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
-import androidx.core.content.edit
 import com.klausms.vpn.core.BuildOptions
 import com.klausms.vpn.core.XrayCore
 import com.klausms.vpn.core.userMessage
@@ -36,7 +35,6 @@ import com.klausms.vpn.data.SubscriptionUpdater
 import com.klausms.vpn.ui.MainActivity
 import com.klausms.vpn.util.AppLog
 import com.klausms.vpn.util.PhoneSettings
-import com.klausms.vpn.util.ProcessExits
 import com.klausms.vpn.widget.VpnWidget
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -176,6 +174,8 @@ class XrayVpnService : VpnService() {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    private lateinit var runtime: RuntimeStore
 
     @OptIn(ExperimentalCoroutinesApi::class)
     private val worker = Dispatchers.IO.limitedParallelism(1)
@@ -351,6 +351,7 @@ class XrayVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
+        runtime = PrefsRuntimeStore(this)
         Notifications.ensureChannels(this)
     }
 
@@ -378,7 +379,7 @@ class XrayVpnService : VpnService() {
                         startId != lastReconnectId -> Unit
                         // A late "apply new settings" must not switch on a
                         // VPN the user has turned off meanwhile.
-                        config == null && !RuntimeState.shouldRun(this) -> {
+                        config == null && !runtime.shouldRun() -> {
                             pickPending.set(false)
                             withContext(Dispatchers.Main) { stopIfLatest(startId) }
                         }
@@ -396,14 +397,14 @@ class XrayVpnService : VpnService() {
                 val alwaysOn = intent?.action == VpnService.SERVICE_INTERFACE
                 // stopSelf(startId), never stopSelf(): a start the system has
                 // just accepted (the widget's) must not be dropped with it.
-                if (restart && !RuntimeState.shouldRun(this)) {
+                if (restart && !runtime.shouldRun()) {
                     stopSelf(startId)
                     return START_NOT_STICKY
                 }
                 if (restart && !RuntimeState.allowAutoRestart(this)) {
                     AppLog.e("tunnel keeps crashing, giving up automatic restarts")
                     Notifications.showError(this, "VPN несколько раз аварийно остановился и больше не перезапускается автоматически. Откройте приложение.")
-                    RuntimeState.setShouldRun(this, false)
+                    runtime.setShouldRun(false)
                     stopSelf(startId)
                     return START_NOT_STICKY
                 }
@@ -414,7 +415,7 @@ class XrayVpnService : VpnService() {
                         AppLog.i("started by Always-on VPN")
                         // The system starts it for the user: failed starts are
                         // tried again, as for a tunnel that should run.
-                        RuntimeState.setShouldRun(this, true)
+                        runtime.setShouldRun(true)
                     }
                 }
                 // Also sent to a tunnel that is up (the app connects whatever
@@ -434,7 +435,7 @@ class XrayVpnService : VpnService() {
                             if (SystemClock.elapsedRealtime() - lastVerifiedOkAt >= APP_CHECK_MS) scheduleVerify(Reason.APP)
                         }
                         // Turned off after the resume was sent.
-                        resume && !RuntimeState.shouldRun(this) -> withContext(Dispatchers.Main) { stopIfLatest(startId) }
+                        resume && !runtime.shouldRun() -> withContext(Dispatchers.Main) { stopIfLatest(startId) }
                         else -> startTunnel(startId, requested, picked = picked)
                     }
                 }
@@ -572,7 +573,7 @@ class XrayVpnService : VpnService() {
                 else -> null
             }
             connectedAtElapsed = SystemClock.elapsedRealtime()
-            RuntimeState.setShouldRun(this, true)
+            runtime.setShouldRun(true)
             withContext(Dispatchers.Main) { startNetworkMonitor() }
             // Only a server whose core came up becomes the selection.
             if (profileOverride != null && failedId != null) {
@@ -597,7 +598,7 @@ class XrayVpnService : VpnService() {
                 // leave it alone and stay off, without an error.
                 AppLog.i("another VPN is active, not restarting")
                 stopCore()
-                RuntimeState.setShouldRun(this, false)
+                runtime.setShouldRun(false)
                 setStatus(VpnStatus(VpnState.DISCONNECTED))
                 withContext(Dispatchers.Main) { stopIfLatest(startId) }
                 return
@@ -628,7 +629,7 @@ class XrayVpnService : VpnService() {
             // It was running, or should be running (a restart nobody asked
             // for): a second try usually works. The new interface stays up
             // meanwhile, so apps wait instead of going around the VPN.
-            if ((restarting || !userRequested) && attempt < MAX_START_RETRIES && RuntimeState.shouldRun(this)) {
+            if ((restarting || !userRequested) && attempt < MAX_START_RETRIES && runtime.shouldRun()) {
                 haltCore()
                 setStatus(VpnStatus(VpnState.CONNECTING, profileName = before.profileName, message = "Переподключение…"))
                 withContext(Dispatchers.Main) { enterForeground("Переподключение…", null) }
@@ -636,7 +637,7 @@ class XrayVpnService : VpnService() {
                 return
             }
             stopCore()
-            RuntimeState.setShouldRun(this, false)
+            runtime.setShouldRun(false)
             setStatus(VpnStatus(VpnState.ERROR, message = message))
             if (!isAppVisible()) Notifications.showError(this, message)
             withContext(Dispatchers.Main) { stopIfLatest(startId) }
@@ -652,7 +653,7 @@ class XrayVpnService : VpnService() {
         scope.launch(worker) {
             delay(if (attempt == 1) 1_500L else 5_000L)
             enqueue {
-                if (generation != startGeneration || !RuntimeState.shouldRun(this@XrayVpnService)) return@enqueue
+                if (generation != startGeneration || !runtime.shouldRun()) return@enqueue
                 AppLog.i("starting again (attempt ${attempt + 1})")
                 start()
             }
@@ -663,7 +664,7 @@ class XrayVpnService : VpnService() {
         // prepare() is not a query: with an earlier consent it takes the VPN
         // over from whichever app runs one. Only do that when asked to.
         if (userRequested && prepare(this) != null) {
-            RuntimeState.setVpnConsented(this, false)
+            runtime.setVpnConsented(false)
             throw VpnStartException("Нет разрешения на VPN. Откройте приложение и подключитесь оттуда.")
         }
         val tunCfg = XrayCore.tunConfig(ipv6 = false)
@@ -701,7 +702,7 @@ class XrayVpnService : VpnService() {
             } else {
                 throw AnotherVpnException()
             }
-        RuntimeState.setVpnConsented(this, true)
+        runtime.setVpnConsented(true)
         return pfd
     }
 
@@ -734,7 +735,7 @@ class XrayVpnService : VpnService() {
 
     /** [message]: why, when it was not the user (shown under "Отключено"). */
     private fun disconnect(userInitiated: Boolean, startId: Int, message: String? = null) {
-        if (userInitiated) RuntimeState.setShouldRun(this, false)
+        if (userInitiated) runtime.setShouldRun(false)
         setStatus(VpnStatus(VpnState.DISCONNECTING, profileName = VpnStatusHolder.status.value.profileName))
         enqueue {
             // A start that was still running has just finished; say again
@@ -744,7 +745,7 @@ class XrayVpnService : VpnService() {
             }
             stopCore()
             // A start that finished just before this set it again.
-            if (userInitiated) RuntimeState.setShouldRun(this, false)
+            if (userInitiated) runtime.setShouldRun(false)
             setStatus(VpnStatus(VpnState.DISCONNECTED, message = message))
             AppLog.i("tunnel down")
             withContext(Dispatchers.Main) { stopIfLatest(startId) }
@@ -963,7 +964,7 @@ class XrayVpnService : VpnService() {
                         runningProfile = null
                         config = null
                         newEpoch()
-                        enqueue { if (RuntimeState.shouldRun(this@XrayVpnService)) startTunnel(startId, userRequested = false) }
+                        enqueue { if (runtime.shouldRun()) startTunnel(startId, userRequested = false) }
                     }
                 }
             }
@@ -1122,7 +1123,7 @@ class XrayVpnService : VpnService() {
             setNotice(last, e)
             return
         }
-        if (!RuntimeState.allowFailover(this, take = false)) {
+        if (!runtime.allowFailover(take = false)) {
             AppLog.w("automatic server switches used up for now")
             setNotice(Failover.NOTICE_PICK_ANOTHER, e)
             return
@@ -1136,7 +1137,7 @@ class XrayVpnService : VpnService() {
         val sub = refreshableSubscription(state, failed)
         if (first.isNotEmpty() || sub != null) {
             // Probing servers and downloading the list is what costs.
-            if (!RuntimeState.allowSearch(this)) {
+            if (!runtime.allowSearch()) {
                 AppLog.w("automatic searches used up for now")
                 setNotice(Failover.NOTICE_PICK_ANOTHER, e)
                 return
@@ -1264,7 +1265,7 @@ class XrayVpnService : VpnService() {
      */
     private fun restartOnSaved(running: StoredProfile) {
         enqueue {
-            if (config == null || !RuntimeState.shouldRun(this) || runningProfile !== running) return@enqueue
+            if (config == null || !runtime.shouldRun() || runningProfile !== running) return@enqueue
             AppLog.i("the running server changed in the subscription, restarting")
             startTunnel(lastStartId, userRequested = false)
         }
@@ -1279,7 +1280,7 @@ class XrayVpnService : VpnService() {
      */
     private suspend fun switchTo(e: Long, failed: StoredProfile, winnerId: String, returning: Boolean = false, report: Boolean = true) {
         try {
-            if (epoch.get() != e || config == null || !RuntimeState.shouldRun(this) ||
+            if (epoch.get() != e || config == null || !runtime.shouldRun() ||
                 VpnStatusHolder.status.value.state != VpnState.CONNECTED
             ) {
                 AppLog.i("server switch dropped: the tunnel changed meanwhile")
@@ -1293,7 +1294,7 @@ class XrayVpnService : VpnService() {
                 clearFailureNotice(e)
                 return
             }
-            if (!RuntimeState.allowFailover(this)) {
+            if (!runtime.allowFailover()) {
                 if (!returning) setNotice(Failover.NOTICE_PICK_ANOTHER, e)
                 return
             }
@@ -1387,10 +1388,10 @@ class XrayVpnService : VpnService() {
 
     /** An automatic switch from [failedId] to [winnerId] happened: remember the user's server. */
     private fun trackAway(failedId: String, winnerId: String) {
-        val away = RuntimeState.away(this)
+        val away = runtime.away()
         val now = SystemClock.elapsedRealtime()
-        if (away != null && winnerId == away.home) RuntimeState.setReturned(this, Failover.Returned(away.home, now, away.backoff))
-        RuntimeState.setAway(this, Failover.afterSwitch(away, RuntimeState.returned(this), failedId, winnerId, now))
+        if (away != null && winnerId == away.home) runtime.setReturned(Failover.Returned(away.home, now, away.backoff))
+        runtime.setAway(Failover.afterSwitch(away, runtime.returned(), failedId, winnerId, now))
     }
 
     /**
@@ -1399,8 +1400,8 @@ class XrayVpnService : VpnService() {
      * server than the one switched to (a delete or refresh moved it).
      */
     private fun forgetAwayUnless(runningId: String, picked: Boolean) {
-        val away = RuntimeState.away(this) ?: return
-        if (picked || runningId != away.to) RuntimeState.setAway(this, null)
+        val away = runtime.away() ?: return
+        if (picked || runningId != away.to) runtime.setAway(null)
     }
 
     /**
@@ -1410,21 +1411,21 @@ class XrayVpnService : VpnService() {
      * failing), go back to it.
      */
     private suspend fun returnHomeIfItAnswers(e: Long, c: Controller, running: StoredProfile) {
-        val away = RuntimeState.away(this) ?: return
+        val away = runtime.away() ?: return
         val now = SystemClock.elapsedRealtime()
         if (away.to != running.id || !Failover.returnDue(away, now) || failedRecently(away.home)) return
         val saved = Stores.profiles(this).read()
         val home = saved.profiles.firstOrNull { it.id == away.home }
         if (home == null) {
-            RuntimeState.setAway(this, null)
+            runtime.setAway(null)
             return
         }
         // The user chose another server meanwhile; their start follows.
-        if (saved.selectedId != running.id || !RuntimeState.allowFailover(this, take = false)) return
+        if (saved.selectedId != running.id || !runtime.allowFailover(take = false)) return
         val answered = probe(c, listOf(home)).first() >= 0
         if (epoch.get() != e) return
         if (!answered) {
-            RuntimeState.setAway(this, Failover.returnFailed(away, now))
+            runtime.setAway(Failover.returnFailed(away, now))
             return
         }
         AppLog.i("the chosen server answers again, going back to it")
@@ -1703,106 +1704,3 @@ private class Refreshed(val applied: Boolean?, val runningChanged: Boolean)
 
 /** An automatic restart found another app's VPN in place. */
 private class AnotherVpnException : Exception("another VPN is active")
-
-/**
- * Small state private to the VPN process: whether the tunnel should be up
- * (for restarts after the process was killed), a crash-loop guard, the
- * budgets of automatic server switches and searches, and the user's server
- * while an automatic switch keeps the tunnel on another one.
- */
-internal object RuntimeState {
-    private const val PREFS = "vpn_runtime"
-
-    fun shouldRun(context: Context) = prefs(context).getBoolean("should_run", false)
-
-    fun setShouldRun(context: Context, value: Boolean) {
-        prefs(context).edit { putBoolean("should_run", value) }
-    }
-
-    /**
-     * Whether the user has allowed this VPN (a tunnel came up once). Lets the
-     * widget connect directly without calling VpnService.prepare(), which is
-     * not a query: with an earlier consent it takes the VPN over from
-     * whichever app is running one.
-     */
-    fun vpnConsented(context: Context) = prefs(context).getBoolean("vpn_consented", false)
-
-    fun setVpnConsented(context: Context, value: Boolean) {
-        if (vpnConsented(context) != value) prefs(context).edit { putBoolean("vpn_consented", value) }
-    }
-
-    /**
-     * Whether an automatic switch to another server is allowed now (see
-     * [Failover.MAX_SWITCHES]); [take] counts one. Kept on disk so a
-     * restarted process cannot start over; by time since boot, so a clock
-     * change cannot either.
-     */
-    fun allowFailover(context: Context, take: Boolean = true): Boolean {
-        val p = prefs(context)
-        val next = Failover.countSwitch(p.getString("failovers", "") ?: "", SystemClock.elapsedRealtime()) ?: return false
-        if (take) p.edit { putString("failovers", next) }
-        return true
-    }
-
-    /** Whether an automatic search for another server is allowed now (see [Failover.MAX_SEARCHES]); counts one. */
-    fun allowSearch(context: Context): Boolean {
-        val p = prefs(context)
-        val next = Failover.countSearch(p.getString("searches", "") ?: "", SystemClock.elapsedRealtime()) ?: return false
-        p.edit { putString("searches", next) }
-        return true
-    }
-
-    /**
-     * Whether the system may restart the tunnel after the process ended:
-     * at most 3 times in 5 minutes after crashes (see [RestartGuard]).
-     * Android 11+ tells why the process ended (App logs it); on older ones
-     * every end counts. By time since boot, so a clock change cannot fool it.
-     */
-    fun allowAutoRestart(context: Context): Boolean {
-        val reason = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) ProcessExits.lastVpnExit(context)?.reason else null
-        if (reason != null && !RestartGuard.isCrash(reason)) return true
-        val p = prefs(context)
-        val next = RestartGuard.countRestart(p.getString("restarts", "") ?: "", SystemClock.elapsedRealtime()) ?: return false
-        p.edit { putString("restarts", next) }
-        return true
-    }
-
-    fun away(context: Context): Failover.Away? {
-        val p = prefs(context)
-        val home = p.getString("away_home", null) ?: return null
-        val to = p.getString("away_to", null) ?: return null
-        return Failover.Away(home, to, p.getLong("away_retry", 0), p.getInt("away_backoff", 0))
-    }
-
-    fun setAway(context: Context, away: Failover.Away?) {
-        prefs(context).edit {
-            if (away == null) {
-                remove("away_home")
-                remove("away_to")
-                remove("away_retry")
-                remove("away_backoff")
-            } else {
-                putString("away_home", away.home)
-                putString("away_to", away.to)
-                putLong("away_retry", away.retryAt)
-                putInt("away_backoff", away.backoff)
-            }
-        }
-    }
-
-    fun returned(context: Context): Failover.Returned? {
-        val p = prefs(context)
-        val id = p.getString("returned_id", null) ?: return null
-        return Failover.Returned(id, p.getLong("returned_at", 0), p.getInt("returned_backoff", 0))
-    }
-
-    fun setReturned(context: Context, returned: Failover.Returned) {
-        prefs(context).edit {
-            putString("returned_id", returned.id)
-            putLong("returned_at", returned.at)
-            putInt("returned_backoff", returned.backoff)
-        }
-    }
-
-    private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-}
