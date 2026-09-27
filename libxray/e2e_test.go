@@ -311,7 +311,7 @@ func TestEndToEnd(t *testing.T) {
 
 			// 2. Full VPN config, as used by the VPN service.
 			before := hits.Load()
-			cfg := buildOpts(t, BuildOptions{Outbounds: p.Outbounds, Mode: ModeRuDirect, SocksPort: freePort(t)})
+			cfg := withStats(t, buildOpts(t, BuildOptions{Outbounds: p.Outbounds, Mode: ModeRuDirect, SocksPort: freePort(t)}))
 			ctrl := NewController()
 			if err := ctrl.Start(cfg, 0); err != nil {
 				t.Fatalf("start: %v", err)
@@ -331,8 +331,8 @@ func TestEndToEnd(t *testing.T) {
 					t.Fatalf("UDP through proxy: %v", err)
 				}
 			}
-			tr := ctrl.QueryTraffic()
-			if tr.ProxyUp == 0 || tr.ProxyDown == 0 {
+			tr := takeTraffic(t, ctrl)
+			if tr.proxyUp == 0 || tr.proxyDown == 0 {
 				t.Errorf("traffic counters not working: %+v", tr)
 			}
 

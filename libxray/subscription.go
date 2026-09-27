@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,7 +31,9 @@ var errEncrypted = errf("подписка зашифрована для друг
 // ParseSubscription understands the formats subscription panels serve:
 // base64 list of links, plain list of links, and Xray JSON configs (a single
 // config or an array of them, as served to Happ/v2rayNG).
-func ParseSubscription(body []byte) (string, error) {
+func ParseSubscription(body []byte) (resultJSON string, err error) {
+	defer recoverInto(&err)
+
 	res, err := parseSubscription(body)
 	if err != nil {
 		return "", err
@@ -70,11 +73,13 @@ func parseSubscription(body []byte) (*SubscriptionResult, error) {
 				text = ""
 			}
 		}
+		n := 0 // entry number, for error messages
 		for _, line := range strings.FieldsFunc(text, func(r rune) bool { return r == '\n' || r == '\r' }) {
 			line = strings.TrimSpace(line)
 			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
 				continue
 			}
+			n++
 			line = stripServerDescription(line)
 			if notice, ok := placeholderNotice(line); ok {
 				res.addNotice(notice)
@@ -82,7 +87,7 @@ func parseSubscription(body []byte) (*SubscriptionResult, error) {
 			}
 			p, err := parseLink(line)
 			if err != nil {
-				res.addError(line, err)
+				res.addError(n, line, err)
 				continue
 			}
 			res.Profiles = append(res.Profiles, p)
@@ -153,17 +158,37 @@ func placeholderProfile(p *Profile) bool {
 	return isPlaceholder(p.Address, p.Port, id)
 }
 
-func (r *SubscriptionResult) addError(entry string, err error) {
+// addError records why entry n was skipped. The message names the entry
+// and never quotes it: a link carries its UUID or password, and these
+// messages reach the app log.
+func (r *SubscriptionResult) addError(n int, entry string, err error) {
 	if len(r.Errors) >= 20 {
 		return
 	}
-	name := entry
-	if i := strings.IndexByte(name, '#'); i >= 0 {
-		name = unescape(name[i+1:])
-	} else if len(name) > 40 {
-		name = name[:40] + "…"
+	r.Errors = append(r.Errors, fmt.Sprintf("%s: %v", entryLabel(n, entry), err))
+}
+
+var linkScheme = regexp.MustCompile(`^[a-z0-9+.-]{1,16}$`)
+
+// entryLabel names entry n of a subscription by the link's remark, else by
+// its number and scheme.
+func entryLabel(n int, entry string) string {
+	scheme, rest, isLink := strings.Cut(entry, "://")
+	if !isLink {
+		return fmt.Sprintf("строка %d", n)
 	}
-	r.Errors = append(r.Errors, fmt.Sprintf("%s: %v", name, err))
+	if _, remark, ok := strings.Cut(rest, "#"); ok {
+		if remark = strings.TrimSpace(unescape(remark)); remark != "" {
+			if r := []rune(remark); len(r) > 60 {
+				remark = string(r[:60]) + "…"
+			}
+			return remark
+		}
+	}
+	if scheme = strings.ToLower(scheme); linkScheme.MatchString(scheme) {
+		return fmt.Sprintf("ключ %d (%s)", n, scheme)
+	}
+	return fmt.Sprintf("ключ %d", n)
 }
 
 var proxyProtocols = map[string]bool{

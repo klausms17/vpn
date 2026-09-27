@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/xtls/xray-core/common/geodata"
 	"google.golang.org/protobuf/proto"
@@ -207,47 +209,112 @@ func GeoIPContains(path, code, ip string) (ok bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	addr = addr.Unmap()
-	code = strings.ToUpper(code)
-
-	f, err := os.Open(path)
+	set, err := loadGeoIPSet(path, code)
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
+	return set.contains(addr), nil
+}
 
+// geoIPSet is one parsed geoip category. It never changes once built.
+type geoIPSet struct {
+	key      string // see loadGeoIPSet
+	prefixes []netip.Prefix
+	reverse  bool
+}
+
+func (s *geoIPSet) contains(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	for _, p := range s.prefixes {
+		if p.Contains(addr) {
+			return !s.reverse
+		}
+	}
+	return s.reverse
+}
+
+// geoIPCache holds the category parsed last. HostInGeoIP checks every
+// address of every server against the same category, and parsing
+// ru-whitelist takes milliseconds and megabytes each time. Dropped after
+// geoIPCacheIdle unused, so the VPN process does not keep it after one
+// failover.
+var geoIPCache struct {
+	sync.Mutex
+	set   *geoIPSet
+	timer *time.Timer
+}
+
+const geoIPCacheIdle = time.Minute
+
+// loadGeoIPSet parses the category once for as long as the file stays the
+// same. The key comes from the opened file: the app replaces geoip.dat by
+// rename, and a stat of the path before the open could describe the old
+// file while the open reads the new one.
+func loadGeoIPSet(path, code string) (*geoIPSet, error) {
+	code = strings.ToUpper(code)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	key := fmt.Sprintf("%s|%s|%d|%d", path, code, fi.Size(), fi.ModTime().UnixNano())
+
+	// Held while parsing, so callers in parallel parse only once.
+	geoIPCache.Lock()
+	defer geoIPCache.Unlock()
+	if geoIPCache.timer == nil {
+		geoIPCache.timer = time.AfterFunc(geoIPCacheIdle, dropGeoIPCache)
+	} else {
+		geoIPCache.timer.Reset(geoIPCacheIdle)
+	}
+	if s := geoIPCache.set; s != nil && s.key == key {
+		return s, nil
+	}
+	s, err := readGeoIPSet(f, code)
+	if err != nil {
+		return nil, err
+	}
+	s.key = key
+	geoIPCache.set = s
+	return s, nil
+}
+
+func dropGeoIPCache() {
+	geoIPCache.Lock()
+	defer geoIPCache.Unlock()
+	geoIPCache.set = nil
+}
+
+// readGeoIPSet parses the category code (upper-case) of a geoip.dat.
+func readGeoIPSet(r io.Reader, code string) (*geoIPSet, error) {
 	var entry *geodata.GeoIP
-	_, err = walkGeo(f, func(c string) bool {
+	_, err := walkGeo(r, func(c string) bool {
 		return entry == nil && c == code
 	}, func(e *geoEntry) error {
 		entry = new(geodata.GeoIP)
 		return proto.Unmarshal(e.body, entry)
 	})
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if entry == nil {
-		return false, fmt.Errorf("no category %s", strings.ToLower(code))
+		return nil, fmt.Errorf("no category %s", strings.ToLower(code))
 	}
-	matched := false
+	s := &geoIPSet{prefixes: make([]netip.Prefix, 0, len(entry.Cidr)), reverse: entry.ReverseMatch}
 	for _, cidr := range entry.Cidr {
-		pa, okIP := netip.AddrFromSlice(cidr.Ip)
-		if !okIP {
+		ip, ok := netip.AddrFromSlice(cidr.Ip)
+		if !ok {
 			continue
 		}
-		prefix, perr := pa.Unmap().Prefix(int(cidr.Prefix))
-		if perr != nil {
-			continue
-		}
-		if prefix.Contains(addr) {
-			matched = true
-			break
+		if p, err := ip.Unmap().Prefix(int(cidr.Prefix)); err == nil {
+			s.prefixes = append(s.prefixes, p)
 		}
 	}
-	if entry.ReverseMatch {
-		matched = !matched
-	}
-	return matched, nil
+	return s, nil
 }
 
 func readVarint(r *bufio.Reader) (uint64, error) {
@@ -309,13 +376,17 @@ func HostInGeoIP(path, code, host string, timeoutMs int32) (verdict int32, err e
 		}
 		ips = addrs
 	}
+	set, err := loadGeoIPSet(path, code)
+	if err != nil {
+		return 0, err
+	}
 	in, out := 0, 0
 	for _, ip := range ips {
-		ok, err := GeoIPContains(path, code, ip)
+		addr, err := netip.ParseAddr(ip)
 		if err != nil {
 			return 0, err
 		}
-		if ok {
+		if set.contains(addr) {
 			in++
 		} else {
 			out++

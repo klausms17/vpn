@@ -77,6 +77,9 @@ func TestBuildConfigRejectsBadInput(t *testing.T) {
 	if _, err := BuildConfig(`{"outbounds":[{"protocol":"freedom"}]}`); err == nil {
 		t.Error("expected error without inbounds")
 	}
+	if _, err := BuildProxyOnlyConfig(`[null]`); err == nil || !strings.Contains(err.Error(), "not an object") {
+		t.Errorf("a null outbound: %v", err)
+	}
 }
 
 // route asks the real Xray router which outbound a connection would use.

@@ -37,7 +37,9 @@ type Profile struct {
 
 // ParseLink parses one share link (vless://, vmess://, trojan://, ss://,
 // hysteria2:// / hy2://) and returns the Profile as JSON.
-func ParseLink(link string) (string, error) {
+func ParseLink(link string) (profileJSON string, err error) {
+	defer recoverInto(&err)
+
 	p, err := parseLink(link)
 	if err != nil {
 		return "", err
@@ -85,7 +87,12 @@ func parseLink(raw string) (*Profile, error) {
 	case "happ":
 		return nil, errf("зашифрованные ссылки Happ не поддерживаются — нужна обычная ссылка или подписка")
 	default:
-		return nil, errf("протокол %s:// не поддерживается", scheme)
+		// Only something that looks like a scheme is quoted: the text before
+		// "://" of a mangled line can be part of a key.
+		if linkScheme.MatchString(scheme) {
+			return nil, errf("протокол %s:// не поддерживается", scheme)
+		}
+		return nil, errf("неизвестный тип ссылки")
 	}
 	if err != nil {
 		return nil, err
@@ -233,7 +240,8 @@ func splitHostPort(hp string) (string, int, error) {
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port <= 0 || port > 65535 {
-		return "", 0, errf("неверный порт сервера: %q", portStr)
+		// Not quoted: in a broken link the "port" can be the end of a password.
+		return "", 0, errf("неверный порт сервера")
 	}
 	if host == "" {
 		return "", 0, errf("в ссылке нет адреса сервера")
@@ -923,7 +931,9 @@ func decodeBase64Loose(s string) ([]byte, error) {
 // PinCertificate returns profileJSON with pinnedPeerCertSha256 set on the
 // proxy outbound's TLS settings. Used after FetchCertSha256 for links that
 // asked for "allowInsecure".
-func PinCertificate(profileJSON string, sha256Hex string) (string, error) {
+func PinCertificate(profileJSON string, sha256Hex string) (pinnedJSON string, err error) {
+	defer recoverInto(&err)
+
 	var p Profile
 	if err := json.Unmarshal([]byte(profileJSON), &p); err != nil {
 		return "", err

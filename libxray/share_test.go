@@ -180,6 +180,23 @@ func TestParseLinkErrors(t *testing.T) {
 	}
 }
 
+// A broken link must not have its secret quoted back in the error.
+func TestParseLinkErrorsHideSecrets(t *testing.T) {
+	for _, link := range []string{
+		"trojan://h:Secret5ecret", // no "@": the password lands where the port is read
+		"x Secret5ecret y://h:1",  // text before "://" that is not a scheme
+	} {
+		_, err := parseLink(link)
+		if err == nil {
+			t.Errorf("%s: expected error", link)
+			continue
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "secret5ecret") {
+			t.Errorf("%s: error quotes the secret: %q", link, err)
+		}
+	}
+}
+
 func TestPinCertificate(t *testing.T) {
 	k := getKeys(t)
 	p := mustParse(t, "trojan://pw@self.example.com:443?allowInsecure=1#x")
@@ -285,6 +302,72 @@ func TestSubscriptionFormats(t *testing.T) {
 	}
 	if _, err := parseSubscription(nil); err == nil {
 		t.Error("empty must be rejected")
+	}
+}
+
+// Links without a remark are named by number and scheme: their body holds
+// the credentials, and these errors reach the app log.
+func TestSubscriptionErrorsHideCredentials(t *testing.T) {
+	k := getKeys(t)
+	password := "Tr0janPassw0rd-42"
+	ssUser := base64.RawURLEncoding.EncodeToString([]byte("aes-256-gcm:" + password))
+	vmess := base64.StdEncoding.EncodeToString([]byte(`{"v":"2","add":"vm.example.com","port":443,"id":"` + k.UUID + `","net":"h2","tls":"tls"}`))
+	cases := []struct {
+		link, label string
+		secrets     []string
+	}{
+		{"vless://" + k.UUID + "@vl.example.com:443?type=h2&security=tls", "ключ 1 (vless)", []string{k.UUID, "vl.example.com"}},
+		{"trojan://" + password + "@tr.example.com:443?type=quic&security=tls", "ключ 2 (trojan)", []string{password, "tr.example.com"}},
+		{"ss://" + ssUser + "@ss.example.com:8388?plugin=obfs-local%3Bobfs%3Dhttp", "ключ 3 (ss)", []string{ssUser, password, "ss.example.com"}},
+		{"vmess://" + vmess, "ключ 4 (vmess)", []string{vmess, k.UUID, "vm.example.com"}},
+	}
+	// Any 8 characters in a row of a secret count as a leak.
+	leak := func(text string, secrets []string) string {
+		for _, s := range secrets {
+			for i := 0; i+8 <= len(s); i++ {
+				if strings.Contains(text, s[i:i+8]) {
+					return s[i : i+8]
+				}
+			}
+		}
+		return ""
+	}
+
+	var lines []string
+	for _, c := range cases {
+		lines = append(lines, c.link)
+		_, err := parseSubscription([]byte(c.link))
+		if err == nil || !strings.Contains(err.Error(), "ключ 1 (") {
+			t.Fatalf("%s: got %v", c.label, err)
+		}
+		if s := leak(err.Error(), c.secrets); s != "" {
+			t.Errorf("%s: error quotes %q: %v", c.label, s, err)
+		}
+	}
+	lines = append(lines, "not a link", "trojan://pw@b.example.com:443#B")
+	res, err := parseSubscription([]byte(strings.Join(lines, "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Errors) != len(cases)+1 {
+		t.Fatalf("errors %v", res.Errors)
+	}
+	for i, c := range cases {
+		if !strings.HasPrefix(res.Errors[i], c.label+": ") {
+			t.Errorf("error %q, want it to start with %q", res.Errors[i], c.label)
+		}
+		if s := leak(res.Errors[i], c.secrets); s != "" {
+			t.Errorf("%s: error quotes %q: %v", c.label, s, res.Errors[i])
+		}
+	}
+	if e := res.Errors[len(cases)]; !strings.HasPrefix(e, "строка 5: ") {
+		t.Errorf("a line that is no link: %q", e)
+	}
+
+	long := strings.Repeat("Сервер ", 20)
+	_, err = parseSubscription([]byte("vless://" + k.UUID + "@h:443?type=h2&security=tls#" + url.PathEscape(long)))
+	if want := string([]rune(long)[:60]) + "…: "; err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("a remark names the entry, cut to 60 characters: %v", err)
 	}
 }
 

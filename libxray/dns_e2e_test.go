@@ -81,7 +81,7 @@ func TestNonIPQueriesGoThroughTheProxy(t *testing.T) {
 	plainDNS.addr, plainDNS.port = "127.0.0.1", stub
 	t.Cleanup(func() { plainDNS = old })
 
-	cfg := buildOpts(t, BuildOptions{Outbounds: mustParse(t, s.realityLink(s.portA)).Outbounds, SocksPort: freePort(t)})
+	cfg := withStats(t, buildOpts(t, BuildOptions{Outbounds: mustParse(t, s.realityLink(s.portA)).Outbounds, SocksPort: freePort(t)}))
 	ctrl := NewController()
 	if err := ctrl.Start(cfg, 0); err != nil {
 		t.Fatal(err)
@@ -115,7 +115,7 @@ func TestNonIPQueriesGoThroughTheProxy(t *testing.T) {
 		return buf[3] & 0x0f, binary.BigEndian.Uint16(buf[6:])
 	}
 
-	ctrl.QueryTraffic() // reset the counters
+	takeTraffic(t, ctrl) // reset the counters
 	for i, qtype := range []uint16{33, 15, 16, 35} {
 		if rcode, _ := ask(uint16(100+i), qtype); rcode != 3 {
 			t.Errorf("type %d: rcode %d, want the resolver's NXDOMAIN", qtype, rcode)
@@ -123,7 +123,7 @@ func TestNonIPQueriesGoThroughTheProxy(t *testing.T) {
 	}
 	// Nothing else uses the proxy here: the queries went through it, not
 	// straight from the core process.
-	if tr := ctrl.QueryTraffic(); tr.ProxyUp == 0 || tr.DirectUp != 0 {
+	if tr := takeTraffic(t, ctrl); tr.proxyUp == 0 || tr.directUp != 0 {
 		t.Errorf("queries did not go through the proxy: %+v", tr)
 	}
 	for i, qtype := range []uint16{65, 12} {
