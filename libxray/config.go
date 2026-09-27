@@ -351,11 +351,15 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 		"stats": map[string]any{},
 		"policy": map[string]any{
 			"levels": map[string]any{
-				// Proxied connections survive 15 idle minutes (Xray: 5), so
-				// push channels, IMAP IDLE and SSH that send a keepalive every
-				// 15-28 minutes are not cut and redialed. The timer only runs
-				// while the phone is awake, and the server needs the same
-				// setting, or it still closes them after 5 minutes.
+				// Proxied connections get 15 idle minutes instead of Xray's 5.
+				// Xray checks once per period, so an idle connection ends
+				// after 15 to 30 awake minutes: push channels, IMAP IDLE and
+				// SSH with a keepalive of up to 15 minutes are no longer cut
+				// and redialed. The timer stands still while the phone
+				// sleeps, and the server needs the same setting, or it still
+				// closes them after 5 minutes. Not longer: UDP flows (calls,
+				// and QUIC on servers without Vision) only end on this timer
+				// and hold memory until then.
 				strconv.Itoa(levelProxy): map[string]any{"connIdle": 900},
 				// DNS flows are freed after seconds (each app query is its
 				// own flow).
@@ -433,10 +437,12 @@ func buildDNS(o *BuildOptions) map[string]any {
 		"queryStrategy":          strategy,
 		"disableFallbackIfMatch": true,
 		// A lookup that fails gets no answer at all from the core, so apps
-		// wait out Android's resolver timeout. While the server is
-		// unreachable, names resolved in about the last hour keep working
-		// from the cache (refreshed in the background), including sites
-		// that then go direct.
+		// wait out Android's resolver timeout. An answer that expired less
+		// than an hour ago is returned at once instead (with a 1-second
+		// TTL) and refreshed in the background, so names already seen by
+		// the running core keep resolving while the server is unreachable,
+		// including sites that then go direct. The hour also bounds the
+		// cache: with 0, expired answers would never be removed.
 		"serveStale":      true,
 		"serveExpiredTTL": 3600,
 		"servers":         servers,

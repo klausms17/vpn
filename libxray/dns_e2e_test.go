@@ -2,6 +2,7 @@ package libxray
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"io"
 	gonet "net"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/session"
 	core "github.com/xtls/xray-core/core"
+	xdns "github.com/xtls/xray-core/features/dns"
 )
 
 // dnsQuery builds a minimal DNS query for name and qtype.
@@ -131,5 +133,103 @@ func TestNonIPQueriesGoThroughTheProxy(t *testing.T) {
 	}
 	if got := seen(); len(got) != 4 {
 		t.Errorf("resolver saw types %v, want only 33, 15, 16, 35", got)
+	}
+}
+
+// udpDNSStub answers every A query over UDP with ip and a 1-second TTL,
+// until stop is called.
+func udpDNSStub(t *testing.T, ip [4]byte) (port int, stop func()) {
+	pc, err := gonet.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	stop = func() { once.Do(func() { pc.Close() }) }
+	t.Cleanup(stop)
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			// The question ends after the name's zero byte, type and class.
+			end := 12
+			for end < n && buf[end] != 0 {
+				end += int(buf[end]) + 1
+			}
+			end += 5
+			if n < 12 || end > n {
+				continue
+			}
+			resp := append([]byte(nil), buf[:end]...)
+			resp[2] |= 0x80 // response
+			resp[3] = 0x80  // recursion available, no error
+			binary.BigEndian.PutUint16(resp[4:], 1)
+			binary.BigEndian.PutUint16(resp[8:], 0)
+			binary.BigEndian.PutUint16(resp[10:], 0)
+			if binary.BigEndian.Uint16(buf[end-4:]) == 1 {
+				binary.BigEndian.PutUint16(resp[6:], 1)
+				// The name as a pointer to the question, A, IN, TTL 1, 4 bytes.
+				resp = append(resp, 0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 1, 0, 4)
+				resp = append(resp, ip[:]...)
+			} else {
+				binary.BigEndian.PutUint16(resp[6:], 0)
+			}
+			pc.WriteTo(resp, from)
+		}
+	}()
+	return pc.LocalAddr().(*gonet.UDPAddr).Port, stop
+}
+
+// Once a name's answer has expired, the DNS module returns it at once from
+// the cache and refreshes it in the background, so a name already seen
+// keeps resolving while the upstream (the server, for most names) is down.
+func TestDNSServesStaleNamesWhenUpstreamIsDown(t *testing.T) {
+	useTrimmedGeo(t)
+	port, stop := udpDNSStub(t, [4]byte{203, 0, 113, 7})
+
+	cfg, err := buildConfig(&BuildOptions{Outbounds: realityProfile(t).Outbounds, SocksPort: freePort(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the stub as upstream, reached directly; the cache settings stay
+	// as buildDNS sets them.
+	cfg["dns"].(map[string]any)["servers"] = []any{map[string]any{"address": "127.0.0.1", "port": port}}
+	routing := cfg["routing"].(map[string]any)
+	routing["rules"] = append([]rule{{"inboundTag": []string{dnsModuleTag}, "outboundTag": DirectTag}}, routing["rules"].([]rule)...)
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst, err := newInstance(string(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Close()
+	client := inst.GetFeature(xdns.ClientType()).(xdns.Client)
+	lookup := func() string {
+		t.Helper()
+		ips, _, err := client.LookupIP("stale.example", xdns.IPOption{IPv4Enable: true})
+		if err != nil || len(ips) != 1 {
+			t.Fatalf("lookup: %v %v", ips, err)
+		}
+		return ips[0].String()
+	}
+
+	if got := lookup(); got != "203.0.113.7" {
+		t.Fatalf("first answer %s", got)
+	}
+	stop()
+	time.Sleep(1500 * time.Millisecond) // the 1-second TTL runs out
+	start := time.Now()
+	if got := lookup(); got != "203.0.113.7" {
+		t.Fatalf("stale answer %s", got)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("the stale answer took %v; it must come from the cache at once", d)
 	}
 }
