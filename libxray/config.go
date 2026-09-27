@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -34,6 +35,21 @@ const (
 	blockTag        = "block"
 	dnsOutTag       = "dns-out"
 )
+
+// Policy levels (see "policy" in buildConfig). Every profile outbound runs
+// at levelProxy: prepareOutbounds resets the levels a subscription sets.
+const (
+	levelProxy  = 0
+	levelDNS    = 1
+	levelDirect = 2
+)
+
+// plainDNS answers the DNS query types the core does not resolve itself
+// (see dns-out), over TCP through the proxy. A variable for tests.
+var plainDNS = struct {
+	addr string
+	port int
+}{"1.1.1.1", 53}
 
 var (
 	ruDNS  = []string{"77.88.8.8", "77.88.8.1"} // Yandex DNS
@@ -114,6 +130,11 @@ func prepareOutbounds(outbounds []json.RawMessage) ([]any, error) {
 			return nil, fmt.Errorf("outbound %d: %w", i, err)
 		}
 		sanitizeOutbound(ob)
+		for k, settings := range ob {
+			if strings.EqualFold(k, "settings") {
+				resetLevels(settings)
+			}
+		}
 		tag, _ := ob["tag"].(string)
 		if i == 0 {
 			ob["tag"] = ProxyTag
@@ -179,12 +200,39 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Vision refuses QUIC; see blockQUICToProxy.
+	vision := visionFlow(outbounds[0].(map[string]any))
 	outbounds = append(outbounds,
-		map[string]any{"tag": DirectTag, "protocol": "freedom"},
+		map[string]any{"tag": DirectTag, "protocol": "freedom", "settings": map[string]any{"userLevel": levelDirect}},
 		map[string]any{"tag": blockTag, "protocol": "blackhole"},
-		// Level 1: DNS flows are freed after seconds, not the default minutes
-		// (each app query is its own flow).
-		map[string]any{"tag": dnsOutTag, "protocol": "dns", "settings": map[string]any{"userLevel": 1}},
+		map[string]any{
+			"tag":      dnsOutTag,
+			"protocol": "dns",
+			"settings": map[string]any{
+				"userLevel": levelDNS,
+				"rules": []any{
+					// A and AAAA: answered by the DNS module (see buildDNS).
+					map[string]any{"action": "hijack", "qType": "1,28"},
+					// MX, TXT, SRV and NAPTR (SIP and XMPP apps, Minecraft
+					// servers, mail setup) go as they are to a public resolver
+					// over TCP through the proxy, never in the clear. An empty
+					// answer would quietly break those apps.
+					map[string]any{"action": "direct", "qType": "15,16,33,35"},
+					// The rest gets an empty answer at once. HTTPS/SVCB records
+					// carry ECH keys, and a browser using ECH hides the site
+					// name that routing by domain needs. PTR is asked in passing
+					// by common libraries (Java's getHostName on an IP), which
+					// would then wait for the server, or its timeout.
+					map[string]any{"action": "return"},
+				},
+				// Without it "direct" would ask the tunnel's own DNS address,
+				// which nothing answers outside the tunnel.
+				"rewriteAddress": plainDNS.addr,
+				"rewritePort":    plainDNS.port,
+				"rewriteNetwork": "tcp",
+			},
+			"streamSettings": map[string]any{"sockopt": map[string]any{"dialerProxy": ProxyTag}},
+		},
 	)
 
 	sniffing := map[string]any{
@@ -260,7 +308,11 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 			rules = append(rules, rule{"ip": ips, "outboundTag": ur.tag})
 		}
 	}
-	// 5. The mode itself.
+	// 5. The mode itself. Known limitation: a UDP socket is routed once, by
+	// its first packet (Xray's full-cone NAT keys a flow by the app's port
+	// only). If a call, game or DHT socket first talks to a Russian IP, its
+	// later packets to foreign peers leave directly too. Keying flows by
+	// destination as well would break full-cone NAT, so it stays that way.
 	switch o.Mode {
 	case ModeRuDirect:
 		rules = append(rules,
@@ -281,6 +333,9 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 			rule{"network": "tcp,udp", "outboundTag": ProxyTag},
 		)
 	}
+	if vision {
+		rules = blockQUICToProxy(rules)
+	}
 
 	logLevel := o.LogLevel
 	if logLevel == "" {
@@ -295,7 +350,25 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 		"log":   logCfg,
 		"stats": map[string]any{},
 		"policy": map[string]any{
-			"levels": map[string]any{"1": map[string]any{"connIdle": 10}},
+			"levels": map[string]any{
+				// Proxied connections get 15 idle minutes instead of Xray's 5.
+				// Xray checks once per period, so an idle connection ends
+				// after 15 to 30 awake minutes: push channels, IMAP IDLE and
+				// SSH with a keepalive of up to 15 minutes are no longer cut
+				// and redialed. The timer stands still while the phone
+				// sleeps, and the server needs the same setting, or it still
+				// closes them after 5 minutes. Not longer: UDP flows (calls,
+				// and QUIC on servers without Vision) only end on this timer
+				// and hold memory until then.
+				strconv.Itoa(levelProxy): map[string]any{"connIdle": 900},
+				// DNS flows are freed after seconds (each app query is its
+				// own flow).
+				strconv.Itoa(levelDNS): map[string]any{"connIdle": 10},
+				// Direct flows keep Xray's 5 minutes: most are QUIC to Russian
+				// sites, and a UDP flow only ends on this timer, holding its
+				// socket and, after Stop, the old instance (see Stop).
+				strconv.Itoa(levelDirect): map[string]any{"connIdle": 300},
+			},
 			"system": map[string]any{"statsOutboundUplink": true, "statsOutboundDownlink": true},
 		},
 		"dns":       buildDNS(o),
@@ -363,7 +436,16 @@ func buildDNS(o *BuildOptions) map[string]any {
 		"tag":                    dnsModuleTag,
 		"queryStrategy":          strategy,
 		"disableFallbackIfMatch": true,
-		"servers":                servers,
+		// A lookup that fails gets no answer at all from the core, so apps
+		// wait out Android's resolver timeout. An answer that expired less
+		// than an hour ago is returned at once instead (with a 1-second
+		// TTL) and refreshed in the background, so names already seen by
+		// the running core keep resolving while the server is unreachable,
+		// including sites that then go direct. The hour also bounds the
+		// cache: with 0, expired answers would never be removed.
+		"serveStale":      true,
+		"serveExpiredTTL": 3600,
+		"servers":         servers,
 	}
 }
 
@@ -398,11 +480,24 @@ func splitUserRules(entries []string) (domains, ips []string) {
 			}
 		}
 		if pfx, err := netip.ParsePrefix(e); err == nil {
+			if pfx.Addr().Is4In6() {
+				// Xray reads "::ffff:1.2.3.4/128" as IPv4 and then refuses
+				// the length: write it as IPv4, and drop a prefix shorter
+				// than the mapped range.
+				if pfx.Bits() < 96 {
+					continue
+				}
+				pfx = netip.PrefixFrom(pfx.Addr().Unmap(), pfx.Bits()-96)
+			}
 			ips = append(ips, pfx.Masked().String())
 			continue
 		}
 		if addr, err := netip.ParseAddr(e); err == nil {
-			ips = append(ips, addr.String())
+			// Xray refuses a zone ("fe80::1%wlan0", even "fe80::1%wlan0/64"),
+			// and link-local addresses never enter the tunnel anyway.
+			if addr.Zone() == "" {
+				ips = append(ips, addr.Unmap().String())
+			}
 			continue
 		}
 		e = strings.TrimPrefix(e, "*.")
@@ -467,6 +562,92 @@ func sanitizeOutbound(v any) {
 			sanitizeOutbound(child)
 		}
 	}
+}
+
+// resetLevels puts every user level in an outbound's settings on
+// levelProxy, so the policy buildConfig sets for proxied connections
+// applies whatever a subscription wrote. Its own level would otherwise get
+// Xray's defaults or, as level 1, the 10-second idle meant for DNS.
+func resetLevels(v any) {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, child := range x {
+			if strings.EqualFold(k, "level") || strings.EqualFold(k, "userLevel") {
+				x[k] = levelProxy
+				continue
+			}
+			resetLevels(child)
+		}
+	case []any:
+		for _, child := range x {
+			resetLevels(child)
+		}
+	}
+}
+
+// visionFlow reports whether ob is VLESS with the plain Vision flow, which
+// refuses UDP to port 443. "xtls-rprx-vision-udp443" carries QUIC and does
+// not count.
+func visionFlow(ob map[string]any) bool {
+	if proto, _ := getFold(ob, "protocol").(string); !strings.EqualFold(proto, "vless") {
+		return false
+	}
+	settings, _ := getFold(ob, "settings").(map[string]any)
+	flows := []any{getFold(settings, "flow")} // the flat form
+	vnext, _ := getFold(settings, "vnext").([]any)
+	for _, v := range vnext {
+		server, _ := v.(map[string]any)
+		users, _ := getFold(server, "users").([]any)
+		for _, u := range users {
+			user, _ := u.(map[string]any)
+			flows = append(flows, getFold(user, "flow"))
+		}
+	}
+	for _, f := range flows {
+		if f == "xtls-rprx-vision" {
+			return true
+		}
+	}
+	return false
+}
+
+// blockQUICToProxy puts before every rule that sends traffic to the proxy
+// a copy that drops UDP to port 443 instead. A Vision server refuses QUIC,
+// but only after a full REALITY handshake for every attempt, so each try
+// by Chrome, YouTube or Play services costs several empty TLS sessions
+// (CPU, log noise and a pattern DPI can see). Apps fall back to TCP either
+// way. QUIC that goes direct is left alone.
+func blockQUICToProxy(rules []rule) []rule {
+	out := make([]rule, 0, len(rules)+4)
+	for _, r := range rules {
+		// The DNS module's own rules (inboundTag) never carry QUIC.
+		if r["outboundTag"] == ProxyTag && r["inboundTag"] == nil {
+			quic := rule{}
+			for k, v := range r {
+				quic[k] = v
+			}
+			quic["network"] = "udp"
+			quic["port"] = "443"
+			quic["outboundTag"] = blockTag
+			out = append(out, quic)
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// getFold returns m's value for key, matching keys case-insensitively as
+// Xray's JSON loader does.
+func getFold(m map[string]any, key string) any {
+	if v, ok := m[key]; ok {
+		return v
+	}
+	for k, v := range m {
+		if strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return nil
 }
 
 // deleteFold removes every key equal to key under Unicode case folding.

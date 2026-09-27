@@ -181,6 +181,13 @@ func (c *Controller) Start(configJSON string, tunFd int32) (err error) {
 }
 
 // Stop shuts the running instance down. It is safe to call when not running.
+//
+// Known limitation: UDP flows (QUIC, calls) outlive it. Xray keeps them
+// outside the TUN stack, on a context the instance cannot cancel, until
+// their idle timer ends them (5 to 10 awake minutes direct, 15 to 30
+// through the proxy; see the policy levels in buildConfig), or later while
+// the far end keeps sending, and until then they keep the old instance in
+// memory. Ending them here needs a change inside Xray.
 func (c *Controller) Stop() (err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

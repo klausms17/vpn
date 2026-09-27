@@ -6,10 +6,12 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/session"
 	core "github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/features/routing"
 	routingsession "github.com/xtls/xray-core/features/routing/session"
 )
@@ -144,7 +146,12 @@ func TestRoutingDecisions(t *testing.T) {
 		{"ozon.com", "", 443, tcp, "", DirectTag},                      // Russian service on .com
 		{"", "95.213.1.1", 443, tcp, "", DirectTag},                    // RU IP, no domain (sniff failed)
 		{"youtube.com", "142.250.1.1", 443, tcp, "", ProxyTag},         // blocked
-		{"www.youtube.com", "", 443, udp, "", ProxyTag},                // QUIC
+		{"www.youtube.com", "", 443, udp, "", blockTag},                // QUIC: Vision refuses it anyway
+		{"", "93.184.215.14", 443, udp, "", blockTag},                  // QUIC, no domain
+		{"vk.com", "", 443, udp, "", blockTag},                         // QUIC by a user proxy rule
+		{"", "93.184.215.14", 3478, udp, "", ProxyTag},                 // STUN, calls
+		{"yandex.ru", "77.88.55.242", 443, udp, "", DirectTag},         // direct QUIC is kept
+		{"my-direct.example", "", 443, udp, "", DirectTag},
 		{"instagram.com", "", 443, tcp, "", ProxyTag},
 		{"example.com", "93.184.215.14", 443, tcp, "", ProxyTag}, // foreign
 		{"zona.media", "", 443, tcp, "", ProxyTag},               // blocked media
@@ -162,6 +169,9 @@ func TestRoutingDecisions(t *testing.T) {
 		{"example.com", "93.184.215.14", 443, tcp, "", DirectTag},
 		{"yandex.ru", "", 443, tcp, "", DirectTag},
 		{"", "149.154.167.51", 443, tcp, "", ProxyTag}, // Telegram by IP
+		{"", "149.154.167.51", 443, udp, "", blockTag},
+		{"youtube.com", "", 443, udp, "", blockTag},
+		{"example.com", "93.184.215.14", 443, udp, "", DirectTag},
 		{"", "77.88.8.8", 53, udp, dnsModuleTag, DirectTag},
 		{"", "8.8.8.8", 443, tcp, dnsModuleTag, ProxyTag},
 	})
@@ -172,6 +182,7 @@ func TestRoutingDecisions(t *testing.T) {
 		{"", "2a00:1450:4001::1", 443, tcp, "", ProxyTag},
 		{"", "192.168.1.1", 80, tcp, "", DirectTag},
 		{"", "77.88.8.8", 53, udp, dnsModuleTag, ProxyTag},
+		{"", "77.88.55.242", 443, udp, "", blockTag},
 	})
 }
 
@@ -261,5 +272,145 @@ func TestBlockedDomainsNeverFallBackToPlainDNS(t *testing.T) {
 	}
 	if len(blocked) == 0 || blocked[len(blocked)-1]["finalQuery"] != true {
 		t.Fatalf("the last ru-blocked resolver must be final: %v", blocked)
+	}
+}
+
+// QUIC is dropped only where it would reach a server with the plain Vision
+// flow, which refuses it after a full handshake.
+func TestQUICBlockedOnlyForVision(t *testing.T) {
+	useTrimmedGeo(t)
+	k := getKeys(t)
+	links := map[string]string{
+		"vision":        "vless://" + k.UUID + "@203.0.113.10:443?type=tcp&security=reality&pbk=" + k.RealityPub + "&sni=www.google.com&sid=ab&flow=xtls-rprx-vision#v",
+		"vision-udp443": "vless://" + k.UUID + "@203.0.113.10:443?type=tcp&security=reality&pbk=" + k.RealityPub + "&sni=www.google.com&sid=ab&flow=xtls-rprx-vision-udp443#u",
+		"xhttp":         "vless://" + k.UUID + "@203.0.113.10:443?type=xhttp&path=%2Fxh&security=reality&pbk=" + k.RealityPub + "&sni=www.google.com&sid=ab#x",
+		"trojan":        "trojan://secret@203.0.113.10:443?security=tls&sni=t.example.com#t",
+	}
+	for name, link := range links {
+		want := ProxyTag
+		if name == "vision" {
+			want = blockTag
+		}
+		for _, mode := range []string{ModeRuDirect, ModeGlobal} {
+			inst, err := newInstance(buildOpts(t, BuildOptions{Outbounds: mustParse(t, link).Outbounds, Mode: mode, Tun: true}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := route(t, inst, tunInboundTag, "www.youtube.com", "", 443, xnet.Network_UDP); got != want {
+				t.Errorf("%s %s: QUIC -> %s, want %s", name, mode, got, want)
+			}
+			if got := route(t, inst, tunInboundTag, "www.youtube.com", "", 443, xnet.Network_TCP); got != ProxyTag {
+				t.Errorf("%s %s: TCP -> %s, want proxy", name, mode, got)
+			}
+			inst.Close()
+		}
+	}
+
+	// JSON subscriptions may use the flat form and any key case.
+	for _, ob := range []string{
+		`{"protocol":"vless","settings":{"address":"a.example","port":443,"id":"x","flow":"xtls-rprx-vision"}}`,
+		`{"Protocol":"VLESS","Settings":{"Vnext":[{"Users":[{"Flow":"xtls-rprx-vision"}]}]}}`,
+	} {
+		var m map[string]any
+		json.Unmarshal([]byte(ob), &m)
+		if !visionFlow(m) {
+			t.Errorf("Vision not detected in %s", ob)
+		}
+	}
+	var m map[string]any
+	json.Unmarshal([]byte(`{"protocol":"trojan","settings":{"flow":"xtls-rprx-vision"}}`), &m)
+	if visionFlow(m) {
+		t.Error("only VLESS has the Vision flow")
+	}
+}
+
+// IP rules pasted from a router page must never make Xray refuse the
+// config: every connect would then fail until the rule is removed.
+func TestOddIPRulesAreConvertedOrDropped(t *testing.T) {
+	cases := map[string]string{
+		"fe80::1%wlan0":       "", // zone
+		"fe80::1%wlan0/64":    "", // ParseAddr takes "wlan0/64" as the zone
+		"::ffff:1.2.3.4":      "1.2.3.4",
+		"::ffff:1.2.3.4/128":  "1.2.3.4/32",
+		"::ffff:1.2.3.77/120": "1.2.3.0/24",
+		"::ffff:1.2.3.4/64":   "", // wider than the mapped range
+		"2001:db8::1/32":      "2001:db8::/32",
+		"10.1.2.3/8":          "10.0.0.0/8",
+	}
+	for in, want := range cases {
+		_, ips := splitUserRules([]string{in})
+		got := strings.Join(ips, ",")
+		if got != want {
+			t.Errorf("%q -> %q, want %q", in, got, want)
+		}
+	}
+
+	useTrimmedGeo(t)
+	var all []string
+	for in := range cases {
+		all = append(all, in)
+	}
+	cfg := buildOpts(t, BuildOptions{Outbounds: realityProfile(t).Outbounds, Tun: true, DirectRules: all, ProxyRules: all, BlockRules: all})
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("config refused: %v", err)
+	}
+}
+
+func TestPolicyLevels(t *testing.T) {
+	useTrimmedGeo(t)
+	// A subscription's own level (1 is the DNS level) must not decide how
+	// long proxied connections live.
+	ob := json.RawMessage(`{"protocol":"vless","settings":{"vnext":[{"address":"203.0.113.10","port":443,
+		"users":[{"id":"b831381d-6324-4d53-ad4f-8cda48b30811","encryption":"none","level":1}]}]},
+		"streamSettings":{"sockopt":{"customSockopt":[{"level":"6","opt":"13","value":"1"}]}}}`)
+	hop := json.RawMessage(`{"tag":"frag","protocol":"freedom","settings":{"UserLevel":8,"fragment":{"packets":"tlshello"}}}`)
+	obs, err := prepareOutbounds([]json.RawMessage{ob, hop})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lv := dig(obs[0], "settings", "vnext", 0, "users", 0, "level"); lv != levelProxy {
+		t.Errorf("user level %v, want %d", lv, levelProxy)
+	}
+	if lv := dig(obs[1], "settings", "UserLevel"); lv != levelProxy {
+		t.Errorf("hop level %v, want %d", lv, levelProxy)
+	}
+	if lv := dig(obs[0], "streamSettings", "sockopt", "customSockopt", 0, "level"); lv != "6" {
+		t.Errorf("a socket option's level must stay: %v", lv)
+	}
+
+	cfg := buildOpts(t, BuildOptions{Outbounds: realityProfile(t).Outbounds, Tun: true})
+	inst, err := newInstance(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Close()
+	pm := inst.GetFeature(policy.ManagerType()).(policy.Manager)
+	for level, want := range map[uint32]time.Duration{levelProxy: 15 * time.Minute, levelDNS: 10 * time.Second, levelDirect: 5 * time.Minute} {
+		p := pm.ForLevel(level)
+		if p.Timeouts.ConnectionIdle != want {
+			t.Errorf("level %d: idle %v, want %v", level, p.Timeouts.ConnectionIdle, want)
+		}
+		// Only the idle time changes; the 60 s handshake hides REALITY.
+		if p.Timeouts.Handshake != 60*time.Second {
+			t.Errorf("level %d: handshake %v", level, p.Timeouts.Handshake)
+		}
+	}
+	var c map[string]any
+	json.Unmarshal([]byte(cfg), &c)
+	for _, x := range c["outbounds"].([]any) {
+		ob := x.(map[string]any)
+		want := map[string]any{DirectTag: float64(levelDirect), dnsOutTag: float64(levelDNS)}[ob["tag"].(string)]
+		if want != nil && dig(ob, "settings", "userLevel") != want {
+			t.Errorf("%s runs at level %v, want %v", ob["tag"], dig(ob, "settings", "userLevel"), want)
+		}
+	}
+}
+
+func TestDNSServesStaleNames(t *testing.T) {
+	for _, mode := range []string{ModeRuDirect, ModeBlockedOnly, ModeGlobal} {
+		d := buildDNS(&BuildOptions{Mode: mode})
+		if d["serveStale"] != true || d["serveExpiredTTL"] != 3600 {
+			t.Errorf("%s: stale answers off: %v", mode, d)
+		}
 	}
 }
