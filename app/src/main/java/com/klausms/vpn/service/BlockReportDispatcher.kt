@@ -14,6 +14,27 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 /**
+ * Tells the owner's panel about servers that stopped answering; a fake in
+ * tests. Thread-safe, and [report] returns at once.
+ */
+internal interface BlockReports {
+    /**
+     * Tells the owner's panel that [failed] stopped answering here, if its
+     * subscription in [state] asked for that. [allDown]: no other server
+     * answered either. [winner]: the server the tunnel switched to.
+     * [whitelist]: the mobile whitelist is already known to explain the
+     * failure.
+     */
+    fun report(
+        failed: StoredProfile,
+        state: ProfilesState,
+        allDown: Boolean = false,
+        winner: StoredProfile? = null,
+        whitelist: Boolean = false,
+    )
+}
+
+/**
  * Hands block reports to [BlockReporter] in the background: finds the
  * failed server's subscription and, after a switch, tells the mobile
  * whitelist from a block. Owns the one [BlockReporter], and with it the
@@ -32,23 +53,10 @@ internal class BlockReportDispatcher(
     private val mobileWhitelist: WhitelistLookup,
     private val direct: DirectNet,
     private val core: () -> CoreHandle?,
-) {
+) : BlockReports {
     private val reporter = BlockReporter(context)
 
-    /**
-     * Tells the owner's panel that [failed] stopped answering here, if its
-     * subscription in [state] asked for that. [allDown]: no other server
-     * answered either. [winner]: the server the tunnel switched to.
-     * [whitelist]: the mobile whitelist is already known to explain the
-     * failure.
-     */
-    fun report(
-        failed: StoredProfile,
-        state: ProfilesState,
-        allDown: Boolean = false,
-        winner: StoredProfile? = null,
-        whitelist: Boolean = false,
-    ) {
+    override fun report(failed: StoredProfile, state: ProfilesState, allDown: Boolean, winner: StoredProfile?, whitelist: Boolean) {
         val sub = state.subscriptions.firstOrNull { it.id == failed.subscriptionId } ?: return
         if (sub.reportUrl == null) return
         val network = underlying()

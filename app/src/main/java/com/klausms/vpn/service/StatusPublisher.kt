@@ -16,6 +16,33 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
+ * The notices next to "Подключено", as the checks and the search for
+ * another server put them up; a fake in tests. The suspending calls may
+ * come from any coroutine, the others from any thread. [e] in each call is
+ * the tunnel's generation the notice is about (see [Epoch]).
+ */
+internal interface NoticeSink {
+    /** The hint shown whenever no other notice is (strict Private DNS), or null. */
+    val base: String?
+
+    /**
+     * Shows [notice] (null clears it) while connected, unless the tunnel
+     * changed since [e]; with [replacing], only in place of one of those
+     * (null in it: also when no notice is shown).
+     */
+    suspend fun show(notice: String?, e: Long, replacing: Set<String?>? = null)
+
+    /** Traffic gets through (again): "not answering" is no longer true. A switch notice stays. */
+    suspend fun clearFailure(e: Long)
+
+    /**
+     * Takes the "switched to another server" notice away once it is
+     * [minAgeMs] old; otherwise it would stay for as long as the tunnel runs.
+     */
+    fun clearSwitch(e: Long, minAgeMs: Long)
+}
+
+/**
  * Shows what the tunnel does: the status in [VpnStatusHolder], sent to the
  * app (if open) and the widget, the foreground notification, and the
  * notices next to "Подключено". Owns the app's callbacks and the
@@ -37,12 +64,11 @@ internal class StatusPublisher(
     private val epoch: Epoch,
     private val clock: Clock,
     private val lockdownConflict: () -> Boolean,
-) {
+) : NoticeSink {
     private val callbacks = RemoteCallbackList<IVpnCallback>()
     private val notices = NoticeBoard()
 
-    /** The hint shown whenever no other notice is (strict Private DNS), or null. */
-    val base: String? get() = notices.base
+    override val base: String? get() = notices.base
 
     /** The app registered [callback]: it gets the status at once, and every change. */
     fun register(callback: IVpnCallback) {
@@ -133,13 +159,8 @@ internal class StatusPublisher(
 
     // ----------------------------------------------------------------- notices
 
-    /**
-     * Shows [notice] (null clears it) while connected, unless the tunnel
-     * changed since [e]; with [replacing], only in place of one of those
-     * (null in it: also when no notice is shown). On the main thread with a
-     * compare-and-set, so it never overwrites a newer status.
-     */
-    suspend fun show(notice: String?, e: Long, replacing: Set<String?>? = null) {
+    // On the main thread with a compare-and-set, so it never overwrites a newer status.
+    override suspend fun show(notice: String?, e: Long, replacing: Set<String?>?) {
         try {
             withContext(Dispatchers.Main) {
                 if (!epoch.isCurrent(e)) return@withContext
@@ -155,14 +176,9 @@ internal class StatusPublisher(
         }
     }
 
-    /** Traffic gets through (again): "not answering" is no longer true. A switch notice stays. */
-    suspend fun clearFailure(e: Long) = show(notices.base, e, replacing = Failover.FAILURE_NOTICES)
+    override suspend fun clearFailure(e: Long) = show(notices.base, e, replacing = Failover.FAILURE_NOTICES)
 
-    /**
-     * Takes the "switched to another server" notice away once it is
-     * [minAgeMs] old; otherwise it would stay for as long as the tunnel runs.
-     */
-    fun clearSwitch(e: Long, minAgeMs: Long) {
+    override fun clearSwitch(e: Long, minAgeMs: Long) {
         val notice = notices.switchNoticeToClear(VpnStatusHolder.status.value.message, clock.elapsed(), minAgeMs) ?: return
         scope.launch { show(notices.base, e, replacing = setOf(notice)) }
     }

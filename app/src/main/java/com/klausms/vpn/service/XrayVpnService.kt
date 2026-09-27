@@ -5,13 +5,10 @@ import android.net.VpnService
 import android.os.IBinder
 import androidx.core.app.ServiceCompat
 import com.klausms.vpn.core.CoreHandle
-import com.klausms.vpn.core.DirectNet
 import com.klausms.vpn.core.XrayCoreHandle
 import com.klausms.vpn.core.XrayDirectNet
-import com.klausms.vpn.core.onlyWhitelistOpens
 import com.klausms.vpn.data.DiskProfiles
 import com.klausms.vpn.data.ProfilesAccess
-import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.util.AndroidClock
 import com.klausms.vpn.util.AppLog
@@ -23,10 +20,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonArray
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -78,9 +72,6 @@ class XrayVpnService : VpnService() {
         /** Android's view of the network changing checks at most this often. */
         private const val LINK_CHECK_MS = 60_000L
 
-        /** After a search found nothing, the next one on that network waits this long. */
-        private const val FRUITLESS_RETRY_MS = 2 * 60_000L
-
         /** A server that answers again after a failed check gets its core restarted at most this often. */
         private const val CORE_RESTART_GAP_MS = 10 * 60_000L
 
@@ -109,11 +100,9 @@ class XrayVpnService : VpnService() {
     /** The core's log. */
     private lateinit var coreLog: File
 
-    private lateinit var direct: DirectNet
-
     private lateinit var profiles: ProfilesAccess
 
-    private lateinit var netInfo: SystemNetworkInfo
+    private lateinit var netInfo: NetworkInfo
 
     private lateinit var publisher: StatusPublisher
 
@@ -123,11 +112,11 @@ class XrayVpnService : VpnService() {
 
     private lateinit var memory: FailureMemory
 
-    private lateinit var mobileWhitelist: WhitelistLookup
-
     private lateinit var refresher: SubscriptionRefresher
 
-    private lateinit var reports: BlockReportDispatcher
+    private lateinit var reports: BlockReports
+
+    private lateinit var failover: FailoverSearch
 
     // The newest command's startId. A job only stops the service if no newer
     // command arrived meanwhile, so a quick "off, on" never loses the "on".
@@ -163,15 +152,6 @@ class XrayVpnService : VpnService() {
     // elapsedRealtime of the last core restart for a server that answered again.
     @Volatile
     private var lastCoreRestartAt = 0L
-
-    // Per network: when a search there last found nothing, and the notice it
-    // showed. Another network may reach servers this one could not, and the
-    // same network back (Wi-Fi flapping) remembers. Guarded by itself.
-    private val fruitless = HashMap<NetId?, Pair<Long, String>>()
-
-    // One probe at a time: a probe's temporary core holds megabytes until it
-    // ends, also when its result is no longer wanted.
-    private val probeLock = Mutex()
 
     // A reconnect asked for with EXTRA_PICKED; merged reconnects keep it.
     private val pickPending = AtomicBoolean()
@@ -244,7 +224,7 @@ class XrayVpnService : VpnService() {
         super.onCreate()
         runtime = PrefsRuntimeStore(this)
         coreLog = XrayLog.file(this)
-        direct = XrayDirectNet(this)
+        val direct = XrayDirectNet(this)
         profiles = DiskProfiles(this)
         netInfo = SystemNetworkInfo(this)
         publisher = StatusPublisher(this, scope, epoch, clock) { engine.session?.lockdownConflict == true }
@@ -261,7 +241,7 @@ class XrayVpnService : VpnService() {
             listener = engineEvents,
         )
         memory = FailureMemory(clock)
-        mobileWhitelist = WhitelistLookup(scope, Dispatchers.IO, direct)
+        val mobileWhitelist = WhitelistLookup(scope, Dispatchers.IO, direct)
         refresher = SubscriptionRefresher(
             scope, Dispatchers.IO, clock, UpdaterSubscriptionSource(this, profiles),
             session = { engine.session },
@@ -274,6 +254,7 @@ class XrayVpnService : VpnService() {
             direct = direct,
             core = { engine.session?.core },
         )
+        failover = FailoverSearch(clock, epoch, netInfo, runtime, profiles, publisher, direct, mobileWhitelist, memory, refresher, reports)
         Notifications.ensureChannels(this)
     }
 
@@ -488,7 +469,7 @@ class XrayVpnService : VpnService() {
         if (!epoch.isCurrent(e)) return
         if (!ok) {
             AppLog.w("no traffic through the server (${reason.name.lowercase()})")
-            runFailover(e, c, running, stalled = false)
+            search(e, c, running, stalled = false)
             return
         }
         // It answers, but some operators freeze a foreign server's
@@ -498,7 +479,7 @@ class XrayVpnService : VpnService() {
         if (bulkDue(reason, network) && stalls(c, network)) {
             if (!epoch.isCurrent(e)) return
             AppLog.w("downloads through the server stall (${reason.name.lowercase()})")
-            runFailover(e, c, running, stalled = true)
+            search(e, c, running, stalled = true)
             return
         }
         if (!epoch.isCurrent(e)) return
@@ -549,93 +530,13 @@ class XrayVpnService : VpnService() {
         return true
     }
 
-    /**
-     * [failed] passes no traffic ([stalled]: it answers, but downloads
-     * freeze): probe other servers, all in one temporary core, and switch
-     * to the fastest that answers. The tunnel stays as it is meanwhile, and
-     * for good when nothing answers: nothing ever leaks outside the VPN.
-     */
-    private suspend fun runFailover(e: Long, c: CoreHandle, failed: StoredProfile, stalled: Boolean) {
-        val net = netInfo.state()
-        if (net?.hasNetwork != true) {
-            AppLog.i("no network, not looking for another server")
-            return
+    /** Looks for a server to replace [failed] (see [FailoverSearch]) and does what the search came to. */
+    private suspend fun search(e: Long, c: CoreHandle, failed: StoredProfile, stalled: Boolean) {
+        when (val outcome = failover.search(e, c, failed, stalled) { recoveredInPlace(e, c) }) {
+            SearchOutcome.Done -> Unit
+            is SearchOutcome.SwitchTo -> engine.submit { switchTo(e, failed, outcome.winnerId, report = outcome.report) }
+            SearchOutcome.RestartOnSaved -> restartOnSaved(failed)
         }
-        // Hotel or metro Wi-Fi before its login page: no server can answer yet.
-        if (net.captive) {
-            AppLog.i("the Wi-Fi asks to sign in, not looking for another server")
-            publisher.show(Failover.NOTICE_SIGN_IN, e)
-            return
-        }
-        if (memory.keptByUser(failed.id)) {
-            publisher.show(Failover.NOTICE_PICK_ANOTHER, e)
-            return
-        }
-        val network = netInfo.active()
-        // Nothing answered on this network moments ago: say so again, search later.
-        val last = fruitlessNotice(network)
-        if (last != null) {
-            publisher.show(last, e)
-            return
-        }
-        if (!runtime.allowFailover(take = false)) {
-            AppLog.w("automatic server switches used up for now")
-            publisher.show(Failover.NOTICE_PICK_ANOTHER, e)
-            return
-        }
-        val exclude = memory.exclude()
-        val state = profiles.snapshot()
-        val first = pick(state, failed, exclude, tried = emptyList())
-        // The panel may have moved the servers meanwhile (new addresses or keys).
-        val sub = refresher.refreshable(state, failed)
-        if (first.isNotEmpty() || sub != null) {
-            // Probing servers and downloading the list is what costs.
-            if (!runtime.allowSearch()) {
-                AppLog.w("automatic searches used up for now")
-                publisher.show(Failover.NOTICE_PICK_ANOTHER, e)
-                return
-            }
-            publisher.show(Failover.NOTICE_SEARCHING, e)
-            AppLog.i("trying ${first.size} other servers")
-        }
-        val refresh = sub?.let { refresher.startDirect(it) }
-        // The failed server goes first, as a control: when it answers here
-        // too, the phone was offline for a moment (a lift, a tunnel) and the
-        // server is fine. Not for a stall, which a short answer never shows.
-        val control = !stalled
-        val delays = probe(c, (if (control) listOf(failed) else emptyList()) + first)
-        if (!epoch.isCurrent(e)) return
-        // It answered: whatever happens next, it is not blocked from here.
-        val reachable = control && delays.first() >= 0
-        if (reachable && recoveredInPlace(e, c)) return
-        val tier = { p: StoredProfile -> Failover.tier(p, failed) }
-        var probed = first.size
-        var winner = Failover.fastest(first, if (control) delays.drop(1) else delays, tier)
-        var refreshed: Refreshed? = null
-        if (winner == null && refresh != null) {
-            refreshed = refresh.await()
-            if (refreshed.applied == true) {
-                // Only what the refresh brought: new servers, or new settings of known ones.
-                val second = pick(profiles.snapshot(), failed, exclude, tried = first.map { it.outbounds })
-                if (second.isNotEmpty()) {
-                    AppLog.i("subscription refreshed, trying ${second.size} more servers")
-                    probed += second.size
-                    winner = Failover.fastest(second, probe(c, second), tier)
-                }
-            }
-            if (!epoch.isCurrent(e)) return
-        }
-        if (winner == null) {
-            AppLog.w("no server answers")
-            nothingAnswers(e, failed, state, probed, network, report = !reachable)
-            // The refresh changed or removed the running server: run what is
-            // saved now, so the app and the widget show what really runs.
-            if (refreshed?.runningChanged == true) restartOnSaved(failed)
-            return
-        }
-        val (to, ms) = winner
-        AppLog.i("switching to a server that answered in $ms ms")
-        engine.submit { switchTo(e, failed, to.id, report = !reachable) }
     }
 
     /**
@@ -660,45 +561,6 @@ class XrayVpnService : VpnService() {
             lastCoreRestartAt = now
         }
         return true
-    }
-
-    /**
-     * No other server answers either (or there is none). A Russian site
-     * opened directly, outside the tunnel, tells a block from a phone
-     * without internet, and on mobile data a foreign site that does not
-     * open directly either tells the operator's whitelist from a block.
-     * Only a phone that is online reports [failed] to the owner (marked as
-     * the whitelist when it is), and only with [report] (false: [failed]
-     * itself answered a new connection).
-     */
-    private suspend fun nothingAnswers(e: Long, failed: StoredProfile, state: ProfilesState, probed: Int, network: NetId?, report: Boolean) {
-        val online = direct.opens(DirectNet.DIRECT_URL)
-        val whitelist = online && netInfo.onMobileData() && direct.onlyWhitelistOpens(russianOpens = online)
-        if (!epoch.isCurrent(e)) return
-        val notice = Failover.nothingAnswersNotice(online, whitelist, probed)
-        if (online) {
-            AppLog.w(
-                if (whitelist) {
-                    "no server answers, and mobile data seems limited to the operator's whitelist"
-                } else {
-                    "the phone is online, but no server answers from this network"
-                },
-            )
-            if (report) reports.report(failed, state, allDown = true, whitelist = whitelist)
-        }
-        markFruitless(network, notice)
-        publisher.show(notice, e)
-    }
-
-    /** The notice of a search that found nothing on [network] in the last minutes, or null. */
-    private fun fruitlessNotice(network: NetId?): String? = synchronized(fruitless) {
-        val now = clock.elapsed()
-        fruitless.entries.removeIf { now - it.value.first >= FRUITLESS_RETRY_MS || it.value.first > now }
-        fruitless[network]?.second
-    }
-
-    private fun markFruitless(network: NetId?, notice: String) {
-        synchronized(fruitless) { fruitless[network] = clock.elapsed() to notice }
     }
 
     /**
@@ -822,7 +684,7 @@ class XrayVpnService : VpnService() {
         }
         // The user chose another server meanwhile; their start follows.
         if (saved.selectedId != running.id || !runtime.allowFailover(take = false)) return
-        val answered = probe(c, listOf(home)).first() >= 0
+        val answered = failover.probe(c, listOf(home)).first() >= 0
         if (!epoch.isCurrent(e)) return
         if (!answered) {
             runtime.setAway(Failover.returnFailed(away, now))
@@ -830,35 +692,5 @@ class XrayVpnService : VpnService() {
         }
         AppLog.i("the chosen server answers again, going back to it")
         engine.submit { switchTo(e, running, home.id, returning = true) }
-    }
-
-    // ------------------------------------------------------------ candidates
-
-    /**
-     * Candidates for [failed]. Servers on the Russian mobile whitelist go
-     * first on mobile data, and get a few slots elsewhere (a hotspot or a 4G
-     * router may be under the whitelist too) when not every server is probed.
-     */
-    private suspend fun pick(state: ProfilesState, failed: StoredProfile, exclude: Set<String>, tried: List<JsonArray>): List<StoredProfile> {
-        val pool = Failover.pickCandidates(state, failed, exclude, tried, limit = Int.MAX_VALUE)
-        val mobile = netInfo.onMobileData()
-        // Every one of them is probed anyway.
-        if (!mobile && pool.size <= Failover.MAX_CANDIDATES) return pool
-        val preferred = mobileWhitelist.listed(pool.map { Failover.host(it) }.distinct().take(WhitelistLookup.MAX_HOSTS))
-        val reserve = if (mobile) Failover.MAX_CANDIDATES else Failover.WHITELIST_RESERVED
-        return Failover.pickCandidates(state, failed, exclude, tried, preferred, reserve = reserve)
-    }
-
-    /** The delay through each of [servers] in ms, or -1, in the same order. Never throws. */
-    private suspend fun probe(c: CoreHandle, servers: List<StoredProfile>): List<Long> {
-        if (servers.isEmpty()) return emptyList()
-        return probeLock.withLock {
-            try {
-                c.probe(servers.map { it.outbounds }, timeoutMs = Failover.PROBE_TIMEOUT_MS, parallel = Failover.PARALLEL)
-            } catch (ex: Exception) {
-                AppLog.w("probe failed", ex)
-                List(servers.size) { -1L }
-            }
-        }
     }
 }
