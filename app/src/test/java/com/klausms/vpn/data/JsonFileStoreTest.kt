@@ -77,8 +77,21 @@ class JsonFileStoreTest {
         assertEquals(Counter(value = 5), store().readStrict())
         assertEquals(broken, File(dir, corruptCopies().single()).readText())
         // Logged, but never the content: it holds the user's keys.
+        assertTrue(logged.last().contains("cannot be decoded"))
+        assertTrue(logged.none { "secret" in it || "1.2.3.4" in it })
+    }
+
+    @Test
+    fun brokenFileIsLoggedOnceAndLeftAloneByReads() {
+        val broken = "{\"value\": \"vless://secret-key@1.2.3.4\""
+        file.writeText(broken)
+        // The widget reads on every redraw: one line, without the content.
+        repeat(3) { assertEquals(Counter(), store().read()) }
+        assertTrue(logged.single().startsWith("counter.json cannot be read"))
         assertFalse(logged.single().contains("secret"))
-        assertFalse(logged.single().contains("1.2.3.4"))
+        // Nothing is copied or moved until a change sets it aside.
+        assertEquals(listOf("counter.json"), dir.list()!!.toList())
+        assertEquals(broken, file.readText())
     }
 
     @Test

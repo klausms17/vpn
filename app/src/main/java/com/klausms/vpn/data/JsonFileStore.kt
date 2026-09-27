@@ -35,12 +35,11 @@ class JsonFileStore<T>(
         if (!file.exists()) return default()
         return try {
             AppJson.decodeFromString(serializer, file.readText())
-        } catch (_: Exception) {
-            // Keep the broken file for diagnostics instead of silently losing it.
-            try {
-                file.copyTo(File(file.parentFile, file.name + ".corrupt"), overwrite = true)
-            } catch (_: Exception) {
-            }
+        } catch (e: Exception) {
+            // The file stays as it is until update() sets it aside. Logged
+            // once per process, as the widget reads on every redraw, and only
+            // the error's type: its message may quote the file, which holds keys.
+            if (unreadableLogged.add(file.absolutePath)) log("${file.name} cannot be read (${e.javaClass.simpleName}), using the default")
             default()
         }
     }
@@ -125,6 +124,9 @@ class JsonFileStore<T>(
 class CorruptFileException(message: String, cause: Throwable) : IllegalStateException(message, cause)
 
 private const val KEEP_CORRUPT = 3
+
+/** Files whose failed [JsonFileStore.read] this process has logged. */
+private val unreadableLogged = ConcurrentHashMap.newKeySet<String>()
 
 /** One writer at a time per file: first among this process's threads, then across processes. */
 internal object FileLocks {
