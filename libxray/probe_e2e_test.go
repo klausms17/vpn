@@ -112,7 +112,7 @@ func TestProbeAndTunnelFetch(t *testing.T) {
 	json.Unmarshal([]byte(s.chainJSON(t, s.portA)), &chain)
 	logFile := filepath.Join(t.TempDir(), "xray.log")
 	ctrl := NewController()
-	cfg := buildOpts(t, BuildOptions{Outbounds: chain, Mode: ModeGlobal, SocksPort: freePort(t), LogLevel: "info", LogFile: logFile})
+	cfg := withStats(t, buildOpts(t, BuildOptions{Outbounds: chain, Mode: ModeGlobal, SocksPort: freePort(t), LogLevel: "info", LogFile: logFile}))
 	if err := ctrl.Start(cfg, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestProbeAndTunnelFetch(t *testing.T) {
 	})
 
 	t.Run("FetchThroughTunnel", func(t *testing.T) {
-		ctrl.QueryTraffic() // reset
+		takeTraffic(t, ctrl) // reset
 		res, err := ctrl.FetchThroughTunnel(target.URL+"/sub/token", "KlausVPN/1.0 (Android)", `{"X-Hwid":"0123456789abcdef","X-Device-Os":"Android"}`, 5000)
 		if err != nil {
 			t.Fatal(err)
@@ -196,7 +196,7 @@ func TestProbeAndTunnelFetch(t *testing.T) {
 		expect(t, h.Get("X-Hwid"), "0123456789abcdef")
 		expect(t, h.Get("X-Device-Os"), "Android")
 		expect(t, h.Get("User-Agent"), "KlausVPN/1.0 (Android)")
-		if tr := ctrl.QueryTraffic(); tr.ProxyDown == 0 {
+		if tr := takeTraffic(t, ctrl); tr.proxyDown == 0 {
 			t.Errorf("the fetch did not go through the proxy outbound: %+v", tr)
 		}
 		if _, err := ctrl.FetchThroughTunnel(target.URL, "", `{"bad name":"x"}`, 5000); err == nil {

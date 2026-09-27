@@ -354,8 +354,7 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 	}
 
 	return map[string]any{
-		"log":   logCfg,
-		"stats": map[string]any{},
+		"log": logCfg,
 		"policy": map[string]any{
 			"levels": map[string]any{
 				// Proxied connections get 15 idle minutes instead of Xray's 5.
@@ -376,7 +375,6 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 				// socket and, after Stop, the old instance (see Stop).
 				strconv.Itoa(levelDirect): map[string]any{"connIdle": 300},
 			},
-			"system": map[string]any{"statsOutboundUplink": true, "statsOutboundDownlink": true},
 		},
 		"dns":       buildDNS(o),
 		"inbounds":  inbounds,

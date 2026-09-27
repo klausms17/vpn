@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
+	"github.com/xtls/xray-core/features/stats"
 )
 
 type testKeys struct {
@@ -136,6 +137,43 @@ func outboundsJSON(t testing.TB, p *Profile) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// withStats turns on Xray's outbound byte counters in a built config, for
+// tests that check which outbound carried the traffic (see takeTraffic).
+func withStats(t *testing.T, cfg string) string {
+	t.Helper()
+	var c map[string]any
+	if err := json.Unmarshal([]byte(cfg), &c); err != nil {
+		t.Fatal(err)
+	}
+	c["stats"] = map[string]any{}
+	c["policy"].(map[string]any)["system"] = map[string]any{"statsOutboundUplink": true, "statsOutboundDownlink": true}
+	b, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// traffic is what the proxy and direct outbounds carried, in bytes.
+type traffic struct{ proxyUp, proxyDown, directUp, directDown int64 }
+
+// takeTraffic returns and resets the byte counters of the running core,
+// started from a config passed through withStats.
+func takeTraffic(t *testing.T, ctrl *Controller) traffic {
+	t.Helper()
+	ctrl.mu.Lock()
+	inst := ctrl.cur.inst
+	ctrl.mu.Unlock()
+	sm := inst.GetFeature(stats.ManagerType()).(stats.Manager)
+	take := func(tag, dir string) int64 {
+		if c := sm.GetCounter("outbound>>>" + tag + ">>>traffic>>>" + dir); c != nil {
+			return c.Set(0)
+		}
+		return 0
+	}
+	return traffic{take(ProxyTag, "uplink"), take(ProxyTag, "downlink"), take(DirectTag, "uplink"), take(DirectTag, "downlink")}
 }
 
 var base64Std = base64.StdEncoding

@@ -27,7 +27,6 @@ import (
 	core "github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/dns"
 	xoutbound "github.com/xtls/xray-core/features/outbound"
-	"github.com/xtls/xray-core/features/stats"
 	"github.com/xtls/xray-core/infra/conf"
 	"github.com/xtls/xray-core/infra/conf/serial"
 	"github.com/xtls/xray-core/transport/internet"
@@ -103,7 +102,6 @@ type Controller struct {
 // before closing the instance, so nothing works on a closing core.
 type run struct {
 	inst   *core.Instance
-	stats  stats.Manager
 	ctx    context.Context
 	cancel context.CancelFunc
 	calls  sync.WaitGroup
@@ -170,9 +168,6 @@ func (c *Controller) Start(configJSON string, tunFd int32) (err error) {
 
 	r := &run{inst: inst}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
-	if sm, ok := inst.GetFeature(stats.ManagerType()).(stats.Manager); ok {
-		r.stats = sm
-	}
 	c.cur = r
 	// Parsing geo files and configs leaves a lot of garbage behind; hand it
 	// back to the OS so the long-lived VPN process stays small.
@@ -224,41 +219,6 @@ func (c *Controller) IsRunning() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.cur != nil
-}
-
-// Traffic holds byte counters accumulated since the previous QueryTraffic call.
-type Traffic struct {
-	ProxyUp    int64
-	ProxyDown  int64
-	DirectUp   int64
-	DirectDown int64
-}
-
-// QueryTraffic returns and resets the proxy/direct outbound traffic counters.
-// The config must enable "stats" and the outbound uplink/downlink policy.
-func (c *Controller) QueryTraffic() *Traffic {
-	var sm stats.Manager
-	c.mu.Lock()
-	if c.cur != nil {
-		sm = c.cur.stats
-	}
-	c.mu.Unlock()
-
-	t := &Traffic{}
-	if sm == nil {
-		return t
-	}
-	take := func(tag, dir string) int64 {
-		if counter := sm.GetCounter("outbound>>>" + tag + ">>>traffic>>>" + dir); counter != nil {
-			return counter.Set(0)
-		}
-		return 0
-	}
-	t.ProxyUp = take(ProxyTag, "uplink")
-	t.ProxyDown = take(ProxyTag, "downlink")
-	t.DirectUp = take(DirectTag, "uplink")
-	t.DirectDown = take(DirectTag, "downlink")
-	return t
 }
 
 // MeasureDelay performs an HTTP GET to url through the proxy outbound of the
