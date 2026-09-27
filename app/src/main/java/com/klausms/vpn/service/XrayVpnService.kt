@@ -88,9 +88,6 @@ class XrayVpnService : VpnService() {
         const val EXTRA_PICKED = "picked"
 
         private const val NETWORK_SETTLE_MS = 1_500L
-
-        /** A failed start of a tunnel that should run is tried this many more times. */
-        private const val MAX_START_RETRIES = 2
         private const val MIN_UPTIME_FOR_RESET_MS = 3_000L
 
         /** Unlocking the phone checks at most this often. */
@@ -532,55 +529,66 @@ class XrayVpnService : VpnService() {
             scheduleVerify(Reason.START)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            if (e is AnotherVpnException) {
-                // The user switched to another VPN app while we were down:
-                // leave it alone and stay off, without an error.
-                AppLog.i("another VPN is active, not restarting")
-                stopCore()
-                runtime.setShouldRun(false)
-                publisher.setStatus(VpnStatus(VpnState.DISCONNECTED))
-                withContext(Dispatchers.Main) { stopIfLatest(startId) }
-                return
-            }
-            val message = (e as? VpnStartException)?.message ?: "Ошибка запуска: ${e.userMessage()}"
-            AppLog.e("tunnel start failed (attempt ${attempt + 1}): $message", e.takeIf { it !is VpnStartException })
+            val running = session?.profile
+            val action = StartFailurePolicy.decide(
+                anotherVpn = e is AnotherVpnException,
+                restarting = restarting,
+                swapped = swapped,
+                sessionAlive = running != null,
+                userRequested = userRequested,
+                attempt = attempt,
+                shouldRun = runtime::shouldRun,
+            )
             val again: (Int) -> Unit = { next ->
                 retryStart(generation, next) {
                     startTunnel(lastStartId, userRequested = false, profileOverride, failedId, expectedSelection, notice, attempt = next, picked = picked)
                 }
             }
-            // New settings or another server for a tunnel that works: until
-            // the new interface replaced it, the old tunnel still carries the
-            // traffic. It keeps running; one more try a little later.
-            val running = session?.profile
-            if (restarting && !swapped && running != null) {
-                publisher.setStatus(
-                    VpnStatus(
-                        VpnState.CONNECTED, running.id, running.name,
-                        message = "Не удалось применить изменения: $message",
-                        connectedSince = before.connectedSince.takeIf { it > 0 } ?: clock.wall(),
-                    ),
-                )
-                publisher.publishConnected()
-                if (attempt < MAX_START_RETRIES) again(attempt + 1)
-                return
+            when (action) {
+                FailureAction.StayOff -> {
+                    AppLog.i("another VPN is active, not restarting")
+                    stopCore()
+                    runtime.setShouldRun(false)
+                    publisher.setStatus(VpnStatus(VpnState.DISCONNECTED))
+                    withContext(Dispatchers.Main) { stopIfLatest(startId) }
+                }
+                is FailureAction.KeepOld -> {
+                    val message = logStartFailure(e, attempt)
+                    val old = checkNotNull(running)
+                    publisher.setStatus(
+                        VpnStatus(
+                            VpnState.CONNECTED, old.id, old.name,
+                            message = "Не удалось применить изменения: $message",
+                            connectedSince = before.connectedSince.takeIf { it > 0 } ?: clock.wall(),
+                        ),
+                    )
+                    publisher.publishConnected()
+                    if (action.retry) again(attempt + 1)
+                }
+                FailureAction.HoldTunAndRetry -> {
+                    logStartFailure(e, attempt)
+                    haltCore()
+                    publisher.setStatus(VpnStatus(VpnState.CONNECTING, profileName = before.profileName, message = "Переподключение…"))
+                    withContext(Dispatchers.Main) { publisher.enterForeground("Переподключение…", null) }
+                    again(attempt + 1)
+                }
+                FailureAction.GiveUp -> {
+                    val message = logStartFailure(e, attempt)
+                    stopCore()
+                    runtime.setShouldRun(false)
+                    publisher.setStatus(VpnStatus(VpnState.ERROR, message = message))
+                    if (!publisher.isAppVisible()) Notifications.showError(this, message)
+                    withContext(Dispatchers.Main) { stopIfLatest(startId) }
+                }
             }
-            // It was running, or should be running (a restart nobody asked
-            // for): a second try usually works. The new interface stays up
-            // meanwhile, so apps wait instead of going around the VPN.
-            if ((restarting || !userRequested) && attempt < MAX_START_RETRIES && runtime.shouldRun()) {
-                haltCore()
-                publisher.setStatus(VpnStatus(VpnState.CONNECTING, profileName = before.profileName, message = "Переподключение…"))
-                withContext(Dispatchers.Main) { publisher.enterForeground("Переподключение…", null) }
-                again(attempt + 1)
-                return
-            }
-            stopCore()
-            runtime.setShouldRun(false)
-            publisher.setStatus(VpnStatus(VpnState.ERROR, message = message))
-            if (!publisher.isAppVisible()) Notifications.showError(this, message)
-            withContext(Dispatchers.Main) { stopIfLatest(startId) }
         }
+    }
+
+    /** Logs a start that failed on try [attempt] with [e]; returns the message for the user. */
+    private fun logStartFailure(e: Exception, attempt: Int): String {
+        val message = (e as? VpnStartException)?.message ?: "Ошибка запуска: ${e.userMessage()}"
+        AppLog.e("tunnel start failed (attempt ${attempt + 1}): $message", e.takeIf { it !is VpnStartException })
+        return message
     }
 
     /**
@@ -590,7 +598,7 @@ class XrayVpnService : VpnService() {
      */
     private fun retryStart(generation: Int, attempt: Int, start: suspend () -> Unit) {
         scope.launch(worker) {
-            delay(if (attempt == 1) 1_500L else 5_000L)
+            delay(StartFailurePolicy.retryDelayMs(attempt))
             enqueue {
                 if (generation != startGeneration || !runtime.shouldRun()) return@enqueue
                 AppLog.i("starting again (attempt ${attempt + 1})")
