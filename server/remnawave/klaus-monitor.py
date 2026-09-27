@@ -5,13 +5,15 @@ Runs on the panel host next to Remnawave (install-panel.sh starts it in the
 official python:3-alpine image with this file mounted read-only; standard
 library only), behind Caddy at https://<SUB_DOMAIN>/klaus/:
 
-  GET /klaus/report?s=&h=&p=&k=&n=&o=&v=&w=
+  GET /klaus/report?s=&h=&p=&k=&n=&o=&v=&w=&a=
       sent by the app after its auto-failover switched AWAY from a server
       that stopped answering (so the phone itself has internet): s is the
       friend's subscription id, h/p/k the failed server, n the network type
       (wifi|mobile|other), o the mobile operator, v the app version. w=1:
       the app moved from a server outside the mobile operator's whitelist
-      to one inside it (the "whitelist" regime, not a block).
+      to one inside it (the "whitelist" regime, not a block). a=1: no
+      server answered at all while a Russian site opened directly; it
+      counts like any other report.
   GET /klaus/health
 
 When REPORT_THRESHOLD different subscriptions report the same server within
@@ -322,15 +324,19 @@ def alert_text(host, h, p, reports):
 def whitelist_text(host, h, p, reports):
     """The note for w=1 reports: under the mobile whitelist every foreign
     server fails the same way, so a new one would not help. It never
-    suggests disable-node."""
+    suggests disable-node. The app cannot always tell the whitelist from a
+    block of this one server on mobile networks only, so the note says
+    "most likely" and that reports from other networks still raise the
+    usual alert."""
     node_names, state = node_state(host)
     name = (host.get("remark") or "").strip() or (node_names[0] if node_names else "%s:%d" % (h, p))
     lines = [
         "Klaus VPN: мобильный интернет в режиме белых списков у %s за последние %s: сервер «%s» у них "
         "не открывается, приложение перешло на сервер из белого списка." % (people(len(reports)), duration(WINDOW), name),
         "Сети: %s." % network_mix([label for label, _ in reports]),
-        "Похоже, оператор открывает только сайты из белого списка. Это не блокировка сервера: "
-        "отключать и менять его не нужно.",
+        "Скорее всего, оператор открывает только сайты из белого списка: тогда не работает ни один "
+        "зарубежный сервер, и отключать или менять этот не нужно. Если на сервер пожалуются и из других "
+        "сетей, например по Wi-Fi, придёт обычное сообщение о блокировке.",
     ]
     if state == "offline":
         lines.append("Но панель тоже не видит сервер: проверьте VPS у хостера (включён ли, оплачен ли).")

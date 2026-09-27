@@ -22,9 +22,12 @@ on:
 permissions:
   contents: read
 
+# Test builds of a branch replace each other. A stable build (a v* tag or
+# the ticked box) is never cancelled by a later push to its branch: stable
+# builds wait for each other instead, as they all replace one release.
 concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.stable) && 'build-stable' || format('build-{0}', github.ref) }}
+  cancel-in-progress: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.stable) }}
 
 jobs:
   core:
@@ -134,11 +137,21 @@ jobs:
             exit 1
           }
 
-      # Plain JVM tests of the app's logic: everything in data and service
-      # (new test classes there run by themselves), plus the ui tests of links
-      # and QR codes. The screenshots have their own step below.
+      # Plain JVM tests of the app's logic: everything in data, service, util
+      # and widget (new test classes there run by themselves), plus the ui
+      # tests by name. The screenshots have their own step below. A pattern
+      # nothing matches yet is fine while the others match something.
       - name: Unit tests
-        run: ./gradlew --no-daemon testDebugUnitTest --tests 'com.klausms.vpn.data.*' --tests 'com.klausms.vpn.service.*' --tests 'com.klausms.vpn.ui.DeepLinkTest' --tests 'com.klausms.vpn.ui.QrDecoderTest'
+        run: >-
+          ./gradlew --no-daemon testDebugUnitTest
+          --tests 'com.klausms.vpn.data.*'
+          --tests 'com.klausms.vpn.service.*'
+          --tests 'com.klausms.vpn.util.*'
+          --tests 'com.klausms.vpn.widget.*'
+          --tests 'com.klausms.vpn.ui.DeepLinkTest'
+          --tests 'com.klausms.vpn.ui.QrDecoderTest'
+          --tests 'com.klausms.vpn.ui.PhoneDiagnosticsTest'
+          --tests 'com.klausms.vpn.ui.ViewModelLogicTest'
 
       - name: Check native library 16 KB alignment
         run: |
@@ -170,9 +183,11 @@ jobs:
           if-no-files-found: ignore
 
       # For your own phone: every push replaces its branch's build-* release.
-      # The panel never gives these to friends (it takes "stable" below).
+      # The panel never gives these to friends (it takes "stable" below). A
+      # stable run leaves it alone: it may run next to that branch's push
+      # runs, and two runs replacing one release fail each other.
       - name: Publish test build
-        if: github.ref_type == 'branch'
+        if: github.ref_type == 'branch' && !inputs.stable
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.ref_name }}

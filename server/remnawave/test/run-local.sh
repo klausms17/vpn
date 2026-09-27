@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Local end-to-end test of server/remnawave. Not needed on real servers.
 #
-# Brings the whole friends' setup up on this one machine, with the real
-# scripts and images, and checks that a friend's subscription really works:
+# First the monitor's unit tests (monitor_test.py, no Docker). Then brings
+# the whole friends' setup up on this one machine, with the real scripts
+# and images, and checks that a friend's subscription really works:
 #
 #   install-panel.sh  panel, database, valkey, subscription page and Caddy
 #                     (with its internal CA instead of Let's Encrypt), run
@@ -35,7 +36,7 @@
 #   connections 30 minutes (the profile's policy), the APK is published
 #   with a verified checksum (a wrong one is refused, a missing release is
 #   quiet for the timer) on https://SUB/app/ with version.json and the
-#   page's download button, block reports (unknown friend refused, one
+#   page's download button (and its Samsung and Huawei tip), block reports (unknown friend refused, one
 #   friend twice is no alert, two friends in the mobile whitelist regime
 #   are one note that never says "disable", two friends are exactly one
 #   Russian alert, then quiet; rate limit; no IPs or ids in the logs),
@@ -92,6 +93,8 @@ fail() { printf '\033[1;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
 # ---------------------------------------------------------------- checks
 [ "$(id -u)" -eq 0 ] || fail "run as root"
 for c in docker go python3 jq curl openssl ip base64 sha256sum; do command -v "$c" >/dev/null || fail "missing $c"; done
+# The monitor's counting first: seconds, no Docker.
+python3 "$HERE/monitor_test.py" || fail "klaus-monitor unit tests"
 docker info >/dev/null 2>&1 || fail "docker is not running"
 if [ -e /opt/remnawave ] || [ -e /opt/remnanode ]; then fail "this machine has a real Remnawave setup; not touching it"; fi
 for c in remnawave remnawave-db remnawave-redis remnawave-subscription-page caddy remnanode klaus-monitor; do
@@ -496,6 +499,12 @@ rm -f "$WORK/other-repo.env"
 if compgen -G "$WORK/opt/app/*" >/dev/null; then fail "something was published from a missing release"; fi
 echo "download buttons without APK_URL, nothing published: $(page_apk_buttons)"
 [ "$(page_apk_buttons)" = "[]" ] || fail "download button without an APK"
+# Samsung Auto Blocker and Huawei/Honor Pure mode also refuse a file sent
+# by the owner, so the tip is there without the download button too.
+install_tip() { jq -e '.response.config.platforms.android.apps[0].blocks[0].description
+  | (.ru | contains("«Автоблокировщик» (Samsung)") and contains("«Чистый режим»")) and (.en | contains("Auto Blocker"))' \
+  "$WORK/page-config.json" >/dev/null; }
+install_tip || fail "no install tip for Samsung and Huawei without the download button"
 if kp publish-apk --tag klaus-bad-sum > "$WORK/publish-bad.log" 2>&1; then fail "an APK with a wrong checksum was published"; fi
 cat "$WORK/publish-bad.log"
 grep -q "контрольная сумма" "$WORK/publish-bad.log" || fail "wrong refusal of a bad checksum"
@@ -544,13 +553,14 @@ grep -q "уже опубликована" "$WORK/publish-2.log" || fail "the sam
 echo "download buttons now: $(page_apk_buttons)"
 [ "$(page_apk_buttons)" = "[{\"link\":\"https://$SUB_DOMAIN/app/KlausVPN.apk\",\"text\":\"Скачать приложение\"}]" ] ||
   fail "no download button for the published APK"
+install_tip || fail "no install tip for Samsung and Huawei next to the download button"
 # What a friend's browser gets.
 sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' -c "$WORK/cookies2" -o /dev/null
 sub_get "$UA_BROWSER" "https://$SUB_DOMAIN/assets/.app-config-v2.json" -b "$WORK/cookies2" > "$WORK/b2.config.json"
 jq -e --arg a "https://$SUB_DOMAIN/app/KlausVPN.apk" \
   '[.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external" and .link == $a)] | length == 1' \
   "$WORK/b2.config.json" >/dev/null || fail "the page does not show the download button"
-pass "old default moved to the $RELEASE release; a missing release is quiet for the timer, an unseen repository is not; wrong checksum and temporary key refused; replaced builds kept 13 h, then a redirect to the current one; KlausVPN.apk, KlausVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»"
+pass "old default moved to the $RELEASE release; a missing release is quiet for the timer, an unseen repository is not; wrong checksum and temporary key refused; replaced builds kept 13 h, then a redirect to the current one; KlausVPN.apk, KlausVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»; the Samsung and Huawei install tip with and without it"
 
 step "(c) the device is recorded (the limit itself is off)"
 USER_ID="$(api "/api/users/by-username/friend_1" | jq -r '.response.id')"
@@ -642,7 +652,7 @@ retry 10 has_note || { docker logs klaus-monitor; fail "no whitelist note after 
 mock /_mock/tg/sent | jq -r --arg p "$NOTE" '.[] | select(.text | startswith($p)) | .text' | tee "$WORK/note.txt"
 [ "$(sent_count "$NOTE")" = "1" ] || fail "more than one whitelist note"
 [ "$(sent_count "$ALERT")" = "0" ] || fail "the whitelist regime raised a blocking alert"
-for want in "у 2 человек" "«Германия»" "МТС ×1" "Билайн ×1" "не блокировка" "не нужно"; do
+for want in "у 2 человек" "«Германия»" "МТС ×1" "Билайн ×1" "менять этот не нужно" "обычное сообщение о блокировке"; do
   grep -qF "$want" "$WORK/note.txt" || fail "whitelist note lacks: $want"
 done
 if grep -q "disable-node" "$WORK/note.txt"; then fail "the whitelist note suggests disabling the server"; fi

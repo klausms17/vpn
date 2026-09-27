@@ -962,7 +962,7 @@ echo
 echo "Все команды: klaus-panel help"
 if [ "$MOVED_TO_STABLE" = "1" ]; then
   echo
-  warn "панель больше не раздаёт знакомым каждую тестовую сборку ветки $OLD_DEFAULT_TAG, только стабильные (релиз stable, инструкция, раздел 12). Вернуть как было: sudo RELEASE_TAG=$OLD_DEFAULT_TAG bash install-panel.sh"
+  warn "панель больше не раздаёт знакомым каждую тестовую сборку (релиз $OLD_DEFAULT_TAG), только стабильные (релиз stable, инструкция, раздел 12). Вернуть как было: sudo RELEASE_TAG=$OLD_DEFAULT_TAG bash install-panel.sh"
 fi
 if [ -n "$RESTORE_DIR" ]; then
   echo
