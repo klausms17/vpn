@@ -50,8 +50,9 @@ VPN-серверы:
   telegram-setup [ТОКЕН]       оповещения в Telegram: токен бота от @BotFather, затем
                                откройте показанную ссылку и нажмите «Запустить»
   telegram-test                отправить проверочное сообщение
-  publish-apk [--tag РЕЛИЗ]    выложить новую сборку приложения на адрес подписки
-                               (нужен GITHUB_TOKEN; раз в час это делается само)
+  publish-apk [--tag РЕЛИЗ]    выложить новую сборку приложения на адрес подписки (из
+                               RELEASE_TAG, по умолчанию стабильные — релиз stable; нужен
+                               GITHUB_TOKEN; раз в час это делается само)
 
 Прочее:
   hwid-limit N [--yes]         включить лимит устройств (N на человека); off — выключить
@@ -204,7 +205,7 @@ profile_config() { # CURRENT_CONFIG_JSON PRIVATE_KEY SHORT_ID
       streamSettings: {network: "raw", security: "reality",
         realitySettings: {target: $target, serverNames: [$sni], privateKey: $key, shortIds: [$sid]}}
     };
-    if . == null then {
+    (if . == null then {
       log: {loglevel: "warning"},
       inbounds: [ours],
       outbounds: [{tag: "DIRECT", protocol: "freedom"}, {tag: "BLOCK", protocol: "blackhole"}],
@@ -218,7 +219,13 @@ profile_config() { # CURRENT_CONFIG_JSON PRIVATE_KEY SHORT_ID
       (.inbounds[] | select(.tag == $tag)) |= (.port = $port
         | .streamSettings.realitySettings.target = $target
         | .streamSettings.realitySettings.serverNames = [$sni])
-    end' <<<"$1"
+    end)
+    # Xray closes a connection after 5 idle minutes by default, and phones
+    # keep push channels (Google push, mail) quiet for 15-28 minutes: each
+    # would be cut and redone every 5 minutes, waking the phone. 30 minutes
+    # outlasts them. The node keeps level 0 settings next to its own
+    # statistics switches. A value set by hand in the panel stays.
+    | .policy.levels["0"].connIdle //= 1800' <<<"$1"
 }
 
 setup_profile() {
@@ -340,18 +347,22 @@ setup_subpage() {
     # Every text needs every language of the page: Russian for ru,
     # English for the rest.
     | def t($ru; $en): reduce $locales[] as $l ({}; .[$l] = (if $l == "ru" then $ru else $en end));
-    {
+    # Samsung Auto Blocker and Huawei/Honor Pure mode refuse app files from
+    # a browser or a messenger, which a first install always comes from.
+    " Samsung, Huawei или Honor не дают поставить файл? На время выключите «Автоблокировщик» (Samsung) или «Чистый режим» (Huawei, Honor): их можно найти поиском в настройках." as $tip_ru
+    | " Samsung, Huawei or Honor refuse the file? Turn off Auto Blocker (Samsung) or Pure mode (Huawei, Honor) for a moment: search for it in Settings." as $tip_en
+    | {
       name: $app, featured: true, svgIconKey: "KlausVPN",
       blocks: [
         {
           svgIconKey: "DownloadIcon", svgIconColor: "cyan",
           title: t("Установите приложение"; "Install the app"),
           description: (if $apk != "" then
-              t("Скачайте Klaus VPN и откройте файл. Если телефон спросит, разрешите установку из этого источника.";
-                "Download Klaus VPN and open the file. If asked, allow installing from this source.")
+              t("Скачайте Klaus VPN и откройте файл. Если телефон спросит, разрешите установку из этого источника." + $tip_ru;
+                "Download Klaus VPN and open the file. If asked, allow installing from this source." + $tip_en)
             else
-              t("Попросите файл Klaus VPN у того, кто дал вам эту ссылку, и установите его.";
-                "Ask the person who gave you this link for the Klaus VPN file and install it.")
+              t("Попросите файл Klaus VPN у того, кто дал вам эту ссылку, и установите его." + $tip_ru;
+                "Ask the person who gave you this link for the Klaus VPN file and install it." + $tip_en)
             end),
           buttons: (if $apk != "" then
               [{type: "external", link: $apk, text: t("Скачать приложение"; "Download the app"), svgIconKey: "DownloadIcon"}]
@@ -820,6 +831,8 @@ cmd_telegram_test() {
 # New builds of the app from the GitHub releases (private repository: a
 # read-only token) go to https://SUB_DOMAIN/app/: KlausVPN.apk,
 # KlausVPN-<version>.apk and version.json, which the app checks for updates.
+# Only from RELEASE_TAG, "stable" by default: CI makes it on purpose, never
+# on every push like the build-<branch> test builds.
 gh_get() { # URL FILE [ACCEPT] [SECONDS]; sets GH_CODE. The token goes to curl
   # through a file; curl does not pass it on when GitHub redirects a
   # download to its file storage.
@@ -846,7 +859,7 @@ page_button() { # the page's download button; if the panel cannot take it
 }
 
 cmd_publish_apk() {
-  local tag="${RELEASE_TAG:-build-claude-compassionate-mayer-6jph8m}" repo="${GITHUB_REPO:-klausms17/vpn}"
+  local tag="${RELEASE_TAG:-stable}" repo="${GITHUB_REPO:-klausms17/vpn}"
   local gh="${GITHUB_API:-https://api.github.com}" quiet=0
   local apk apk_url sums_url ver code sha cur_code=0 cur_sha="" cur_apk="" got staging
   while [ $# -gt 0 ]; do
@@ -873,7 +886,20 @@ cmd_publish_apk() {
   case "$GH_CODE" in
     200) ;;
     401) die "GitHub не принял GITHUB_TOKEN (истёк или отозван?)" ;;
-    403 | 404) die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)" ;;
+    404)
+      # GitHub says the same about a repository the token cannot see; the
+      # repository itself tells the two apart.
+      gh_get "$gh/repos/$repo" "$TMPD/repo.json"
+      [ "$GH_CODE" = "200" ] ||
+        die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)"
+      # No stable build made yet, or CI is replacing it right now: the
+      # timer looks again in an hour.
+      [ "$quiet" = "1" ] && return 0
+      if [ "$tag" = "stable" ]; then
+        die "в $repo ещё нет релиза stable: стабильную сборку выпускает GitHub Actions по тегу v… или по кнопке Run workflow с галочкой stable (инструкция, раздел 12)"
+      fi
+      die "в $repo нет релиза $tag" ;;
+    403) die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)" ;;
     000) die "нет связи с $gh" ;;
     *) die "GitHub ответил $GH_CODE" ;;
   esac

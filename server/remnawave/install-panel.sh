@@ -15,10 +15,11 @@
 #                  without it the button appears once "klaus-panel
 #                  publish-apk" has put the app on https://SUB_DOMAIN/app/)
 #   GITHUB_TOKEN   read-only GitHub token for the app's releases: the panel
-#                  then publishes every new build by itself (hourly)
+#                  then publishes every new stable build by itself (hourly)
 #   GITHUB_REPO    repository with the releases (default klausms17/vpn)
-#   RELEASE_TAG    release whose APK is published (default: the test builds
-#                  of the current branch, build-claude-compassionate-mayer-6jph8m)
+#   RELEASE_TAG    release whose APK is published (default stable: the build
+#                  CI makes on purpose from a v* tag or a manual run; the
+#                  build-<branch> test builds come with every push)
 #   REPORT_THRESHOLD, REPORT_WINDOW_MIN, REPORT_COOLDOWN_MIN
 #                  Telegram alert when this many different friends' apps
 #                  (default 2) reported the same server within this many
@@ -156,8 +157,19 @@ TELEGRAM_API_BASE="${TELEGRAM_API_BASE:-https://api.telegram.org}"
 GITHUB_TOKEN="${GITHUB_TOKEN-$(conf_get GITHUB_TOKEN)}"
 GITHUB_REPO="${GITHUB_REPO:-$(conf_get GITHUB_REPO)}"
 GITHUB_REPO="${GITHUB_REPO:-klausms17/vpn}"
+# Panels set up before the stable release existed saved the old default,
+# the work branch's test builds (every push, never tried on a phone), as if
+# it had been chosen. They move to stable once; STABLE_DEFAULT=1 says that
+# is done (or was never needed), so a branch chosen later on purpose stays.
+OLD_DEFAULT_TAG=build-claude-compassionate-mayer-6jph8m
+MOVED_TO_STABLE=0
+if [ -z "${RELEASE_TAG:-}" ] && [ -z "$(conf_get STABLE_DEFAULT)" ] &&
+  [ "$(conf_get RELEASE_TAG)" = "$OLD_DEFAULT_TAG" ]; then
+  RELEASE_TAG=stable
+  MOVED_TO_STABLE=1
+fi
 RELEASE_TAG="${RELEASE_TAG:-$(conf_get RELEASE_TAG)}"
-RELEASE_TAG="${RELEASE_TAG:-build-claude-compassionate-mayer-6jph8m}"
+RELEASE_TAG="${RELEASE_TAG:-stable}"
 GITHUB_API="${GITHUB_API:-$(conf_get GITHUB_API)}"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
 REPORT_THRESHOLD="${REPORT_THRESHOLD:-$(conf_get REPORT_THRESHOLD)}"
@@ -821,6 +833,7 @@ REPORT_COOLDOWN_MIN=$(q "$REPORT_COOLDOWN_MIN")
 GITHUB_TOKEN=$(q "$GITHUB_TOKEN")
 GITHUB_REPO=$(q "$GITHUB_REPO")
 RELEASE_TAG=$(q "$RELEASE_TAG")
+STABLE_DEFAULT=1
 GITHUB_API=$(q "$GITHUB_API")
 EOF
 
@@ -942,11 +955,15 @@ fi
 if [ -z "$GITHUB_TOKEN" ]; then
   echo "  4. Раздача приложения с этого сервера: запустите ещё раз с GITHUB_TOKEN=… (инструкция, раздел 12)"
 else
-  echo "  4. Новые сборки приложения публикуются сами; сейчас:  klaus-panel publish-apk"
+  echo "  4. Новые сборки из релиза $RELEASE_TAG публикуются сами; сейчас:  klaus-panel publish-apk"
 fi
 echo "  5. Резервная копия:  klaus-panel backup"
 echo
 echo "Все команды: klaus-panel help"
+if [ "$MOVED_TO_STABLE" = "1" ]; then
+  echo
+  warn "панель больше не раздаёт знакомым каждую тестовую сборку (релиз $OLD_DEFAULT_TAG), только стабильные (релиз stable, инструкция, раздел 12). Вернуть как было: sudo RELEASE_TAG=$OLD_DEFAULT_TAG bash install-panel.sh"
+fi
 if [ -n "$RESTORE_DIR" ]; then
   echo
   warn "панель переехала на новый IP. Направьте оба домена на $PANEL_IP и на каждом VPN-сервере выполните: sudo PANEL_IP=$PANEL_IP bash install-node.sh"

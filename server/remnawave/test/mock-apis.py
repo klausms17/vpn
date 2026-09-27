@@ -10,8 +10,10 @@ getUpdates (serves the messages queued with POST /_mock/tg/say
 negative offset keeps only the last updates, as in Telegram) and
 sendMessage (kept; GET /_mock/tg/sent lists them).
 
-GitHub: GET /repos/<repo>/releases/tags/<tag> (needs "Bearer G") lists the
-APK and SHA256SUMS.txt; /repos/<repo>/releases/assets/<id> with
+GitHub (needs "Bearer G"): GET /repos/<repo> answers for that one repository
+only (others are 404, as GitHub says for a repository the token cannot see);
+/repos/<repo>/releases/tags/<tag> lists the APK and SHA256SUMS.txt;
+/repos/<repo>/releases/assets/<id> with
 "Accept: application/octet-stream" redirects to http://127.0.0.2:<port>/dl/,
 which, like GitHub's file storage, refuses requests that still carry the
 Authorization header. The release <bad-tag> has a SHA256SUMS.txt that does
@@ -60,7 +62,7 @@ def main():
     }
     releases = {args.tag: [1, 2], args.bad_tag: [3, 4], args.temp_tag: [1, 2]}
     version = name[len("KlausVPN-"):-len(".apk")]
-    titles = {args.tag: "Klaus VPN %s (main)" % version, args.bad_tag: "Klaus VPN %s (main)" % version,
+    titles = {args.tag: "Klaus VPN %s (%s)" % (version, args.tag), args.bad_tag: "Klaus VPN %s (main)" % version,
               args.temp_tag: "Klaus VPN %s (main) — временная подпись" % version}
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -153,6 +155,8 @@ def main():
             if self.headers.get("Authorization") != "Bearer " + args.gh_token:
                 return self.reply(401, {"message": "Bad credentials"})
             base = "http://127.0.0.1:%d/repos/%s" % (args.port, args.repo)
+            if path == "/repos/" + args.repo:
+                return self.reply(200, {"full_name": args.repo, "private": True})
             prefix = "/repos/%s/releases/" % args.repo
             if not path.startswith(prefix):
                 return self.reply(404, {"message": "Not Found"})

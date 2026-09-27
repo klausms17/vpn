@@ -5,16 +5,23 @@ Runs on the panel host next to Remnawave (install-panel.sh starts it in the
 official python:3-alpine image with this file mounted read-only; standard
 library only), behind Caddy at https://<SUB_DOMAIN>/klaus/:
 
-  GET /klaus/report?s=&h=&p=&k=&n=&o=&v=
+  GET /klaus/report?s=&h=&p=&k=&n=&o=&v=&w=&a=
       sent by the app after its auto-failover switched AWAY from a server
       that stopped answering (so the phone itself has internet): s is the
       friend's subscription id, h/p/k the failed server, n the network type
-      (wifi|mobile|other), o the mobile operator, v the app version.
+      (wifi|mobile|other), o the mobile operator, v the app version. w=1:
+      the app moved from a server outside the mobile operator's whitelist
+      to one inside it (the "whitelist" regime, not a block). a=1: no
+      server answered at all while a Russian site opened directly; it
+      counts like any other report.
   GET /klaus/health
 
 When REPORT_THRESHOLD different subscriptions report the same server within
 REPORT_WINDOW_MIN minutes, one Russian alert goes to Telegram, then that
-server is quiet for REPORT_COOLDOWN_MIN minutes.
+server is quiet for REPORT_COOLDOWN_MIN minutes. w=1 reports do not count
+towards that alert: when only they reach the threshold, a separate note
+says the server is not blocked (never "disable it"), with its own quiet
+time.
 
 Privacy: the client's IP is never logged or stored (requests are not logged
 at all). Subscription ids stay only in memory (the panel's answer about an id
@@ -169,8 +176,10 @@ class State:
         self.known = collections.OrderedDict()  # shortUuid -> (active subscription, expires), oldest first
         self.lookups = threading.BoundedSemaphore(LOOKUPS_AT_ONCE)
         self.rate = {}  # shortUuid -> deque of report times, last hour
-        self.reports = {}  # (host, port) -> {shortUuid: (time, network label)}
-        self.cooldown = {}  # (host, port) -> quiet until
+        self.reports = {}  # (host, port) -> {shortUuid: (time, network label, whitelist)}
+        # (host, port) -> quiet until, for the blocking alert;
+        # (host, port, "whitelist") for the whitelist note.
+        self.cooldown = {}
         self.hosts = (0.0, [])  # (fetched at, panel hosts)
         self.purged = time.monotonic()
 
@@ -263,8 +272,8 @@ def find_host(h, p):
     return None
 
 
-def alert_text(host, h, p, labels):
-    node_names, state = [], "unknown"
+def node_state(host):
+    """-> (names of the host's servers, "online" | "offline" | "unknown")."""
     try:
         listed = panel_response("/api/nodes")
         if not isinstance(listed, list):
@@ -272,20 +281,31 @@ def alert_text(host, h, p, labels):
         nodes = {n.get("uuid"): n for n in listed if isinstance(n, dict)}
         linked = [nodes[u] for u in host.get("nodes") or [] if isinstance(u, str) and u in nodes]
         online = [n for n in linked if n.get("isConnected") and not n.get("isDisabled")]
-        node_names = [n.get("name") for n in (online or linked) if n.get("name")]
+        names = [n.get("name") for n in (online or linked) if n.get("name")]
         if online:
-            state = "online"
-        elif linked:
-            state = "offline"
+            return names, "online"
+        if linked:
+            return names, "offline"
+        return names, "unknown"
     except PanelError as e:
         log(str(e))
-    name = (host.get("remark") or "").strip() or (node_names[0] if node_names else "%s:%d" % (h, p))
+        return [], "unknown"
+
+
+def network_mix(labels):
     mix = collections.Counter(labels)
-    networks = ", ".join("%s ×%d" % (label, count) for label, count in
-                         sorted(mix.items(), key=lambda item: (-item[1], item[0])))
+    return ", ".join("%s ×%d" % (label, count) for label, count in
+                     sorted(mix.items(), key=lambda item: (-item[1], item[0])))
+
+
+def alert_text(host, h, p, reports):
+    """The blocking alert. reports: [(network label, whitelist)]."""
+    node_names, state = node_state(host)
+    name = (host.get("remark") or "").strip() or (node_names[0] if node_names else "%s:%d" % (h, p))
+    labels = [label + (" (белые списки)" if whitelist else "") for label, whitelist in reports]
     lines = [
         "Klaus VPN: сервер «%s» не отвечает у %s за последние %s." % (name, people(len(labels)), duration(WINDOW)),
-        "Сети: %s." % networks,
+        "Сети: %s." % network_mix(labels),
     ]
     disable = "klaus-panel disable-node %s" % node_names[0] if node_names else "klaus-panel disable-node …"
     if state == "online":
@@ -301,20 +321,48 @@ def alert_text(host, h, p, labels):
     return name, "\n".join(lines)
 
 
-def send_alert(key, host, labels):
+def whitelist_text(host, h, p, reports):
+    """The note for w=1 reports: under the mobile whitelist every foreign
+    server fails the same way, so a new one would not help. It never
+    suggests disable-node. The app cannot always tell the whitelist from a
+    block of this one server on mobile networks only, so the note says
+    "most likely" and that reports from other networks still raise the
+    usual alert."""
+    node_names, state = node_state(host)
+    name = (host.get("remark") or "").strip() or (node_names[0] if node_names else "%s:%d" % (h, p))
+    lines = [
+        "Klaus VPN: мобильный интернет в режиме белых списков у %s за последние %s: сервер «%s» у них "
+        "не открывается, приложение перешло на сервер из белого списка." % (people(len(reports)), duration(WINDOW), name),
+        "Сети: %s." % network_mix([label for label, _ in reports]),
+        "Скорее всего, оператор открывает только сайты из белого списка: тогда не работает ни один "
+        "зарубежный сервер, и отключать или менять этот не нужно. Если на сервер пожалуются и из других "
+        "сетей, например по Wi-Fi, придёт обычное сообщение о блокировке.",
+    ]
+    if state == "offline":
+        lines.append("Но панель тоже не видит сервер: проверьте VPS у хостера (включён ли, оплачен ли).")
+    elif state == "unknown":
+        lines.append("Состояние сервера на панели узнать не удалось: посмотрите klaus-panel list-nodes.")
+    lines.append("Следующее такое сообщение об этом сервере — не раньше чем через %s." % duration(COOLDOWN))
+    return name, "\n".join(lines)
+
+
+def send_alert(quiet_key, host, reports, whitelist):
+    kind = "whitelist note" if whitelist else "alert"
     try:
-        name, text = alert_text(host, key[0], key[1], labels)
+        make = whitelist_text if whitelist else alert_text
+        name, text = make(host, quiet_key[0], quiet_key[1], reports)
         if not (TG_TOKEN and TG_CHAT):
-            log("alert for «%s» (%d people), Telegram is not set up: klaus-panel telegram-setup" % (name, len(labels)))
+            log("%s for «%s» (%d people), Telegram is not set up: klaus-panel telegram-setup"
+                % (kind, name, len(reports)))
             return
         if telegram_send(text):
-            log("alert sent: «%s», %d people" % (name, len(labels)))
+            log("%s sent: «%s», %d people" % (kind, name, len(reports)))
             return
     except Exception as e:  # whatever it was, the alert must not stay muted
-        log("alert failed: %s" % type(e).__name__)
+        log("%s failed: %s" % (kind, type(e).__name__))
     # Not delivered: the next report may try again.
     with STATE.lock:
-        STATE.cooldown.pop(key, None)
+        STATE.cooldown.pop(quiet_key, None)
 
 
 def handle_report(query):
@@ -323,10 +371,13 @@ def handle_report(query):
         values = query.get(name) or [""]
         return values[0].strip()
 
-    s, h, p, k, n, o, v = (one(x) for x in "shpknov")
+    s, h, p, k, n, o, v, w = (one(x) for x in "shpknovw")
     if not (SHORT_UUID_RE.match(s) and HOST_RE.match(h) and PORT_RE.match(p) and 0 < int(p) < 65536
             and PROTO_RE.match(k) and VERSION_RE.match(v)):
         return 400, {"ok": False}
+    # The app knows best whether the whitelist explains the failure (a 4G
+    # router's Wi-Fi has one too), so the flag is taken as it is.
+    whitelist = w == "1"
     known = subscription_ok(s)
     if known is None:
         return 503, {"ok": False}
@@ -352,15 +403,25 @@ def handle_report(query):
         return 200, {"ok": True}
     kind = n if n in ("wifi", "mobile") else "other"
     label = network_label(kind, clean_operator(o) if kind == "mobile" else "")
+    note_key = key + ("whitelist",)
     with STATE.lock:
         reports = STATE.reports.setdefault(key, {})
-        reports[s] = (now, label)
+        reports[s] = (now, label, whitelist)
         fresh = [r for r in reports.values() if r[0] > now - WINDOW]
-        if len(fresh) < THRESHOLD or STATE.cooldown.get(key, 0) > now:
+        listed = [r for r in fresh if r[2]]
+        if STATE.cooldown.get(key, 0) > now:
             return 200, {"ok": True}
-        STATE.cooldown[key] = now + COOLDOWN
-        labels = [r[1] for r in fresh]
-    threading.Thread(target=send_alert, args=(key, host, labels), daemon=True).start()
+        # A whitelist report says nothing about blocking: the alert needs
+        # enough of the others. It lists everybody, marked.
+        if len(fresh) - len(listed) >= THRESHOLD:
+            quiet_key, chosen, note = key, fresh, False
+        elif len(listed) >= THRESHOLD and STATE.cooldown.get(note_key, 0) <= now:
+            quiet_key, chosen, note = note_key, listed, True
+        else:
+            return 200, {"ok": True}
+        STATE.cooldown[quiet_key] = now + COOLDOWN
+        chosen = [(r[1], r[2]) for r in chosen]
+    threading.Thread(target=send_alert, args=(quiet_key, host, chosen, note), daemon=True).start()
     return 200, {"ok": True}
 
 

@@ -143,9 +143,14 @@ if [ "$XHTTP_PORT" != "0" ]; then
 fi
 
 mkdir -p "$CONF_DIR"
+# policy: Xray closes a connection after 5 idle minutes by default, while
+# phones keep push channels (Google push, mail) quiet for 15-28 minutes, so
+# each would be cut and redone every 5 minutes, waking the phone. 30 minutes
+# outlasts them; the handshake timeout keeps its default.
 cat > "$CONF_NEXT" <<EOF
 {
   "log": { "loglevel": "warning", "access": "none" },
+  "policy": { "levels": { "0": { "connIdle": 1800 } } },
   "inbounds": [
     {
       "tag": "vless-vision",
