@@ -1,0 +1,12 @@
+	# Inside the existing "https://$SUB_DOMAIN { handle_path /app/* { ... } }" block of
+	# server/remnawave/install-panel.sh, next to the @apk rule. Caddy's file_server only
+	# guesses a type when none is set, and has none for .ipa/.plist (it would send no
+	# Content-Type at all), so set them explicitly.
+		@ipa path *.ipa
+		header @ipa Content-Type "application/octet-stream"
+		@plist path *.plist
+		header @plist Content-Type "text/xml; charset=utf-8"
+	# Cache-Control "no-cache" (already set for /app/*) keeps iOS from using an old manifest.
+	#
+	# Install link (must be opened in Safari; in-app browsers such as Telegram's ignore it):
+	#   itms-services://?action=download-manifest&url=https%3A%2F%2F$SUB_DOMAIN%2Fapp%2Fios%2Fmanifest.plist

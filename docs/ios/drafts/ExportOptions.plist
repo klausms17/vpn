@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- "ad-hoc" is the pre-Xcode-15.3 spelling; Xcode 26 rejects it. -->
+	<key>method</key>
+	<string>release-testing</string>
+	<key>signingStyle</key>
+	<string>manual</string>
+	<key>signingCertificate</key>
+	<string>Apple Distribution</string>
+	<key>teamID</key>
+	<string>__TEAM_ID__</string>
+	<key>provisioningProfiles</key>
+	<dict>
+		<key>com.klausms.vpn</key>
+		<string>Klaus VPN Ad Hoc</string>
+		<key>com.klausms.vpn.tunnel</key>
+		<string>Klaus VPN Tunnel Ad Hoc</string>
+	</dict>
+	<key>thinning</key>
+	<string>&lt;none&gt;</string>
+	<key>stripSwiftSymbols</key>
+	<true/>
+</dict>
+</plist>

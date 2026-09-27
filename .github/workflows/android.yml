@@ -6,8 +6,9 @@ on:
     # A v* tag makes the stable build friends get (see "Publish stable
     # release"); tags are built whatever files changed.
     tags: ["v*"]
-    # The iPhone app has its own workflow (ios.yml).
-    paths-ignore: ["**.md", "ios/**", ".github/workflows/ios*.yml"]
+    # The iPhone app has its own workflows (ios.yml, ios-app.yml); docs/
+    # and tools/ (a local check, see tools/jvm-check) change no APK.
+    paths-ignore: ["**.md", "docs/**", "tools/**", "ios/**", ".github/workflows/ios*.yml"]
   workflow_dispatch:
     inputs:
       stable:
@@ -109,7 +110,20 @@ jobs:
           name: geo-upstream
           path: geo-upstream
 
+      - name: NDK version
+        run: echo "NDK_VERSION=$(basename "$ANDROID_NDK_LATEST_HOME")" >> "$GITHUB_ENV"
+
+      # gomobile takes about five minutes; the library changes only with the
+      # Go code, its modules, the build script or the NDK it is linked with.
+      - name: Core library from the cache
+        id: core-lib
+        uses: actions/cache@v6
+        with:
+          path: app/libs/libxray.aar
+          key: libxray-android-${{ env.NDK_VERSION }}-${{ hashFiles('libxray/*.go', '!libxray/*_test.go', 'libxray/go.mod', 'libxray/go.sum', 'scripts/build-libxray.sh') }}
+
       - name: Build Xray core library (gomobile)
+        if: steps.core-lib.outputs.cache-hit != 'true'
         run: |
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           scripts/build-libxray.sh
