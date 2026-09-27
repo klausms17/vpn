@@ -73,6 +73,9 @@ android {
     testOptions {
         // Screenshot tests draw the real resources (fonts, map, icons).
         unitTests.isIncludeAndroidResources = true
+        // Plain JVM tests reach android.util.Log and SystemClock through the
+        // code they test: those return 0/null instead of throwing.
+        unitTests.isReturnDefaultValues = true
     }
 }
 
@@ -120,6 +123,7 @@ dependencies {
     implementation(libs.zxing.core)
 
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.robolectric)
     testImplementation(platform(libs.androidx.compose.bom))
     testImplementation(libs.androidx.compose.ui.test.junit4)
