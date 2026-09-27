@@ -29,13 +29,12 @@ import com.klausms.vpn.util.PhoneSettings
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
@@ -47,57 +46,6 @@ sealed interface PingResult {
     data class Ok(val ms: Long) : PingResult
     data class Failed(val reason: String) : PingResult
 }
-
-/**
- * Captions of the long operations now running; [text] is the newest. One
- * operation ending must not hide the pill while another still runs.
- */
-internal class BusyTexts {
-    private val running = ArrayList<Op>()
-    private val _text = MutableStateFlow<String?>(null)
-    val text: StateFlow<String?> = _text.asStateFlow()
-
-    inner class Op internal constructor(caption: String) {
-        /** Progress ("Загрузка geoip.dat…"); may be set from any thread. */
-        var caption: String = caption
-            set(value) = synchronized(running) {
-                field = value
-                publish()
-            }
-
-        fun end() = synchronized(running) {
-            running.remove(this)
-            publish()
-        }
-    }
-
-    fun start(caption: String): Op = synchronized(running) { Op(caption).also { running += it; publish() } }
-
-    private fun publish() {
-        _text.value = running.lastOrNull()?.caption
-    }
-}
-
-/** Work that must not run twice at once; [running] is shown on screen. */
-internal class OneAtATime {
-    private val _running = MutableStateFlow(false)
-    val running: StateFlow<Boolean> = _running.asStateFlow()
-
-    /** False when a run is already going. */
-    fun tryStart(): Boolean = _running.compareAndSet(expect = false, update = true)
-
-    fun end() {
-        _running.value = false
-    }
-}
-
-/**
- * «Обновить списки», for the whole app process rather than one screen: a run
- * whose screen was closed keeps downloading until it ends (the download
- * cannot be interrupted), and a reopened screen must not start a second run
- * over the same files meanwhile.
- */
-private val geoUpdate = OneAtATime()
 
 /**
  * Whether an update check may run now, [lastAttempt] being the start of the
@@ -112,6 +60,7 @@ internal const val UPDATE_RETRY_MS = 5 * 60_000L
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = (app as App).repository
+    private val ui = (app as App).ui
     val vpn = VpnClient(app)
 
     val profiles: StateFlow<ProfilesState> = repo.profiles
@@ -122,15 +71,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val pings: StateFlow<Map<String, PingResult>> = _pings.asStateFlow()
 
     /** Server address -> 1 (on the Russian mobile whitelist), 0, -1 (partly). */
-    private val _whitelist = MutableStateFlow<Map<String, Int>>(emptyMap())
-    val whitelist: StateFlow<Map<String, Int>> = _whitelist.asStateFlow()
+    val whitelist: StateFlow<Map<String, Int>> = ui.whitelist
 
     /** Text of a running long operation, or null. */
-    private val busyTexts = BusyTexts()
-    val busy: StateFlow<String?> = busyTexts.text
+    val busy: StateFlow<String?> = ui.busy.text
 
     /** «Обновить списки» is running; a second run would delete this one's files. */
-    val geoUpdating: StateFlow<Boolean> = geoUpdate.running
+    val geoUpdating: StateFlow<Boolean> = ui.geoUpdate.running
 
     private val _backgroundTip = MutableStateFlow(false)
 
@@ -140,14 +87,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     val backgroundTip: StateFlow<Boolean> = _backgroundTip.asStateFlow()
 
-    private val _geoVersion = MutableStateFlow(0L)
-    val geoVersion: StateFlow<Long> = _geoVersion.asStateFlow()
+    val geoVersion: StateFlow<Long> = ui.geoVersion
 
-    private val _coreVersion = MutableStateFlow("")
-    val coreVersion: StateFlow<String> = _coreVersion.asStateFlow()
+    val coreVersion: StateFlow<String> = ui.coreVersion
 
-    private val _messages = Channel<String>(Channel.BUFFERED)
-    val messages = _messages.receiveAsFlow()
+    val messages: Flow<String> = ui.messages
 
     /** A newer build of the app on the owner's panel, until installed or put off. */
     private val _update = MutableStateFlow<AppUpdate?>(null)
@@ -188,19 +132,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     init {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                // For «Сообщить о проблеме»: what the phone allows in the background.
-                AppLog.i("phone: ${PhoneSettings.summary(app)}")
-                GeoFiles.ensureInstalled(app)
-                XrayCore.init(app)
-                _geoVersion.value = GeoFiles.installedVersion(app)
-                _coreVersion.value = XrayCore.version()
-                checkWhitelist(profiles.value.profiles)
-            } catch (e: Exception) {
-                AppLog.e("startup", e)
-            }
-        }
+        ui.start()
         // What the last update check found, until the next one.
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -255,9 +187,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun message(text: String) {
-        _messages.trySend(text)
-    }
+    private fun message(text: String) = ui.message(text)
 
     // ------------------------------------------------------------- update
 
@@ -429,7 +359,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun import(text: String) = appScope.launch(saveErrors) {
         val input = text.trim()
         if (input.isEmpty()) return@launch
-        val op = busyTexts.start("Добавление…")
+        val op = ui.busy.start("Добавление…")
         try {
             val subscription = ImportText.subscriptionUrl(input)
             if (subscription != null) addSubscription(subscription) else addLinks(input, ImportText.links(input))
@@ -465,7 +395,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (ready.isNotEmpty()) {
             // Against the saved list, inside the save: another import may have just added these keys.
             repo.updateProfiles { s -> s.withNewKeys(ready).also { added = it.second }.first }
-            checkWhitelist(added)
+            ui.checkWhitelist(added)
         }
         message(
             when {
@@ -484,7 +414,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         val outcome = updater.add(url, downloader)
-        checkWhitelist(outcome.servers)
+        ui.checkWhitelist(outcome.servers)
         val name = outcome.subscription.name
         message(
             if (outcome.applied) {
@@ -501,11 +431,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun refreshSubscription(id: String, quiet: Boolean = false) = viewModelScope.launch(saveErrors) {
         if (profiles.value.subscriptions.none { it.id == id }) return@launch
-        val op = if (quiet) null else busyTexts.start("Обновление подписки…")
+        val op = if (quiet) null else ui.busy.start("Обновление подписки…")
         try {
             // A manual refresh also renews pinned certificates.
             val outcome = updater.refresh(id, downloader, runningId = status.value.profileId, repin = !quiet) ?: return@launch
-            checkWhitelist(outcome.servers)
+            ui.checkWhitelist(outcome.servers)
             if (outcome.runningChanged) reconnectIfRunning()
             if (!quiet) {
                 message(
@@ -560,22 +490,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun pingAll() = ping(profiles.value.profiles.map { it.id })
 
-    private fun checkWhitelist(list: List<StoredProfile>) {
-        val app = getApplication<Application>()
-        val hosts = list.map { it.address }.distinct().filter { it !in _whitelist.value }
-        if (hosts.isEmpty()) return
-        viewModelScope.launch(Dispatchers.IO) {
-            for (host in hosts) {
-                val r = try {
-                    XrayCore.whitelistStatus(app, host)
-                } catch (_: Exception) {
-                    continue
-                }
-                _whitelist.update { it + (host to r) }
-            }
-        }
-    }
-
     // ------------------------------------------------------------ settings
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) = appScope.launch(saveErrors) {
@@ -606,19 +520,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** One run at a time in the app ([geoUpdate]): runs share their download folder and files. */
+    /** One run at a time in the app ([UiSession.geoUpdate]): runs share their download folder and files. */
     fun updateGeo() {
-        if (geoUpdate.running.value) return
-        viewModelScope.launch {
-            // Taken inside the launch: a launch that never runs (the screen
-            // is closing) must not keep the updates locked.
-            if (!geoUpdate.tryStart()) return@launch
+        if (ui.geoUpdate.running.value) return
+        // In the app scope: the result is applied even when the screen closed during the download.
+        appScope.launch {
+            if (!ui.geoUpdate.tryStart()) return@launch
             val app = getApplication<Application>()
-            val op = busyTexts.start("Обновление баз…")
+            val op = ui.busy.start("Обновление баз…")
             try {
                 val via = profiles.value.selected?.outbounds
-                withContext(Dispatchers.IO) { GeoFiles.update(app, via) { op.caption = it } }
-                _geoVersion.value = GeoFiles.installedVersion(app)
+                withContext(Dispatchers.IO) {
+                    GeoFiles.update(app, via) { op.caption = it }
+                    ui.refreshGeoVersion()
+                }
                 message("Базы обновлены")
                 reconnectIfRunning()
             } catch (e: Exception) {
@@ -630,7 +545,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // A cancelled run gets here only once its download has ended
                 // (withContext waits for the blocking work), so the files are
                 // free by then.
-                geoUpdate.end()
+                ui.geoUpdate.end()
             }
         }
     }

@@ -6,6 +6,7 @@ import android.os.Build
 import androidx.core.content.edit
 import com.klausms.vpn.data.AppRepository
 import com.klausms.vpn.service.RuntimeState
+import com.klausms.vpn.ui.UiSession
 import com.klausms.vpn.util.AppLog
 import com.klausms.vpn.util.ProcessExits
 import com.klausms.vpn.widget.VpnWidget
@@ -18,6 +19,9 @@ import java.io.File
 class App : Application() {
     /** Only used by the UI process; the VPN process reads files directly. */
     val repository: AppRepository by lazy { AppRepository(this) }
+
+    /** UI process only: what the screens show about work that outlives them. */
+    val ui: UiSession by lazy { UiSession(this, repository, appScope) }
 
     /**
      * UI process: work that must finish even if the screen closes meanwhile
