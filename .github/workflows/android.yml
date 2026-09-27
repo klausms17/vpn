@@ -3,11 +3,20 @@ name: Build
 on:
   push:
     branches: ["**"]
+    # A v* tag makes the stable build friends get (see "Publish stable
+    # release"); tags are built whatever files changed.
+    tags: ["v*"]
     # The iPhone app has its own workflow (ios.yml).
     paths-ignore: ["**.md", "ios/**", ".github/workflows/ios*.yml"]
   workflow_dispatch:
+    inputs:
+      stable:
+        description: "Стабильная сборка (stable): её раздаст знакомым панель"
+        type: boolean
+        default: false
   schedule:
-    # Weekly rebuild so the bundled Russian databases stay fresh.
+    # Weekly rebuild so the bundled Russian databases stay fresh (GitHub
+    # runs schedules only from the default branch).
     - cron: "23 4 * * 1"
 
 permissions:
@@ -125,9 +134,11 @@ jobs:
             exit 1
           }
 
-      # Plain JVM tests of the app's logic (subscriptions, storage, links, failover, block reports, updates).
+      # Plain JVM tests of the app's logic: everything in data and service
+      # (new test classes there run by themselves), plus the ui tests of links
+      # and QR codes. The screenshots have their own step below.
       - name: Unit tests
-        run: ./gradlew --no-daemon testDebugUnitTest --tests 'com.klausms.vpn.data.*' --tests 'com.klausms.vpn.ui.DeepLinkTest' --tests 'com.klausms.vpn.ui.QrDecoderTest' --tests 'com.klausms.vpn.service.FailoverTest' --tests 'com.klausms.vpn.service.BlockReportTest'
+        run: ./gradlew --no-daemon testDebugUnitTest --tests 'com.klausms.vpn.data.*' --tests 'com.klausms.vpn.service.*' --tests 'com.klausms.vpn.ui.DeepLinkTest' --tests 'com.klausms.vpn.ui.QrDecoderTest'
 
       - name: Check native library 16 KB alignment
         run: |
@@ -158,7 +169,10 @@ jobs:
           path: app/build/reports/lint-results-release.html
           if-no-files-found: ignore
 
+      # For your own phone: every push replaces its branch's build-* release.
+      # The panel never gives these to friends (it takes "stable" below).
       - name: Publish test build
+        if: github.ref_type == 'branch'
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.ref_name }}
@@ -183,6 +197,34 @@ jobs:
           gh release create "$tag" dist/* \
             --target "$GITHUB_SHA" \
             --prerelease \
+            --title "$title" \
+            --notes "$notes"
+
+      # The build friends get: the panel publishes only this release
+      # (RELEASE_TAG=stable in install-panel.sh). Made on purpose, for a
+      # commit whose test build has run on your own phone for a while: push
+      # a v* tag on it, or "Run workflow" on its branch with "stable" ticked.
+      - name: Publish stable release
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.stable)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE: ${{ github.ref_name }}
+        run: |
+          notes="Стабильная сборка ${VERSION_NAME} (${SOURCE}, ${GITHUB_SHA::7}): её раздаёт знакомым панель.
+
+          Скачайте KlausVPN-${VERSION_NAME}.apk — один файл для любого телефона
+          с Android 8 и новее."
+          title="Klaus VPN ${VERSION_NAME} (stable)"
+          if [ -z "${SIGNING_KEYSTORE_PATH:-}" ]; then
+            # klaus-panel publish-apk refuses builds marked like this: they
+            # cannot be installed over the app friends have.
+            title="$title — временная подпись"
+          fi
+          # Replaced as a whole; meanwhile the panel finds no release and
+          # simply looks again an hour later.
+          gh release delete stable --yes --cleanup-tag 2>/dev/null || true
+          gh release create stable dist/* \
+            --target "$GITHUB_SHA" \
             --title "$title" \
             --notes "$notes"
 

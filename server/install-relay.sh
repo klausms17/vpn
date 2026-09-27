@@ -131,9 +131,13 @@ xhttp_json=""
 if [ "$UP_NET" = "xhttp" ]; then xhttp_json="\"xhttpSettings\": { \"path\": \"${UP_PATH:-/}\" },"; fi
 
 mkdir -p "$CONF_DIR"
+# policy: 30 idle minutes instead of Xray's 5, as in install.sh: phones keep
+# push channels quiet for up to 28 minutes (both the phone's side and the
+# upstream side of the relay use level 0).
 cat > "$CONF_NEXT" <<EOF
 {
   "log": { "loglevel": "warning", "access": "none" },
+  "policy": { "levels": { "0": { "connIdle": 1800 } } },
   "inbounds": [
     {
       "tag": "relay-in",

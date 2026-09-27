@@ -16,7 +16,10 @@
 #   telegram-setup    against a mock Telegram API (test/mock-apis.py): the
 #                     chat is taken from getUpdates, a test message goes out,
 #                     the panel's own node messages arrive too
-#   publish-apk       against a mock GitHub API with a fake release
+#   publish-apk       against a mock GitHub API with a fake "stable"
+#                     release (the default; a panel that saved the old
+#                     default, the work branch's test builds, moves to it
+#                     once, a branch chosen on purpose stays)
 #
 # and then
 #   (a) the app's User-Agent gets a base64 list with a vless REALITY link
@@ -28,11 +31,14 @@
 #   plus: a disabled friend is refused by the node, a disabled node leaves
 #   the subscription, the device limit works, a domain change reaches Caddy,
 #   the support link follows SUPPORT_URL (never the panel's placeholder),
-#   the node keeps its custom port on a re-run, the APK is published with a
-#   verified checksum (a wrong one is refused) on https://SUB/app/ with
-#   version.json and the page's download button, block reports (unknown
-#   friend refused, one friend twice is no alert, two friends are exactly
-#   one Russian alert, then quiet; rate limit; no IPs or ids in the logs),
+#   the node keeps its custom port on a re-run, the node's Xray keeps idle
+#   connections 30 minutes (the profile's policy), the APK is published
+#   with a verified checksum (a wrong one is refused, a missing release is
+#   quiet for the timer) on https://SUB/app/ with version.json and the
+#   page's download button, block reports (unknown friend refused, one
+#   friend twice is no alert, two friends in the mobile whitelist regime
+#   are one note that never says "disable", two friends are exactly one
+#   Russian alert, then quiet; rate limit; no IPs or ids in the logs),
 #   and a backup restored into a fresh panel serves the same link, the app
 #   and the monitor, also after failed attempts (which leave no
 #   half-restored database, and a run without RESTORE refuses to build an
@@ -72,7 +78,8 @@ MOCK_PORT=18090 # mock Telegram and GitHub APIs
 TG_BOT_TOKEN=123456789:AAklaus-e2e-bot-token-0123456789abcdef
 TG_CHAT=4242
 GH_TEST_TOKEN=github_pat_klaus_e2e_0123456789
-RELEASE=build-claude-compassionate-mayer-6jph8m
+RELEASE=stable
+RELEASE_OLD=build-claude-compassionate-mayer-6jph8m # the default before "stable"
 APK_VERSION=1.0.99
 SPOOFED_IP=203.0.113.77 # a client IP that must never reach the monitor's log
 # This machine's own tokens must never reach the panel under test.
@@ -171,10 +178,11 @@ sub_code() { # PATH [curl args] -> HTTP status of https://SUB_DOMAIN/PATH (body 
   curl -sS --noproxy '*' --resolve "$SUB_DOMAIN:443:127.0.0.1" --cacert "$WORK/caddy-root.crt" \
     -o "$WORK/last.body" -w '%{http_code}' "$@" "https://$SUB_DOMAIN/$path"
 }
-report() { # SHORT_UUID NETWORK [OPERATOR] -> HTTP status of a block report, as the app sends it
+report() { # SHORT_UUID NETWORK [OPERATOR] [WHITELIST] -> HTTP status of a block report, as the app sends it
   sub_code klaus/report -A "$UA_APP" -H "X-Forwarded-For: $SPOOFED_IP" --get \
     --data-urlencode "s=$1" --data-urlencode "h=127.0.0.1" --data-urlencode "p=$VPN_PORT" \
-    --data-urlencode "k=vless" --data-urlencode "n=$2" --data-urlencode "o=${3:-}" --data-urlencode "v=$APK_VERSION"
+    --data-urlencode "k=vless" --data-urlencode "n=$2" --data-urlencode "o=${3:-}" --data-urlencode "v=$APK_VERSION" \
+    ${4:+--data-urlencode "w=$4"}
 }
 support_links() { # -> {header, page}: the support link in subscriptions and on the page
   local u
@@ -229,7 +237,8 @@ install_panel "$WORK/opt" "$WORK/admin.txt" PANEL_DOMAIN="$PANEL_DOMAIN" SUB_DOM
 grep -q "Готово! Панель работает" "$WORK/install-1.log" || fail "install-panel.sh failed"
 [ "$(stat -c %a "$WORK/admin.txt")" = "600" ] || fail "admin credentials are not 600"
 grep -Eq '^Пароль: [A-Za-z0-9]{24,}$' "$WORK/admin.txt" || fail "admin password"
-pass "panel installed, admin saved to admin.txt (600)"
+grep -qx "RELEASE_TAG=$RELEASE" "$CONF" && grep -qx "STABLE_DEFAULT=1" "$CONF" || fail "new panel does not take the stable release"
+pass "panel installed, admin saved to admin.txt (600), app builds from the $RELEASE release"
 
 step "klaus-panel telegram-setup: waits for the one-time code, takes its chat, sends a test message"
 # The panel's containers reach the mock on the host through the bridge.
@@ -333,8 +342,9 @@ grep -qi '^content-type: text/plain; charset=utf-8' "$WORK/root.headers" || fail
 grep -q "кто дал вам ссылку" "$WORK/root.txt" || fail "no note at https://$SUB_DOMAIN/"
 pass "no support-url header, the page's support button opens the note on https://$SUB_DOMAIN/"
 
-step "install-panel.sh with a new SUB_DOMAIN and SUPPORT_URL: Caddy serves the new name"
-install_panel "$WORK/opt" "$WORK/admin.txt" SUB_DOMAIN="$SUB_DOMAIN2" SUPPORT_URL="$SUPPORT" 2>&1 | tee "$WORK/install-3.log"
+step "install-panel.sh with a new SUB_DOMAIN and SUPPORT_URL (and a branch's builds chosen): Caddy serves the new name"
+install_panel "$WORK/opt" "$WORK/admin.txt" SUB_DOMAIN="$SUB_DOMAIN2" SUPPORT_URL="$SUPPORT" RELEASE_TAG="$RELEASE_OLD" \
+  2>&1 | tee "$WORK/install-3.log"
 grep -q "Готово! Панель работает" "$WORK/install-3.log" || fail "re-run with a new SUB_DOMAIN failed"
 grep -q "адрес подписок меняется: $SUB_DOMAIN → $SUB_DOMAIN2" "$WORK/install-3.log" || fail "no warning about the old links"
 https_get "$SUB_DOMAIN2" -o /dev/null || fail "Caddy does not serve the new $SUB_DOMAIN2"
@@ -351,7 +361,9 @@ https_get "$SUB_DOMAIN" -o /dev/null || fail "Caddy does not serve $SUB_DOMAIN a
 if https_get "$SUB_DOMAIN2" -o /dev/null 2>/dev/null; then fail "Caddy still serves $SUB_DOMAIN2"; fi
 support_links | tee "$WORK/support-2.json"
 cmp -s "$WORK/support-0.json" "$WORK/support-2.json" || fail "support link did not return to the state without SUPPORT_URL"
-pass "back on $SUB_DOMAIN; support link as without SUPPORT_URL again"
+grep -qx "RELEASE_TAG=$RELEASE_OLD" "$CONF" || fail "a release chosen on purpose was not kept"
+if grep -q "стабильные" "$WORK/install-4.log"; then fail "a release chosen on purpose was moved to stable"; fi
+pass "back on $SUB_DOMAIN; support link as without SUPPORT_URL again; the chosen $RELEASE_OLD stays"
 
 step "klaus-panel add-node + install-node.sh"
 kp add-node test-node "$GW" DE --title "Германия" --host 127.0.0.1 --node-port "$NODE_PORT" > "$WORK/add-node.log"
@@ -365,6 +377,28 @@ node_up() { grep -q "на связи" <<<"$(kp list-nodes)"; }
 retry 45 node_up || { kp list-nodes; fail "node did not connect"; }
 kp list-nodes
 pass "node connected"
+
+step "idle connections: the node's Xray keeps them 30 minutes (policy of the profile)"
+PROFILE_UUID="$(api /api/config-profiles | jq -r 'first(.response.configProfiles[] | select(.name == "KlausVPN")) | .uuid')"
+api "/api/config-profiles/$PROFILE_UUID" | jq -c '.response.config.policy' | tee "$WORK/profile-policy.json"
+jq -e '.levels["0"].connIdle == 1800' "$WORK/profile-policy.json" >/dev/null || fail "no idle policy in the profile"
+# What the node's Xray really runs, read the way Xray itself reads it. Only
+# the policy is printed: the config holds the keys.
+node_policy() {
+  docker exec remnanode node -e '
+    const fs = require("fs"), http = require("http");
+    const env = (n) => fs.readFileSync("/run/s6/container_environment/" + n, "utf8").trim();
+    http.get({socketPath: "\0" + env("INTERNAL_SOCKET_PATH"),
+              path: "/internal/get-config?token=" + env("INTERNAL_REST_TOKEN")}, (r) => {
+      let b = "";
+      r.on("data", (d) => (b += d));
+      r.on("end", () => console.log(JSON.stringify(JSON.parse(b).policy || null)));
+    }).on("error", (e) => { console.error(e.message); process.exit(1); });' > "$WORK/node-policy.json" 2>&1 &&
+    jq -e '.levels["0"].connIdle == 1800' "$WORK/node-policy.json" >/dev/null
+}
+retry 10 node_policy || { cat "$WORK/node-policy.json"; fail "the node's Xray closes idle connections sooner"; }
+cat "$WORK/node-policy.json"
+pass "connIdle 1800 in the profile and in the node's running Xray (next to its own statistics settings)"
 
 step "the panel's own Telegram messages about servers reach the chat"
 panel_msgs() { mock /_mock/tg/sent | jq --arg c "$TG_CHAT" '[.[] | select(.chat_id == $c and (.text | test("#node")))]'; }
@@ -437,10 +471,29 @@ page_apk_buttons() { # -> the Klaus VPN block's download buttons in the panel's 
 if kp publish-apk > "$WORK/publish-0.log" 2>&1; then fail "publish-apk without GITHUB_TOKEN went through"; fi
 tail -n 1 "$WORK/publish-0.log"
 grep -q "нет GITHUB_TOKEN" "$WORK/publish-0.log" || fail "wrong refusal without a token"
-# The owner adds the token later (and drops APK_URL: the app comes from here now).
+# The owner adds the token later (and drops APK_URL: the app comes from here
+# now) with the new install-panel.sh, on a panel whose settings were saved by
+# an older one: its release is the old default, the work branch's test builds.
+sed -i '/^STABLE_DEFAULT=/d' "$CONF"
+grep -qx "RELEASE_TAG=$RELEASE_OLD" "$CONF" || fail "test setup: the old default is not saved"
 install_panel "$WORK/opt" "$WORK/admin.txt" GITHUB_TOKEN="$GH_TEST_TOKEN" GITHUB_API="http://127.0.0.1:$MOCK_PORT" APK_URL= \
   2>&1 | tee "$WORK/install-5.log"
 grep -q "Готово! Панель работает" "$WORK/install-5.log" || fail "re-run with GITHUB_TOKEN failed"
+grep -q "только стабильные" "$WORK/install-5.log" || fail "no note about the move to stable"
+grep -qx "RELEASE_TAG=$RELEASE" "$CONF" && grep -qx "STABLE_DEFAULT=1" "$CONF" || fail "the old default was not moved to $RELEASE"
+# Before CI has made a release (or while it replaces it) the timer stays
+# quiet; a person is told; a token that cannot see the repository is an error.
+kp publish-apk --tag no-such-release --quiet || fail "the timer's run failed on a release that is not there yet"
+if kp publish-apk --tag no-such-release > "$WORK/publish-none.log" 2>&1; then fail "a missing release went through"; fi
+cat "$WORK/publish-none.log"
+grep -q "нет релиза no-such-release" "$WORK/publish-none.log" || fail "wrong message for a missing release"
+sed 's#^GITHUB_REPO=.*#GITHUB_REPO=someone/other#' "$CONF" > "$WORK/other-repo.env"
+if KLAUS_PANEL_CONF="$WORK/other-repo.env" no_proxy='*' NO_PROXY='*' bash "$RWS/klaus-panel" publish-apk --quiet \
+  > "$WORK/publish-norepo.log" 2>&1; then fail "a repository the token cannot see was taken for a missing release"; fi
+cat "$WORK/publish-norepo.log"
+grep -q "нет доступа" "$WORK/publish-norepo.log" || fail "wrong message for a repository without access"
+rm -f "$WORK/other-repo.env"
+if compgen -G "$WORK/opt/app/*" >/dev/null; then fail "something was published from a missing release"; fi
 echo "download buttons without APK_URL, nothing published: $(page_apk_buttons)"
 [ "$(page_apk_buttons)" = "[]" ] || fail "download button without an APK"
 if kp publish-apk --tag klaus-bad-sum > "$WORK/publish-bad.log" 2>&1; then fail "an APK with a wrong checksum was published"; fi
@@ -497,7 +550,7 @@ sub_get "$UA_BROWSER" "https://$SUB_DOMAIN/assets/.app-config-v2.json" -b "$WORK
 jq -e --arg a "https://$SUB_DOMAIN/app/KlausVPN.apk" \
   '[.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external" and .link == $a)] | length == 1' \
   "$WORK/b2.config.json" >/dev/null || fail "the page does not show the download button"
-pass "wrong checksum and temporary key refused; replaced builds kept 13 h, then a redirect to the current one; KlausVPN.apk, KlausVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»"
+pass "old default moved to the $RELEASE release; a missing release is quiet for the timer, an unseen repository is not; wrong checksum and temporary key refused; replaced builds kept 13 h, then a redirect to the current one; KlausVPN.apk, KlausVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»"
 
 step "(c) the device is recorded (the limit itself is off)"
 USER_ID="$(api "/api/users/by-username/friend_1" | jq -r '.response.id')"
@@ -575,6 +628,24 @@ echo "unknown subscription -> $code"
 code="$(sub_code "klaus/report?s=$SHORT1&h=127.0.0.1&p=0")"
 echo "malformed report -> $code"
 [ "$code" = "400" ] || fail "a malformed report was accepted"
+# The mobile whitelist regime: the apps moved to a server inside the
+# operator's whitelist (w=1). Not a block: a note, never "disable it".
+NOTE="Klaus VPN: мобильный интернет в режиме белых списков"
+code="$(report "$SHORT1" mobile "МТС" 1)"
+echo "friend_1 (МТС, whitelist) report -> $code"
+[ "$code" = "200" ] || fail "report refused"
+code="$(report "$SHORT2" mobile "Билайн" 1)"
+echo "friend_2 (Билайн, whitelist) report -> $code"
+[ "$code" = "200" ] || fail "report refused"
+has_note() { [ "$(sent_count "$NOTE")" -ge 1 ]; }
+retry 10 has_note || { docker logs klaus-monitor; fail "no whitelist note after two friends"; }
+mock /_mock/tg/sent | jq -r --arg p "$NOTE" '.[] | select(.text | startswith($p)) | .text' | tee "$WORK/note.txt"
+[ "$(sent_count "$NOTE")" = "1" ] || fail "more than one whitelist note"
+[ "$(sent_count "$ALERT")" = "0" ] || fail "the whitelist regime raised a blocking alert"
+for want in "у 2 человек" "«Германия»" "МТС ×1" "Билайн ×1" "не блокировка" "не нужно"; do
+  grep -qF "$want" "$WORK/note.txt" || fail "whitelist note lacks: $want"
+done
+if grep -q "disable-node" "$WORK/note.txt"; then fail "the whitelist note suggests disabling the server"; fi
 for i in 1 2; do
   code="$(report "$SHORT1" mobile "МТС")"
   echo "friend_1 (МТС) report $i -> $code"
@@ -625,7 +696,7 @@ for secret in "$SHORT1" "$SHORT2" "$SHORT5" "unknown${SHORT1:7}" random0000 "$SP
 done
 if grep -Eq '([0-9]{1,3}\.){3}[0-9]{1,3}' "$WORK/monitor.log"; then fail "the monitor's log contains an IP address"; fi
 if grep -Eq '"(remote_ip|client_ip|uri)"' "$WORK/caddy.log"; then fail "Caddy's log keeps request addresses or links"; fi
-pass "monitor token cannot list users; unknown friend 403, one friend twice no alert, two friends one alert (Russian, blocking hint), cooldown, rate limit 30/h, 80 made-up ids do not block a friend; no IPs or ids in the logs"
+pass "monitor token cannot list users; unknown friend 403, two friends in the whitelist regime one note without disable-node, one friend twice no alert, two friends one alert (Russian, blocking hint), cooldown, rate limit 30/h, 80 made-up ids do not block a friend; no IPs or ids in the logs"
 
 step "backup; a restore that stops early (a .ru domain given by mistake)"
 BACKUP_DIR="$WORK/backups" kp backup
