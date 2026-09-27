@@ -120,7 +120,7 @@ class XrayVpnService : VpnService() {
         /** Android's view of the network changing checks at most this often. */
         private const val LINK_CHECK_MS = 60_000L
 
-        /** After a search found nothing, the next one on that network waits this long (unless asked for). */
+        /** After a search found nothing, the next one on that network waits this long. */
         private const val FRUITLESS_RETRY_MS = 2 * 60_000L
 
         /** A server that answers again after a failed check gets its core restarted at most this often. */
@@ -135,8 +135,8 @@ class XrayVpnService : VpnService() {
          * The download check: some operators freeze connections to foreign
          * servers after the first ~16 KB, which a 204 answer never reaches.
          * 64 KB, not compressed; a stall counts, a refusal does not.
-         * Run on connect and a manual check, and otherwise at most this
-         * often per network (a new network gets one at its first check).
+         * Run on connect, and otherwise at most this often per network (a
+         * new network gets one at its first check).
          */
         private const val BULK_URL = "https://speed.cloudflare.com/__down?bytes=65536"
         private const val BULK_HEADERS = """{"Accept-Encoding":"identity"}"""
@@ -347,33 +347,6 @@ class XrayVpnService : VpnService() {
         override fun unregisterCallback(callback: IVpnCallback?) {
             callback ?: return
             callbacks.unregister(callback)
-        }
-
-        override fun testConnection(): Long {
-            val c = controller ?: return -1
-            // The same two sites as the check, so the answer never contradicts it.
-            val ms = try {
-                measureThrough(c, 10_000)
-            } catch (e: Exception) {
-                AppLog.w("connection test failed", e)
-                -1L
-            }
-            if (ms < 0) {
-                // The user saw it fail: look for a server that answers.
-                scheduleVerify(Reason.USER)
-            } else if (config != null && bulkDue(Reason.APP, activeNetwork())) {
-                // A quick answer says nothing about downloads that stall
-                // (and must not clear a notice about them): the full check,
-                // with its download, decides.
-                scheduleVerify(Reason.APP)
-            } else if (config != null) {
-                val now = SystemClock.elapsedRealtime()
-                lastVerifyAt = now
-                lastVerifiedOkAt = now
-                val e = epoch.get()
-                scope.launch { clearFailureNotice(e) }
-            }
-            return ms
         }
     }
 
@@ -1053,13 +1026,13 @@ class XrayVpnService : VpnService() {
         if (epoch.get() != e || VpnStatusHolder.status.value.state != VpnState.CONNECTED) return
         lastVerifyAt = SystemClock.elapsedRealtime()
         // One site failing is not enough: some servers cannot reach Google
-        // but carry everything else. A failed manual test was the first try.
-        val ok = (reason != Reason.USER && answers(c, XrayCore.TEST_URL, VERIFY_TIMEOUT_MS)) ||
+        // but carry everything else.
+        val ok = answers(c, XrayCore.TEST_URL, VERIFY_TIMEOUT_MS) ||
             answers(c, XrayCore.TEST_URL_ALT, CONFIRM_TIMEOUT_MS)
         if (epoch.get() != e) return
         if (!ok) {
             AppLog.w("no traffic through the server (${reason.name.lowercase()})")
-            runFailover(e, c, running, reason, stalled = false)
+            runFailover(e, c, running, stalled = false)
             return
         }
         // It answers, but some operators freeze a foreign server's
@@ -1069,7 +1042,7 @@ class XrayVpnService : VpnService() {
         if (bulkDue(reason, network) && stalls(c, network)) {
             if (epoch.get() != e) return
             AppLog.w("downloads through the server stall (${reason.name.lowercase()})")
-            runFailover(e, c, running, reason, stalled = true)
+            runFailover(e, c, running, stalled = true)
             return
         }
         if (epoch.get() != e) return
@@ -1092,12 +1065,12 @@ class XrayVpnService : VpnService() {
     }
 
     /**
-     * Whether the download check is due: on connect and when the user asks,
-     * otherwise when none showed downloads working on [network] in the last
-     * half hour (a new network, or a stall seen before).
+     * Whether the download check is due: on connect, otherwise when none
+     * showed downloads working on [network] in the last half hour (a new
+     * network, or a stall seen before).
      */
     private fun bulkDue(reason: Reason, network: Network?): Boolean {
-        if (reason == Reason.START || reason == Reason.USER) return true
+        if (reason == Reason.START) return true
         val now = SystemClock.elapsedRealtime()
         return synchronized(bulkFine) {
             bulkFine.entries.removeIf { now - it.value >= BULK_CHECK_MS || it.value > now }
@@ -1136,7 +1109,7 @@ class XrayVpnService : VpnService() {
      * to the fastest that answers. The tunnel stays as it is meanwhile, and
      * for good when nothing answers: nothing ever leaks outside the VPN.
      */
-    private suspend fun runFailover(e: Long, c: Controller, failed: StoredProfile, reason: Reason, stalled: Boolean) {
+    private suspend fun runFailover(e: Long, c: Controller, failed: StoredProfile, stalled: Boolean) {
         val caps = underlying()
         if (!hasNetwork(caps)) {
             AppLog.i("no network, not looking for another server")
@@ -1153,13 +1126,11 @@ class XrayVpnService : VpnService() {
             return
         }
         val network = activeNetwork()
-        if (reason != Reason.USER) {
-            // Nothing answered on this network moments ago: say so again, search later.
-            val last = fruitlessNotice(network)
-            if (last != null) {
-                setNotice(last, e)
-                return
-            }
+        // Nothing answered on this network moments ago: say so again, search later.
+        val last = fruitlessNotice(network)
+        if (last != null) {
+            setNotice(last, e)
+            return
         }
         if (!RuntimeState.allowFailover(this, take = false)) {
             AppLog.w("automatic server switches used up for now")
@@ -1175,7 +1146,7 @@ class XrayVpnService : VpnService() {
         val sub = refreshableSubscription(state, failed)
         if (first.isNotEmpty() || sub != null) {
             // Probing servers and downloading the list is what costs.
-            if (reason != Reason.USER && !RuntimeState.allowSearch(this)) {
+            if (!RuntimeState.allowSearch(this)) {
                 AppLog.w("automatic searches used up for now")
                 setNotice(Failover.NOTICE_PICK_ANOTHER, e)
                 return
@@ -1719,9 +1690,9 @@ private class VpnStartException(message: String) : Exception(message)
 /**
  * What made the service check that traffic gets through: a start, another
  * network, Android's view of the same network (LINK), unlocking, the app
- * opened, the screen on for a while, the user's "Проверить".
+ * opened, the screen on for a while.
  */
-private enum class Reason { START, NETWORK, LINK, UNLOCK, APP, SCREEN, USER }
+private enum class Reason { START, NETWORK, LINK, UNLOCK, APP, SCREEN }
 
 /** What a subscription refresh in the VPN process did: [applied] is null when the download failed. */
 private class Refreshed(val applied: Boolean?, val runningChanged: Boolean)
@@ -1769,7 +1740,7 @@ internal object RuntimeState {
         return true
     }
 
-    /** Whether a search for another server nobody asked for is allowed now (see [Failover.MAX_SEARCHES]); counts one. */
+    /** Whether an automatic search for another server is allowed now (see [Failover.MAX_SEARCHES]); counts one. */
     fun allowSearch(context: Context): Boolean {
         val p = prefs(context)
         val next = Failover.countSearch(p.getString("searches", "") ?: "", SystemClock.elapsedRealtime()) ?: return false

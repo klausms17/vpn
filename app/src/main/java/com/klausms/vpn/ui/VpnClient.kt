@@ -14,7 +14,6 @@ import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.service.VpnStatus
 import com.klausms.vpn.service.XrayVpnService
 import com.klausms.vpn.util.AppLog
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -22,7 +21,6 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.withContext
 
 /**
  * The UI side of the connection to the VPN process. Bound only while the
@@ -50,7 +48,6 @@ class VpnClient(private val context: Context) {
     /** The VPN process saved other servers or a new selection: reload them. */
     val profilesChanged: SharedFlow<Unit> = _profilesChanged.asSharedFlow()
 
-    @Volatile
     private var controller: IVpnController? = null
     private var bound = false
     private val main = Handler(Looper.getMainLooper())
@@ -130,14 +127,5 @@ class VpnClient(private val context: Context) {
         controller = null
         bound = false
         _fresh.value = false
-    }
-
-    /** Latency through the running tunnel in ms, or -1. */
-    suspend fun testConnection(): Long = withContext(Dispatchers.IO) {
-        try {
-            controller?.testConnection() ?: -1
-        } catch (_: Exception) {
-            -1
-        }
     }
 }

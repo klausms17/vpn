@@ -391,16 +391,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         sendReconnect()
     }
 
-    fun testConnection() = viewModelScope.launch {
-        val op = busyTexts.start("Проверка соединения…")
-        val ms = try {
-            vpn.testConnection()
-        } finally {
-            op.end()
-        }
-        message(if (ms >= 0) "Соединение работает: $ms мс" else "Сервер не отвечает")
-    }
-
     // ------------------------------------------------------------ profiles
 
     /**

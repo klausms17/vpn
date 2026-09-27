@@ -6,6 +6,4 @@ import com.klausms.vpn.service.IVpnCallback;
 interface IVpnController {
     void registerCallback(IVpnCallback callback);
     void unregisterCallback(IVpnCallback callback);
-    // Latency in ms through the running tunnel, or -1 on failure.
-    long testConnection();
 }

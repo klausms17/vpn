@@ -30,7 +30,7 @@ internal object Failover {
     const val MAX_SWITCHES = 3
     const val SWITCH_WINDOW_MS = 30 * 60_000L
 
-    /** At most this many searches nobody asked for per window, so a phone moving between networks where nothing answers does not search all day. */
+    /** At most this many automatic searches per window, so a phone moving between networks where nothing answers does not search all day. */
     const val MAX_SEARCHES = 6
     const val SEARCH_WINDOW_MS = 60 * 60_000L
 
