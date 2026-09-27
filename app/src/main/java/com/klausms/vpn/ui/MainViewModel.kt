@@ -508,9 +508,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 message("Не удалось обновить базы: ${e.userMessage()}")
             } finally {
                 op.end()
-                // A cancelled run gets here only once its download has ended
-                // (withContext waits for the blocking work), so the files are
-                // free by then.
                 ui.geoUpdate.end()
             }
         }

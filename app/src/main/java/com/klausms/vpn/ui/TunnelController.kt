@@ -8,14 +8,14 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-/** The commands the UI sends to the VPN process; see [VpnCommands]. */
+/** The commands the UI sends to the VPN process; see [VpnCommands]. Any thread. */
 internal interface TunnelCommands {
     fun connect(picked: Boolean)
     fun reconnect(picked: Boolean)
     fun disconnect(source: String)
 }
 
-/** Sends [TunnelCommands] as [VpnCommands] from [context]. */
+/** Sends [TunnelCommands] as [VpnCommands] from [context], the Application: it outlives every screen. */
 internal class VpnTunnelCommands(private val context: Context) : TunnelCommands {
     override fun connect(picked: Boolean) {
         VpnCommands.connect(context, picked)
