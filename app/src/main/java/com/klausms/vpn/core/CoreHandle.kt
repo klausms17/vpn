@@ -10,7 +10,7 @@ import libxray.Libxray
  * around it can be tested with a fake. Every call blocks: [start] and
  * [stop] run where the service starts and stops the tunnel, the rest on a
  * background dispatcher, never on the main thread. Errors arrive as
- * exceptions whose message is meant for the user.
+ * exceptions carrying the core's own message.
  */
 internal interface CoreHandle {
     /** Starts the core with [config], reading the TUN interface [tunFd]. */

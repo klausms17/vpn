@@ -1447,9 +1447,9 @@ class XrayVpnService : VpnService() {
      * its own, so that a switch meanwhile does not cut it short.
      */
     private fun startFailoverRefresh(sub: Subscription): Deferred<Refreshed> {
-        val direct = Downloader { url, headers -> XrayCore.fetch(url, null, headers, REFRESH_TIMEOUT_MS) }
+        val directly = Downloader { url, headers -> XrayCore.fetch(url, null, headers, REFRESH_TIMEOUT_MS) }
         return scope.async(Dispatchers.IO) {
-            val result = refreshSubscription(sub.id, direct)
+            val result = refreshSubscription(sub.id, directly)
             // Blocked outside the tunnel: once a server works, through it.
             if (result.applied == null) owedRefresh = sub.id
             result
