@@ -122,6 +122,25 @@ class FailoverTest {
     }
 
     @Test
+    fun offMobileDataWhitelistedHostsGetAFewSlotsAtTheEnd() {
+        // A hotspot or 4G router under the whitelist: the relays are far down a big list.
+        val failed = server("f", "f.example.com", "s1")
+        val others = (1..12).map { server("s$it", "h$it.example.com", "s1") }
+        val relays = (1..4).map { server("r$it", "relay$it.example.ru") }
+        val state = ProfilesState(listOf(failed) + others + relays, listOf(sub("s1")))
+        val preferred = relays.map { Failover.host(it) }.toSet()
+        val picked = Failover.pickCandidates(state, failed, preferred = preferred, reserve = Failover.WHITELIST_RESERVED)
+        assertEquals(listOf("s1", "s2", "s3", "s4", "s5", "r1", "r2", "r3"), ids(picked))
+        // Whitelisted ones already among the first count towards the reserve.
+        val mixed = ProfilesState(listOf(failed, server("w", "w.example.ru", "s1")) + others + relays, listOf(sub("s1")))
+        val withW = Failover.pickCandidates(mixed, failed, preferred = preferred + "w.example.ru", reserve = Failover.WHITELIST_RESERVED)
+        assertEquals(listOf("w", "s1", "s2", "s3", "s4", "s5", "r1", "r2"), ids(withW))
+        // Nothing is dropped when all fit, and nothing moves without a whitelist.
+        assertEquals(listOf("s1", "s2"), ids(Failover.pickCandidates(ProfilesState(listOf(failed) + others.take(2), listOf(sub("s1"))), failed, preferred = preferred, reserve = 3)))
+        assertEquals((1..8).map { "s$it" }, ids(Failover.pickCandidates(state, failed, reserve = 3)))
+    }
+
+    @Test
     fun aRefreshedFailedServerIsTriedAgainButNothingProbedTwice() {
         val failed = server("a", "nl.example.com", "s1", uuid = "old")
         val b = server("b", "b.example.com", "s1")
@@ -146,6 +165,25 @@ class FailoverTest {
         // A short answer from the core counts as failures for the rest.
         assertEquals("a", Failover.fastest(list, listOf(90L))!!.first.id)
         assertNull(Failover.fastest(emptyList(), emptyList()))
+    }
+
+    @Test
+    fun theSameSubscriptionWinsUnlessMuchSlower() {
+        val failed = server("f", "f.example.com", "s1")
+        val same = server("same", "a.example.com", "s1")
+        val own = server("own", "own.example.com")
+        val other = server("other", "b.example.com", "s2")
+        val list = listOf(other, own, same)
+        val tier = { p: StoredProfile -> Failover.tier(p, failed) }
+        assertEquals(listOf(2, 1, 0), list.map(tier))
+        // Twice as slow at most: the owner's own subscription still wins.
+        assertEquals("same", Failover.fastest(list, listOf(200L, 300L, 400L), tier)!!.first.id)
+        // Slower than that: the fastest wins.
+        assertEquals("other", Failover.fastest(list, listOf(200L, 300L, 401L), tier)!!.first.id)
+        // The closest group that answered: own keys before other subscriptions.
+        assertEquals("own", Failover.fastest(list, listOf(200L, 350L, -1L), tier)!!.first.id)
+        // For an own key, the other own keys are its group.
+        assertEquals(0, Failover.tier(own, server("o2", "o2.example.com")))
     }
 
     @Test
@@ -204,6 +242,76 @@ class FailoverTest {
     }
 
     @Test
+    fun atMostSixSearchesAnHour() {
+        var saved = ""
+        var now = 5 * minute
+        repeat(Failover.MAX_SEARCHES) {
+            saved = Failover.countSearch(saved, now) ?: error("search ${it + 1} refused")
+            now += minute
+        }
+        assertNull(Failover.countSearch(saved, now))
+        // The first one leaves the window an hour after it.
+        assertTrue(Failover.countSearch(saved, 5 * minute + Failover.SEARCH_WINDOW_MS) != null)
+        // Saved before a reboot: does not count.
+        assertEquals("${2 * minute}", Failover.countSearch(saved, 2 * minute))
+    }
+
+    @Test
+    fun onlyAStalledDownloadCountsAsAFreeze() {
+        assertTrue(Failover.isStall("context deadline exceeded (Client.Timeout or context cancellation while reading body)"))
+        assertFalse(Failover.isStall("speed.cloudflare.com: context deadline exceeded (Client.Timeout exceeded while awaiting headers)"))
+        assertFalse(Failover.isStall("HTTP 429 Too Many Requests"))
+        assertFalse(Failover.isStall("speed.cloudflare.com: EOF"))
+        assertFalse(Failover.isStall(null))
+    }
+
+    // ----------------------------------------------- back to the user's server
+
+    @Test
+    fun anAutomaticSwitchRemembersTheUsersServer() {
+        val now = 100 * minute
+        val away = Failover.afterSwitch(null, null, failedId = "a", winnerId = "w", now = now)!!
+        assertEquals(Failover.Away("a", "w", now + Failover.RECENTLY_FAILED_MS, 0), away)
+        // The server switched to fails too: still back to "a" later.
+        val chained = Failover.afterSwitch(away, null, failedId = "w", winnerId = "x", now = now + minute)!!
+        assertEquals(Failover.Away("a", "x", away.retryAt, 0), chained)
+        // A switch that lands on the user's server ends it.
+        assertNull(Failover.afterSwitch(chained, null, failedId = "x", winnerId = "a", now = now + 2 * minute))
+        // New settings of the same server change nothing.
+        assertSame(away, Failover.afterSwitch(away, null, failedId = "w", winnerId = "w", now = now))
+    }
+
+    @Test
+    fun aReturnThatDoesNotLastMakesTheNextWaitLonger() {
+        val back = Failover.Returned("a", at = 200 * minute, backoff = 0)
+        // "a" fails again 10 minutes after the return.
+        val soon = Failover.afterSwitch(null, back, failedId = "a", winnerId = "w", now = 210 * minute)!!
+        assertEquals(1, soon.backoff)
+        assertEquals(210 * minute + 2 * Failover.RECENTLY_FAILED_MS, soon.retryAt)
+        // An hour later it is a new story.
+        assertEquals(0, Failover.afterSwitch(null, back, failedId = "a", winnerId = "w", now = 260 * minute)!!.backoff)
+        // Another server failing says nothing about "a".
+        assertEquals(0, Failover.afterSwitch(null, back, failedId = "b", winnerId = "w", now = 210 * minute)!!.backoff)
+        // At most 30 minutes x 8.
+        val capped = Failover.afterSwitch(null, back.copy(backoff = Failover.MAX_RETURN_BACKOFF), failedId = "a", winnerId = "w", now = 210 * minute)!!
+        assertEquals(Failover.MAX_RETURN_BACKOFF, capped.backoff)
+        assertEquals(8 * Failover.RECENTLY_FAILED_MS, Failover.returnDelay(capped.backoff))
+    }
+
+    @Test
+    fun returnsAreTriedWhenDueAndBackOffWhenTheServerIsStillDown() {
+        val away = Failover.Away("a", "w", retryAt = 130 * minute, backoff = 0)
+        assertFalse(Failover.returnDue(away, 129 * minute))
+        assertTrue(Failover.returnDue(away, 130 * minute))
+        // Saved days before a reboot (time since boot started over): due.
+        assertTrue(Failover.returnDue(away.copy(retryAt = 3 * 24 * 60 * minute), 2 * minute))
+        val later = Failover.returnFailed(away, 130 * minute)
+        assertEquals(1, later.backoff)
+        assertEquals(130 * minute + 2 * Failover.RECENTLY_FAILED_MS, later.retryAt)
+        assertEquals("a", later.home)
+    }
+
+    @Test
     fun subscriptionRefreshAtMostEveryTenMinutes() {
         val now = 1_800_000_000_000L
         val s = sub("s1")
@@ -221,5 +329,11 @@ class FailoverTest {
         val switched = Failover.switchedNotice("Финляндия", "Нидерланды")
         assertEquals("Переключились на «Финляндия»: «Нидерланды» не отвечал", switched)
         assertFalse(switched in Failover.FAILURE_NOTICES)
+        // Blocked, sign-in and the like are cleared by a check that gets through too.
+        assertTrue(Failover.NOTICE_ALL_BLOCKED in Failover.FAILURE_NOTICES)
+        assertTrue(Failover.NOTICE_BLOCKED in Failover.FAILURE_NOTICES)
+        assertTrue(Failover.NOTICE_SIGN_IN in Failover.FAILURE_NOTICES)
+        // The Private DNS hint is no failure: it stays while the setting does.
+        assertFalse(Failover.NOTICE_PRIVATE_DNS in Failover.FAILURE_NOTICES)
     }
 }

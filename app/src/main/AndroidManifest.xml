@@ -135,5 +135,16 @@
             android:name=".widget.VpnWidgetActionReceiver"
             android:exported="false"
             android:process=":vpn" />
+
+        <!-- Turns the VPN back on after an app update, which stops it. The
+             system sends this broadcast to this app only. -->
+        <receiver
+            android:name=".service.ResumeReceiver"
+            android:exported="false"
+            android:process=":vpn">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

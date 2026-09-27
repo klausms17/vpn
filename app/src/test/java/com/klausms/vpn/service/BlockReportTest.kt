@@ -57,6 +57,22 @@ class BlockReportTest {
     }
 
     @Test
+    fun allServersDownIsMarked() {
+        val url = BlockReport.url(
+            base = "https://sub.example.com/klaus/report",
+            shortUuid = "id",
+            host = "nl.example.com",
+            port = 443,
+            protocol = "vless",
+            network = BlockReport.WIFI,
+            operator = "",
+            version = "1.0",
+            allDown = true,
+        )
+        assertEquals("https://sub.example.com/klaus/report?s=id&h=nl.example.com&p=443&k=vless&n=wifi&o=&v=1.0&a=1", url)
+    }
+
+    @Test
     fun queryAndFragmentOfTheBase() {
         fun url(base: String) = BlockReport.url(base, "id", "h.example.com", 8443, "trojan", BlockReport.WIFI, "", "1.0")
         val q = "s=id&h=h.example.com&p=8443&k=trojan&n=wifi&o=&v=1.0"

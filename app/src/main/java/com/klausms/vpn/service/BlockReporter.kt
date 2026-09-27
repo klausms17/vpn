@@ -22,9 +22,10 @@ import java.util.Locale
 /**
  * Tells the owner's panel that a server stopped answering from this
  * phone's network, so the owner learns about a block before friends
- * write. Only after an automatic switch to another server worked: that
- * proves the phone itself is online. The panel alerts the owner once
- * several people report the same server.
+ * write. Only once the phone is known to be online: an automatic switch
+ * to another server worked, or no server answers while a Russian site
+ * opens directly (then marked as "all down"). The panel alerts the owner
+ * once several people report the same server.
  *
  * One GET to the subscription's "klaus-report-url" with the server's
  * address, port and protocol, the network type (on mobile data also the
@@ -41,9 +42,10 @@ internal class BlockReporter(context: Context) {
     /**
      * Reports [failed], a server of [subscription], unless the panel did not
      * ask for reports or it was reported in the last 30 minutes. [network]:
-     * the phone's own network; [tunnel]: the running core, for the second try.
+     * the phone's own network; [tunnel]: the running core, for the second try;
+     * [allDown]: no other server answered either.
      */
-    fun report(failed: StoredProfile, subscription: Subscription, network: Network?, tunnel: () -> Controller?) {
+    fun report(failed: StoredProfile, subscription: Subscription, network: Network?, allDown: Boolean = false, tunnel: () -> Controller?) {
         val base = httpsUrl(subscription.reportUrl) ?: return
         val id = BlockReport.shortUuid(subscription.url) ?: return
         if (failed.address.isBlank()) return
@@ -64,6 +66,7 @@ internal class BlockReporter(context: Context) {
             network = kind,
             operator = if (kind == BlockReport.MOBILE) BlockReport.operator(operatorName(caps)) else "",
             version = BuildConfig.VERSION_NAME,
+            allDown = allDown,
         )
         // Not delivered (or the panel could not take it now): the next
         // switch away from this server may report it again.
@@ -179,7 +182,10 @@ internal object BlockReport {
     /** One report per server, whatever its protocol: the panel counts by address and port. */
     fun serverKey(host: String, port: Int): String = "${host.trim().lowercase(Locale.ROOT)}:$port"
 
-    /** The report request: [base] with every value percent-encoded as UTF-8. */
+    /**
+     * The report request: [base] with every value percent-encoded as UTF-8.
+     * [allDown] adds "a=1": no server of the phone answered, not only this one.
+     */
     fun url(
         base: String,
         shortUuid: String,
@@ -189,8 +195,9 @@ internal object BlockReport {
         network: String,
         operator: String,
         version: String,
+        allDown: Boolean = false,
     ): String {
-        val query = listOf(
+        val values = listOf(
             "s" to shortUuid,
             "h" to host,
             "p" to port.toString(),
@@ -198,7 +205,8 @@ internal object BlockReport {
             "n" to network,
             "o" to operator,
             "v" to version,
-        ).joinToString("&") { (k, v) -> "$k=${encode(v)}" }
+        ) + if (allDown) listOf("a" to "1") else emptyList()
+        val query = values.joinToString("&") { (k, v) -> "$k=${encode(v)}" }
         val target = base.substringBefore('#')
         val separator = when {
             '?' !in target -> "?"
