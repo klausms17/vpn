@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
@@ -59,7 +58,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
@@ -143,22 +141,6 @@ fun Modifier.glass(shape: Shape, fill: Color = Color(0x8C3A3A3C), elevation: Dp 
     )
 
 // ------------------------------------------------------------- navigation
-
-/** Large title row: 34 pt bold title with optional trailing controls. */
-@Composable
-fun LargeTitle(title: String, modifier: Modifier = Modifier, trailing: @Composable RowScope.() -> Unit = {}) {
-    Row(
-        modifier
-            .fillMaxWidth()
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(start = 16.dp, end = 16.dp, top = 8.dp)
-            .height(52.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(title, style = IosType.largeTitle, color = kc.label, maxLines = 1, modifier = Modifier.weight(1f))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically, content = trailing)
-    }
-}
 
 /**
  * The top edge of a scrolling tab, as in iOS: content fades out under the

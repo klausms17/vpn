@@ -20,7 +20,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.klausms.vpn.ui.MainViewModel
 import com.klausms.vpn.ui.components.navBarClearance
 import com.klausms.vpn.ui.components.NavBar
 import com.klausms.vpn.ui.components.TextAction
@@ -73,7 +72,7 @@ private fun readLogs(context: Context): String {
 }
 
 @Composable
-fun LogsScreen(vm: MainViewModel, onBack: () -> Unit) {
+fun LogsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val text by produceState("Загрузка…") { value = withContext(Dispatchers.IO) { readLogs(context) } }
     var copied by remember { mutableStateOf(false) }

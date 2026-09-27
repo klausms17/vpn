@@ -165,7 +165,7 @@ class MainActivity : ComponentActivity() {
             when (top) {
                 "settings" -> SettingsScreen(vm = vm, onBack = back, onNavigate = push)
                 "apps" -> AppsScreen(vm = vm, includeMode = false, onBack = back)
-                "logs" -> LogsScreen(vm = vm, onBack = back)
+                "logs" -> LogsScreen(onBack = back)
                 "licenses" -> {
                     val coreVersion by vm.coreVersion.collectAsStateWithLifecycle()
                     LicensesScreen(coreVersion, onBack = back)

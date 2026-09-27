@@ -2,8 +2,6 @@ package com.klausms.vpn.util
 
 import java.util.Locale
 
-fun formatSpeed(bytesPerSecond: Long): String = formatBytes(bytesPerSecond) + "/с"
-
 /** "512 Б", "12,4 ГБ", "100 ГБ": Russian decimal comma, no trailing ",0". */
 fun formatBytes(bytes: Long): String {
     val b = bytes.coerceAtLeast(0)
