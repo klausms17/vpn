@@ -18,12 +18,10 @@ import androidx.annotation.VisibleForTesting
 import androidx.core.content.edit
 import com.klausms.vpn.R
 import com.klausms.vpn.core.XrayCore
-import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.Stores
 import com.klausms.vpn.service.RuntimeState
 import com.klausms.vpn.service.VpnState
-import com.klausms.vpn.service.VpnStatus
 import com.klausms.vpn.service.VpnStatusHolder
 import com.klausms.vpn.service.XrayVpnService
 import com.klausms.vpn.ui.MainActivity
@@ -40,10 +38,11 @@ import java.util.Locale
 /**
  * Home screen widget: status, one-tap on/off and a ping check.
  *
- * Plain RemoteViews with no periodic updates: the VPN service pushes a new
- * picture only when its state changes, and the connection timer is a
- * Chronometer that the launcher ticks by itself, only while it is on screen.
- * An idle widget costs no battery.
+ * Plain RemoteViews: the VPN service pushes a new picture when its state
+ * changes, and the system asks for a redraw about every 30 minutes
+ * (updatePeriodMillis), in case the VPN process was killed without redrawing.
+ * The connection timer is a Chronometer that the launcher ticks by itself,
+ * only while it is on screen.
  *
  * Everything here runs in the ":vpn" process, which owns the VPN state.
  */
@@ -157,7 +156,7 @@ object VpnWidget {
         // apps' traffic takes). A second, temporary core in this process
         // would take over Xray's process-wide logger from the tunnel.
         val live = XrayVpnService.liveController
-        val profile = displayedProfile(status, Stores.profiles(context).read()) ?: return
+        val profile = status.shownServer(Stores.profiles(context).read()) ?: return
         val prefs = prefs(context)
 
         val started = withContext(renderer) {
@@ -189,21 +188,15 @@ object VpnWidget {
 
         withContext(renderer) {
             if (testingProfile == profile.id) testingProfile = null
-            // Another server may have been picked meanwhile; keep only a matching result.
-            if (prefs.getString(KEY_PING_PROFILE, null) == profile.id) {
+            // Another server may have been picked or switched to meanwhile: a
+            // result goes only to the server shown, and one measured through
+            // the running core only while that server still runs.
+            val stillRunning = live == null || VpnStatusHolder.status.value.profileId == profile.id
+            if (stillRunning && prefs.getString(KEY_PING_PROFILE, null) == profile.id) {
                 prefs.edit(commit = true) { putLong(KEY_PING_MS, ms) }
                 lastResultAt = SystemClock.elapsedRealtime()
             }
         }
-    }
-
-    /** The server the widget shows: the connected one, else the selected one. */
-    private fun displayedProfile(status: VpnStatus, profiles: ProfilesState): StoredProfile? {
-        val active = status.state == VpnState.CONNECTED ||
-            status.state == VpnState.CONNECTING ||
-            status.state == VpnState.DISCONNECTING
-        return (if (active) profiles.profiles.firstOrNull { it.id == status.profileId } else null)
-            ?: profiles.selected
     }
 
     // --------------------------------------------------------------- render
@@ -225,7 +218,11 @@ object VpnWidget {
         val vpnAllowed: Boolean,
         /** Shown while connected, e.g. that the server was switched. */
         val notice: String? = null,
-    )
+        /** The status's server name, for a running server that a refresh removed from the list. */
+        runningName: String? = null,
+    ) {
+        val serverName: String? = profile?.let(::nameOf) ?: runningName
+    }
 
     /**
      * Screenshot tests: every size of the widget for one state, built exactly
@@ -253,7 +250,7 @@ object VpnWidget {
 
     private fun loadModel(context: Context): Model {
         val status = VpnStatusHolder.status.value
-        val profile = displayedProfile(status, Stores.profiles(context).read())
+        val profile = status.shownServer(Stores.profiles(context).read())
         val prefs = prefs(context)
         val ping = when {
             profile == null -> Ping.Unknown
@@ -264,7 +261,7 @@ object VpnWidget {
         }
         val notice = status.message?.takeIf { status.state == VpnState.CONNECTED && it.isNotBlank() }
         // Not VpnService.prepare(): it would take the VPN over from another app.
-        return Model(status.state, status.connectedSince, profile, ping, RuntimeState.vpnConsented(context), notice)
+        return Model(status.state, status.connectedSince, profile, ping, RuntimeState.vpnConsented(context), notice, status.profileName)
     }
 
     private fun render(context: Context) {
@@ -396,23 +393,17 @@ object VpnWidget {
 
         // Server
         val profile = m.profile
-        v.setTextViewText(
-            R.id.server_name,
-            when {
-                profile == null -> "Нет сервера"
-                profile.name.isNotBlank() -> profile.name
-                else -> profile.address
-            },
-        )
+        val name = m.serverName
+        v.setTextViewText(R.id.server_name, name ?: "Нет сервера")
         v.setTextViewText(
             R.id.protocol,
             when {
-                profile == null -> "Добавьте ключ в приложении"
+                name == null -> "Добавьте ключ в приложении"
                 notice != null -> notice
-                else -> protocolLine(profile)
+                else -> profile?.let(::protocolLine).orEmpty()
             },
         )
-        v.setTextColor(R.id.protocol, if (notice != null && profile != null) AMBER else TEXT_SECONDARY)
+        v.setTextColor(R.id.protocol, if (notice != null && name != null) AMBER else TEXT_SECONDARY)
 
         // Power button
         v.setImageViewResource(
@@ -490,6 +481,8 @@ object VpnWidget {
         )
     }
 
+    private fun nameOf(p: StoredProfile): String = p.name.ifBlank { p.address }
+
     /** "VLESS | TCP | Reality" */
     private fun protocolLine(p: StoredProfile): String {
         val parts = mutableListOf<String>()
@@ -521,8 +514,8 @@ object VpnWidget {
     // -------------------------------------------------------------- intents
 
     private fun powerIntent(context: Context, m: Model): PendingIntent = when {
-        // Via the receiver, which checks the real state first: if the VPN
-        // process died since this picture was drawn, the tap just redraws.
+        // Via the receiver: it always turns the VPN off, also when the VPN
+        // process died since this picture was drawn (then it only logs that).
         m.state == VpnState.CONNECTED || m.state == VpnState.CONNECTING ->
             broadcast(context, VpnWidgetActionReceiver.ACTION_DISCONNECT, RC_DISCONNECT)
         // Already going down; a tap only redraws.

@@ -2,6 +2,7 @@ package com.klausms.vpn.util
 
 import android.app.ActivityManager.RunningAppProcessInfo
 import android.app.ApplicationExitInfo
+import com.klausms.vpn.service.RestartGuard
 
 /** How an ended VPN process is written to the log (ApplicationExitInfo, Android 11+). */
 object ProcessExits {
@@ -16,10 +17,7 @@ object ProcessExits {
      * and clearing it away is routine.
      */
     fun worthLogging(reason: Int, tunnelWanted: Boolean, importance: Int): Boolean =
-        reason == ApplicationExitInfo.REASON_CRASH ||
-            reason == ApplicationExitInfo.REASON_CRASH_NATIVE ||
-            reason == ApplicationExitInfo.REASON_ANR ||
-            reason == ApplicationExitInfo.REASON_INITIALIZATION_FAILURE ||
+        RestartGuard.isCrash(reason) ||
             reason == ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE ||
             (tunnelWanted && !wasIdle(importance))
 

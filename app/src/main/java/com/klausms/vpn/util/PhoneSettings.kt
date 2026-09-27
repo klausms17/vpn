@@ -7,6 +7,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.net.VpnService
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
@@ -103,8 +104,9 @@ object PhoneSettings {
 
     /**
      * [read], or [fallback] when the system service fails: these are read
-     * while drawing Settings and when the app starts, where a throw would
-     * crash the screen or skip setting up the core.
+     * while drawing Settings, when the app starts and when the tunnel comes
+     * up, where a throw would crash the screen, skip setting up the core or
+     * fail the start.
      */
     private inline fun probe(what: String, fallback: Boolean, read: () -> Boolean): Boolean = try {
         read()
@@ -123,7 +125,24 @@ object PhoneSettings {
         if (!Build.BRAND.equals(Build.MANUFACTURER, ignoreCase = true)) append(" (").append(Build.BRAND).append(')')
         append(", Android ").append(Build.VERSION.RELEASE).append(" (SDK ").append(Build.VERSION.SDK_INT).append(')')
         append(", app ").append(BuildConfig.VERSION_NAME).append(" (").append(BuildConfig.VERSION_CODE).append(')')
-        append("; battery unrestricted ").append(yesNo(batteryUnrestricted(context)))
+        append("; ").append(background(context))
+    }
+
+    /**
+     * For the log when the tunnel comes up: the system's Always-on VPN and
+     * its lockdown (Android 10+), and what the phone allows in the background.
+     */
+    fun vpnSummary(service: VpnService): String = buildString {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            append("always-on ").append(yesNo(probe("always-on", fallback = false) { service.isAlwaysOn }))
+            append(", lockdown ").append(yesNo(probe("lockdown", fallback = false) { service.isLockdownEnabled }))
+            append("; ")
+        }
+        append(background(service))
+    }
+
+    private fun background(context: Context): String = buildString {
+        append("battery unrestricted ").append(yesNo(batteryUnrestricted(context)))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             append(", background restricted ").append(yesNo(backgroundRestricted(context)))
             append(", standby bucket ").append(standbyBucket(context))

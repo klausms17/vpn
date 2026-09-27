@@ -332,12 +332,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------------------------------------------------------------- VPN
 
+    /** A server picked by hand while the VPN was off; the next connect tells the service so. */
+    private var pickedWhileOff: String? = null
+
     fun startVpn() {
-        if (profiles.value.selected == null) {
+        val selected = profiles.value.selected
+        if (selected == null) {
             message("Сначала добавьте ключ")
             return
         }
-        VpnCommands.connect(getApplication<Application>())
+        val picked = pickedWhileOff == selected.id
+        pickedWhileOff = null
+        VpnCommands.connect(getApplication<Application>(), picked)
     }
 
     fun stopVpn() {
@@ -365,9 +371,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun sendReconnect() {
+    /** [picked]: the user has just chosen the server (see [select]). */
+    private fun sendReconnect(picked: Boolean = false) {
         try {
-            VpnCommands.reconnect(getApplication<Application>())
+            VpnCommands.reconnect(getApplication<Application>(), picked)
         } catch (e: Exception) {
             AppLog.w("could not apply the change to the tunnel", e)
         }
@@ -397,12 +404,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------ profiles
 
-    /** In the app scope, like the other changes that reach the tunnel ([reconnectIfRunning]). */
+    /**
+     * The user picked server [id]; the service is told so (their choice then
+     * wins over automatic switches). A running tunnel moves to it, also when
+     * it is already the selection but the tunnel runs another (a refresh
+     * removed the running one). In the app scope, like the other changes
+     * that reach the tunnel ([reconnectIfRunning]).
+     */
     fun select(id: String) = appScope.launch(saveErrors) {
-        if (profiles.value.selectedId == id) return@launch
-        var changed = false
-        repo.updateProfiles { s -> s.withSelected(id).also { changed = it != s } }
-        if (changed) reconnectIfRunning()
+        val up = isTunnelUp
+        if (profiles.value.selectedId == id && (!up || status.value.profileId == id)) return@launch
+        // Gone meanwhile: the VPN process replaced the list.
+        if (repo.updateProfiles { s -> s.withSelected(id) }.selectedId != id) return@launch
+        if (up) {
+            // Also brings a settings change still waiting out its pause.
+            reconnectJob?.cancel()
+            sendReconnect(picked = true)
+        } else {
+            pickedWhileOff = id
+        }
     }
 
     fun rename(id: String, name: String) = viewModelScope.launch(saveErrors) {

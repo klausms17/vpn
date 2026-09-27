@@ -73,6 +73,25 @@ class BlockReportTest {
     }
 
     @Test
+    fun theMobileWhitelistIsMarked() {
+        fun url(allDown: Boolean) = BlockReport.url(
+            base = "https://sub.example.com/klaus/report",
+            shortUuid = "id",
+            host = "nl.example.com",
+            port = 443,
+            protocol = "vless",
+            network = BlockReport.MOBILE,
+            operator = "MTS RUS",
+            version = "1.0",
+            allDown = allDown,
+            whitelist = true,
+        )
+        val q = "https://sub.example.com/klaus/report?s=id&h=nl.example.com&p=443&k=vless&n=mobile&o=MTS%20RUS&v=1.0"
+        assertEquals("$q&w=1", url(allDown = false))
+        assertEquals("$q&a=1&w=1", url(allDown = true))
+    }
+
+    @Test
     fun queryAndFragmentOfTheBase() {
         fun url(base: String) = BlockReport.url(base, "id", "h.example.com", 8443, "trojan", BlockReport.WIFI, "", "1.0")
         val q = "s=id&h=h.example.com&p=8443&k=trojan&n=wifi&o=&v=1.0"

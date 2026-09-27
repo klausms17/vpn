@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.provider.Settings
 import com.klausms.vpn.R
 import com.klausms.vpn.ui.MainActivity
 
@@ -37,11 +38,23 @@ object Notifications {
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 
-    fun status(context: Context, title: String, text: String?, withDisconnect: Boolean): Notification {
+    /**
+     * The system's network settings, where «Частный DNS» is on most phones
+     * (it has no public screen of its own); all settings where that screen
+     * is missing.
+     */
+    private fun openNetworkSettings(context: Context): PendingIntent {
+        val wireless = Intent(Settings.ACTION_WIRELESS_SETTINGS)
+        val intent = if (wireless.resolveActivity(context.packageManager) != null) wireless else Intent(Settings.ACTION_SETTINGS)
+        return PendingIntent.getActivity(context, 2, intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE)
+    }
+
+    /** [networkSettings]: a tap opens them instead of the app (the text asks for a change there). */
+    fun status(context: Context, title: String, text: String?, withDisconnect: Boolean, networkSettings: Boolean = false): Notification {
         val builder = Notification.Builder(context, CHANNEL_STATUS)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
-            .setContentIntent(openApp(context))
+            .setContentIntent(if (networkSettings) openNetworkSettings(context) else openApp(context))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)

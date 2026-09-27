@@ -32,19 +32,22 @@ object AppLog {
     fun tail(file: File, maxLines: Int, maxBytes: Int = 64 * 1024): List<String> {
         if (!file.isFile) return emptyList()
         return try {
-            RandomAccessFile(file, "r").use { f ->
-                val length = f.length()
-                val start = (length - maxBytes).coerceAtLeast(0)
-                val bytes = ByteArray((length - start).toInt())
-                f.seek(start)
-                f.readFully(bytes)
-                val lines = String(bytes, Charsets.UTF_8).lines().dropLastWhile { it.isEmpty() }
-                // Started mid-file: the first line is only the end of one.
-                (if (start > 0) lines.drop(1) else lines).takeLast(maxLines)
-            }
+            String(lastBytes(file, maxBytes), Charsets.UTF_8).lines().dropLastWhile { it.isEmpty() }.takeLast(maxLines)
         } catch (_: Exception) {
             emptyList()
         }
+    }
+
+    /** At most the last [maxBytes] of [file], from the start of a line (no half line). Throws on I/O errors. */
+    fun lastBytes(file: File, maxBytes: Int): ByteArray = RandomAccessFile(file, "r").use { f ->
+        val length = f.length()
+        // One byte more, to see whether the kept part begins a line.
+        val start = (length - maxBytes - 1).coerceAtLeast(0)
+        val bytes = ByteArray((length - start).toInt())
+        f.seek(start)
+        f.readFully(bytes)
+        val from = if (start > 0) bytes.indexOf('\n'.code.toByte()) + 1 else 0
+        bytes.copyOfRange(from, bytes.size)
     }
 
     fun i(message: String) = write("I", message, null)

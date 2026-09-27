@@ -151,11 +151,12 @@ fun HomeContent(
     onScan: (() -> Unit)? = null,
 ) {
     val state = status.state
-    val active = state == VpnState.CONNECTED || state == VpnState.CONNECTING || state == VpnState.DISCONNECTING
-    // The server the tunnel runs on, else the selected one.
-    val server: StoredProfile? = (if (active) profiles.profiles.firstOrNull { it.id == status.profileId } else null)
-        ?: profiles.selected
-    val code = server?.let { Countries.codeFrom(it.name) }
+    val active = status.active
+    // The running server, else the selected one; a running one that a
+    // refresh removed from the list is named by the status.
+    val server: StoredProfile? = status.shownServer(profiles)
+    val serverName = server?.name ?: status.profileName
+    val code = serverName?.let { Countries.codeFrom(it) }
     val hero = when {
         server == null && !active -> HeroState.NO_SERVER
         state == VpnState.CONNECTED -> HeroState.ON
@@ -225,7 +226,7 @@ fun HomeContent(
                         since = status.connectedSince,
                         now = now,
                         message = status.message,
-                        place = Countries.name(code) ?: server?.let { Countries.stripFlags(it.name) },
+                        place = Countries.name(code) ?: serverName?.let { Countries.stripFlags(it) },
                     )
                 }
             }

@@ -10,8 +10,9 @@ library only), behind Caddy at https://<SUB_DOMAIN>/klaus/:
       that stopped answering (so the phone itself has internet): s is the
       friend's subscription id, h/p/k the failed server, n the network type
       (wifi|mobile|other), o the mobile operator, v the app version. w=1:
-      the app moved from a server outside the mobile operator's whitelist
-      to one inside it (the "whitelist" regime, not a block). a=1: no
+      on mobile data the app moved from a server outside the operator's
+      whitelist to one inside it, and a foreign site did not open directly
+      either (the "whitelist" regime, not a block). a=1: no
       server answered at all while a Russian site opened directly; it
       counts like any other report.
   GET /klaus/health
@@ -375,8 +376,8 @@ def handle_report(query):
     if not (SHORT_UUID_RE.match(s) and HOST_RE.match(h) and PORT_RE.match(p) and 0 < int(p) < 65536
             and PROTO_RE.match(k) and VERSION_RE.match(v)):
         return 400, {"ok": False}
-    # The app knows best whether the whitelist explains the failure (a 4G
-    # router's Wi-Fi has one too), so the flag is taken as it is.
+    # The app checks whether the whitelist explains the failure (see w=1
+    # above), so the flag is taken as it is.
     whitelist = w == "1"
     known = subscription_ok(s)
     if known is None:

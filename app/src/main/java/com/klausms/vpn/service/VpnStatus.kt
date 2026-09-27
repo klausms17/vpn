@@ -1,5 +1,7 @@
 package com.klausms.vpn.service
 
+import com.klausms.vpn.data.ProfilesState
+import com.klausms.vpn.data.StoredProfile
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,7 +25,21 @@ data class VpnStatus(
     val message: String? = null,
     /** Wall clock millis when the tunnel came up. */
     val connectedSince: Long = 0,
-)
+) {
+    /** The tunnel runs, or is starting or stopping. */
+    val active: Boolean
+        get() = state == VpnState.CONNECTED || state == VpnState.CONNECTING || state == VpnState.DISCONNECTING
+
+    /**
+     * The server to show: the one the tunnel runs (or is starting or
+     * stopping), else the selected one. Null while the running one is no
+     * longer in [profiles] (a refresh removed it): [profileName] still names it.
+     */
+    fun shownServer(profiles: ProfilesState): StoredProfile? {
+        val running = profileId?.takeIf { active } ?: return profiles.selected
+        return profiles.profiles.firstOrNull { it.id == running }
+    }
+}
 
 data class TrafficStats(
     val upRate: Long = 0,

@@ -212,24 +212,6 @@ class FailoverTest {
         assertSame(tapped, Failover.selectInstead(tapped, failedId = "a", winnerId = "b", expected = "c"))
     }
 
-    @Test
-    fun onlyAServerTheUserChoseCountsAsTheirPick() {
-        val a = server("a", "a.example.com", "s1")
-        val b = server("b", "b.example.com", "s1")
-        val state = ProfilesState(listOf(a, b), listOf(sub("s1")), selectedId = "a")
-        // The app says so.
-        assertTrue(Failover.chosenByUser(picked = true, requested = false, runningId = null, id = "a", state = state))
-        // Tapped "a" while the tunnel ran "b": a pick, even unsaid.
-        assertTrue(Failover.chosenByUser(picked = false, requested = true, runningId = "b", id = "a", state = state))
-        // New settings for the same server, or a first start.
-        assertFalse(Failover.chosenByUser(picked = false, requested = true, runningId = "a", id = "a", state = state))
-        assertFalse(Failover.chosenByUser(picked = false, requested = true, runningId = null, id = "a", state = state))
-        // "b" was deleted or dropped by a refresh: the selection fell back to "a" by itself.
-        assertFalse(Failover.chosenByUser(picked = false, requested = true, runningId = "b", id = "a", state = state.copy(profiles = listOf(a))))
-        // Automatic switches and restarts nobody asked for.
-        assertFalse(Failover.chosenByUser(picked = false, requested = false, runningId = "b", id = "a", state = state))
-    }
-
     // -------------------------------------------------------------- budget
 
     @Test

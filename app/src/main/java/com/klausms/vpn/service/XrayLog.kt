@@ -1,5 +1,6 @@
 package com.klausms.vpn.service
 
+import com.klausms.vpn.util.AppLog
 import java.io.File
 import java.io.RandomAccessFile
 
@@ -27,11 +28,11 @@ internal object XrayLog {
     @Synchronized
     fun trim(file: File, maxBytes: Long = MAX_BYTES, keepBytes: Int = KEEP_BYTES): Boolean = try {
         val old = File(file.parentFile, file.name + ".1")
-        if (old.length() > maxBytes) old.writeBytes(tail(old, keepBytes))
+        if (old.length() > maxBytes) old.writeBytes(AppLog.lastBytes(old, keepBytes))
         if (file.length() <= maxBytes) {
             false
         } else {
-            val end = tail(file, keepBytes)
+            val end = AppLog.lastBytes(file, keepBytes)
             val tmp = File(file.parentFile, file.name + ".1.tmp")
             tmp.writeBytes(end)
             if (!tmp.renameTo(old)) {
@@ -44,17 +45,5 @@ internal object XrayLog {
     } catch (_: Exception) {
         // A log that cannot be cut must never stop the tunnel.
         false
-    }
-
-    /** At most the last [keepBytes] of [file], from the start of a line (no half line). */
-    private fun tail(file: File, keepBytes: Int): ByteArray = RandomAccessFile(file, "r").use { raf ->
-        val length = raf.length()
-        // One byte more, to see whether the kept part begins a line.
-        val start = (length - keepBytes - 1).coerceAtLeast(0)
-        val buf = ByteArray((length - start).toInt())
-        raf.seek(start)
-        raf.readFully(buf)
-        val from = if (start > 0) buf.indexOf('\n'.code.toByte()) + 1 else 0
-        buf.copyOfRange(from, buf.size)
     }
 }

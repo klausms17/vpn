@@ -43,9 +43,17 @@ internal class BlockReporter(context: Context) {
      * Reports [failed], a server of [subscription], unless the panel did not
      * ask for reports or it was reported in the last 30 minutes. [network]:
      * the phone's own network; [tunnel]: the running core, for the second try;
-     * [allDown]: no other server answered either.
+     * [allDown]: no other server answered either; [whitelist]: the mobile
+     * operator seems to let through only its whitelist, not a block.
      */
-    fun report(failed: StoredProfile, subscription: Subscription, network: Network?, allDown: Boolean = false, tunnel: () -> Controller?) {
+    fun report(
+        failed: StoredProfile,
+        subscription: Subscription,
+        network: Network?,
+        allDown: Boolean = false,
+        whitelist: Boolean = false,
+        tunnel: () -> Controller?,
+    ) {
         val base = httpsUrl(subscription.reportUrl) ?: return
         val id = BlockReport.shortUuid(subscription.url) ?: return
         if (failed.address.isBlank()) return
@@ -67,6 +75,7 @@ internal class BlockReporter(context: Context) {
             operator = if (kind == BlockReport.MOBILE) BlockReport.operator(operatorName(caps)) else "",
             version = BuildConfig.VERSION_NAME,
             allDown = allDown,
+            whitelist = whitelist,
         )
         // Not delivered (or the panel could not take it now): the next
         // switch away from this server may report it again.
@@ -185,6 +194,7 @@ internal object BlockReport {
     /**
      * The report request: [base] with every value percent-encoded as UTF-8.
      * [allDown] adds "a=1": no server of the phone answered, not only this one.
+     * [whitelist] adds "w=1": the mobile whitelist, not a block of this server.
      */
     fun url(
         base: String,
@@ -196,8 +206,9 @@ internal object BlockReport {
         operator: String,
         version: String,
         allDown: Boolean = false,
+        whitelist: Boolean = false,
     ): String {
-        val values = listOf(
+        val values = listOfNotNull(
             "s" to shortUuid,
             "h" to host,
             "p" to port.toString(),
@@ -205,7 +216,9 @@ internal object BlockReport {
             "n" to network,
             "o" to operator,
             "v" to version,
-        ) + if (allDown) listOf("a" to "1") else emptyList()
+            ("a" to "1").takeIf { allDown },
+            ("w" to "1").takeIf { whitelist },
+        )
         val query = values.joinToString("&") { (k, v) -> "$k=${encode(v)}" }
         val target = base.substringBefore('#')
         val separator = when {
