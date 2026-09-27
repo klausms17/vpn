@@ -16,7 +16,6 @@ import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.os.RemoteCallbackList
-import android.os.SystemClock
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.klausms.vpn.core.BuildOptions
@@ -33,7 +32,9 @@ import com.klausms.vpn.data.Stores
 import com.klausms.vpn.data.Subscription
 import com.klausms.vpn.data.SubscriptionUpdater
 import com.klausms.vpn.ui.MainActivity
+import com.klausms.vpn.util.AndroidClock
 import com.klausms.vpn.util.AppLog
+import com.klausms.vpn.util.Clock
 import com.klausms.vpn.util.PhoneSettings
 import com.klausms.vpn.widget.VpnWidget
 import kotlinx.coroutines.CancellationException
@@ -174,6 +175,8 @@ class XrayVpnService : VpnService() {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    private val clock: Clock = AndroidClock
 
     private lateinit var runtime: RuntimeStore
 
@@ -321,7 +324,7 @@ class XrayVpnService : VpnService() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 Intent.ACTION_USER_PRESENT ->
-                    if (SystemClock.elapsedRealtime() - lastVerifyAt >= UNLOCK_CHECK_MS) scheduleVerify(Reason.UNLOCK)
+                    if (clock.elapsed() - lastVerifyAt >= UNLOCK_CHECK_MS) scheduleVerify(Reason.UNLOCK)
                 Intent.ACTION_SCREEN_ON -> startScreenChecks()
                 Intent.ACTION_SCREEN_OFF -> stopScreenChecks()
             }
@@ -336,7 +339,7 @@ class XrayVpnService : VpnService() {
             callbacks.register(callback)
             scope.launch { sendStatus(callback, VpnStatusHolder.status.value) }
             // The app came on screen: show the truth about the connection.
-            if (SystemClock.elapsedRealtime() - lastVerifyAt >= APP_CHECK_MS) scheduleVerify(Reason.APP)
+            if (clock.elapsed() - lastVerifyAt >= APP_CHECK_MS) scheduleVerify(Reason.APP)
             // Should run, but nothing started it: after an update on phones
             // that hold the update broadcast back (MIUI). With the app on
             // screen it may start now; a start already on its way makes
@@ -436,7 +439,7 @@ class XrayVpnService : VpnService() {
                         config != null -> {
                             publishConnected()
                             // "Connect" while connected: maybe it does not work.
-                            if (SystemClock.elapsedRealtime() - lastVerifiedOkAt >= APP_CHECK_MS) scheduleVerify(Reason.APP)
+                            if (clock.elapsed() - lastVerifiedOkAt >= APP_CHECK_MS) scheduleVerify(Reason.APP)
                         }
                         // Turned off after the resume was sent.
                         resume && !runtime.shouldRun() -> withContext(Dispatchers.Main) { stopIfLatest(startId) }
@@ -576,7 +579,7 @@ class XrayVpnService : VpnService() {
                 manualPick == profile.id -> manualPick
                 else -> null
             }
-            connectedAtElapsed = SystemClock.elapsedRealtime()
+            connectedAtElapsed = clock.elapsed()
             runtime.setShouldRun(true)
             withContext(Dispatchers.Main) { startNetworkMonitor() }
             // Only a server whose core came up becomes the selection.
@@ -587,9 +590,9 @@ class XrayVpnService : VpnService() {
             }
             // The session timer goes on when only the settings changed.
             val since = before.connectedSince.takeIf { restarting && it > 0 && before.profileId == profile.id }
-                ?: System.currentTimeMillis()
+                ?: clock.wall()
             switchNotice = notice
-            switchNoticeAt = SystemClock.elapsedRealtime()
+            switchNoticeAt = clock.elapsed()
             setStatus(VpnStatus(VpnState.CONNECTED, profile.id, profile.name, message = notice ?: baseNotice, connectedSince = since))
             Notifications.clearError(this)
             AppLog.i("tunnel up: ${profile.protocol}/${profile.network}/${profile.security}; ${PhoneSettings.vpnSummary(this)}")
@@ -623,7 +626,7 @@ class XrayVpnService : VpnService() {
                     VpnStatus(
                         VpnState.CONNECTED, running?.id, running?.name,
                         message = "Не удалось применить изменения: $message",
-                        connectedSince = before.connectedSince.takeIf { it > 0 } ?: System.currentTimeMillis(),
+                        connectedSince = before.connectedSince.takeIf { it > 0 } ?: clock.wall(),
                     ),
                 )
                 publishConnected()
@@ -856,7 +859,7 @@ class XrayVpnService : VpnService() {
         screenJob = scope.launch {
             while (true) {
                 delay(SCREEN_CHECK_MS)
-                if (SystemClock.elapsedRealtime() - lastVerifyAt >= SCREEN_CHECK_MS) scheduleVerify(Reason.SCREEN)
+                if (clock.elapsed() - lastVerifyAt >= SCREEN_CHECK_MS) scheduleVerify(Reason.SCREEN)
             }
         }
     }
@@ -874,7 +877,7 @@ class XrayVpnService : VpnService() {
      */
     private fun onReachabilityChanged(lost: Boolean) {
         if (!lost && lastVerifiedOkAt >= lastVerifyAt) return
-        val now = SystemClock.elapsedRealtime()
+        val now = clock.elapsed()
         if (now - lastLinkCheckAt < LINK_CHECK_MS) return
         lastLinkCheckAt = now
         scheduleVerify(Reason.LINK, NETWORK_SETTLE_MS)
@@ -916,7 +919,7 @@ class XrayVpnService : VpnService() {
         // at boot), the same one back after a gap or right after connecting:
         // still worth a check.
         val reset = previous != null && network != previous &&
-            SystemClock.elapsedRealtime() - connectedAtElapsed >= MIN_UPTIME_FOR_RESET_MS
+            clock.elapsed() - connectedAtElapsed >= MIN_UPTIME_FOR_RESET_MS
         if (!reset) {
             scheduleVerify(Reason.NETWORK, NETWORK_SETTLE_MS)
             return
@@ -957,7 +960,7 @@ class XrayVpnService : VpnService() {
                         // startTunnel: its log is kept small here too.
                         XrayLog.trim(coreLog)
                         c.start(cfg, fd.fd)
-                        connectedAtElapsed = SystemClock.elapsedRealtime()
+                        connectedAtElapsed = clock.elapsed()
                         newEpoch()
                         scheduleVerify(Reason.NETWORK)
                     } catch (e: Exception) {
@@ -986,7 +989,7 @@ class XrayVpnService : VpnService() {
     }
 
     private fun failedRecently(id: String): Boolean =
-        recentlyFailed[id]?.let { SystemClock.elapsedRealtime() - it < Failover.RECENTLY_FAILED_MS } == true
+        recentlyFailed[id]?.let { clock.elapsed() - it < Failover.RECENTLY_FAILED_MS } == true
 
     /**
      * Checks in the background that traffic gets through the tunnel, and
@@ -1018,7 +1021,7 @@ class XrayVpnService : VpnService() {
         val c = liveController ?: return
         val running = runningProfile ?: return
         if (epoch.get() != e || VpnStatusHolder.status.value.state != VpnState.CONNECTED) return
-        lastVerifyAt = SystemClock.elapsedRealtime()
+        lastVerifyAt = clock.elapsed()
         // One site failing is not enough: some servers cannot reach Google
         // but carry everything else.
         val ok = answers(c, XrayCore.TEST_URL, VERIFY_TIMEOUT_MS) ||
@@ -1040,7 +1043,7 @@ class XrayVpnService : VpnService() {
             return
         }
         if (epoch.get() != e) return
-        lastVerifiedOkAt = SystemClock.elapsedRealtime()
+        lastVerifiedOkAt = clock.elapsed()
         clearFailureNotice(e)
         clearSwitchNotice(e, minAgeMs = SWITCH_NOTICE_MS)
         owedRefresh?.let { id ->
@@ -1065,7 +1068,7 @@ class XrayVpnService : VpnService() {
      */
     private fun bulkDue(reason: Reason, network: Network?): Boolean {
         if (reason == Reason.START) return true
-        val now = SystemClock.elapsedRealtime()
+        val now = clock.elapsed()
         return synchronized(bulkFine) {
             bulkFine.entries.removeIf { now - it.value >= BULK_CHECK_MS || it.value > now }
             network !in bulkFine
@@ -1089,7 +1092,7 @@ class XrayVpnService : VpnService() {
             if (!stalled) {
                 // Also after a refusal: trying again at every check would
                 // only cost time and data.
-                synchronized(bulkFine) { bulkFine[network] = SystemClock.elapsedRealtime() }
+                synchronized(bulkFine) { bulkFine[network] = clock.elapsed() }
                 return false
             }
         }
@@ -1131,7 +1134,7 @@ class XrayVpnService : VpnService() {
             setNotice(Failover.NOTICE_PICK_ANOTHER, e)
             return
         }
-        val now = SystemClock.elapsedRealtime()
+        val now = clock.elapsed()
         recentlyFailed.entries.removeIf { now - it.value >= Failover.RECENTLY_FAILED_MS }
         val exclude = recentlyFailed.keys.toSet()
         val state = Stores.profiles(this).read()
@@ -1199,11 +1202,11 @@ class XrayVpnService : VpnService() {
         if (answers(c, XrayCore.TEST_URL, CONFIRM_TIMEOUT_MS) || answers(c, XrayCore.TEST_URL_ALT, CONFIRM_TIMEOUT_MS)) {
             if (epoch.get() != e) return true
             AppLog.i("the server answers again: the connection was lost for a moment")
-            lastVerifiedOkAt = SystemClock.elapsedRealtime()
+            lastVerifiedOkAt = clock.elapsed()
             clearFailureNotice(e)
             return true
         }
-        val now = SystemClock.elapsedRealtime()
+        val now = clock.elapsed()
         if (now - lastCoreRestartAt < CORE_RESTART_GAP_MS) return false
         // Not queued: the tunnel changed meanwhile, and the gap stays for a real stuck core.
         if (restartCore("the server answers, but not through the running core: restarting it", expectedEpoch = e)) {
@@ -1251,13 +1254,13 @@ class XrayVpnService : VpnService() {
 
     /** The notice of a search that found nothing on [network] in the last minutes, or null. */
     private fun fruitlessNotice(network: Network?): String? = synchronized(fruitless) {
-        val now = SystemClock.elapsedRealtime()
+        val now = clock.elapsed()
         fruitless.entries.removeIf { now - it.value.first >= FRUITLESS_RETRY_MS || it.value.first > now }
         fruitless[network]?.second
     }
 
     private fun markFruitless(network: Network?, notice: String) {
-        synchronized(fruitless) { fruitless[network] = SystemClock.elapsedRealtime() to notice }
+        synchronized(fruitless) { fruitless[network] = clock.elapsed() to notice }
     }
 
     /**
@@ -1313,7 +1316,7 @@ class XrayVpnService : VpnService() {
             // Only a switch that happened marks the failed server: one dropped
             // on the way (a reconnect came first) proves nothing about it.
             if (!returning && winner.id != failed.id && runningProfile?.id == winner.id) {
-                recentlyFailed[failed.id] = SystemClock.elapsedRealtime()
+                recentlyFailed[failed.id] = clock.elapsed()
                 // Up on another server: the phone is online, so the failed
                 // one does not answer from this network.
                 if (report) reportBlocked(failed, saved, winner = winner)
@@ -1392,7 +1395,7 @@ class XrayVpnService : VpnService() {
     /** An automatic switch from [failedId] to [winnerId] happened: remember the user's server. */
     private fun trackAway(failedId: String, winnerId: String) {
         val away = runtime.away()
-        val now = SystemClock.elapsedRealtime()
+        val now = clock.elapsed()
         if (away != null && winnerId == away.home) runtime.setReturned(Failover.Returned(away.home, now, away.backoff))
         runtime.setAway(Failover.afterSwitch(away, runtime.returned(), failedId, winnerId, now))
     }
@@ -1415,7 +1418,7 @@ class XrayVpnService : VpnService() {
      */
     private suspend fun returnHomeIfItAnswers(e: Long, c: Controller, running: StoredProfile) {
         val away = runtime.away() ?: return
-        val now = SystemClock.elapsedRealtime()
+        val now = clock.elapsed()
         if (away.to != running.id || !Failover.returnDue(away, now) || failedRecently(away.home)) return
         val saved = Stores.profiles(this).read()
         val home = saved.profiles.firstOrNull { it.id == away.home }
@@ -1499,7 +1502,7 @@ class XrayVpnService : VpnService() {
     /** [failed]'s subscription, when it may be downloaded again now: at most every 10 minutes and one at a time. */
     private fun refreshableSubscription(state: ProfilesState, failed: StoredProfile): Subscription? {
         val sub = state.subscriptions.firstOrNull { it.id == failed.subscriptionId } ?: return null
-        if (refreshJob?.isActive == true || !Failover.refreshDue(sub, System.currentTimeMillis())) return null
+        if (refreshJob?.isActive == true || !Failover.refreshDue(sub, clock.wall())) return null
         return sub
     }
 
@@ -1602,7 +1605,7 @@ class XrayVpnService : VpnService() {
             switchNotice = null
             return
         }
-        if (SystemClock.elapsedRealtime() - switchNoticeAt < minAgeMs) return
+        if (clock.elapsed() - switchNoticeAt < minAgeMs) return
         scope.launch { setNotice(baseNotice, e, replacing = setOf(notice)) }
     }
 
