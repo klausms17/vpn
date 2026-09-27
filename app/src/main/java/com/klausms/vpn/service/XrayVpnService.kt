@@ -138,6 +138,8 @@ class XrayVpnService : VpnService() {
 
     private lateinit var engine: TunnelEngine
 
+    private lateinit var memory: FailureMemory
+
     // The newest command's startId. A job only stops the service if no newer
     // command arrived meanwhile, so a quick "off, on" never loses the "on".
     @Volatile
@@ -182,18 +184,9 @@ class XrayVpnService : VpnService() {
     // ends, also when its result is no longer wanted.
     private val probeLock = Mutex()
 
-    // Server id -> elapsedRealtime it stopped answering; skipped as a
-    // candidate for [Failover.RECENTLY_FAILED_MS].
-    private val recentlyFailed = ConcurrentHashMap<String, Long>()
-
     // Host -> on the Russian mobile whitelist. Kept while the process lives:
     // few hosts, and the answer rarely changes.
     private val whitelistCache = ConcurrentHashMap<String, Boolean>()
-
-    // A server the user chose again right after it had been switched away
-    // from: their choice wins, it is not switched away from automatically.
-    @Volatile
-    private var manualPick: String? = null
 
     // A reconnect asked for with EXTRA_PICKED; merged reconnects keep it.
     private val pickPending = AtomicBoolean()
@@ -233,15 +226,7 @@ class XrayVpnService : VpnService() {
     private val engineEvents = object : TunnelEngine.Listener {
         override suspend fun onUp(session: TunnelSession, req: StartRequest, before: VpnStatus, restarting: Boolean) {
             val profile = session.profile
-            manualPick = when {
-                // An automatic switch.
-                req.switch != null -> null
-                // Picked by hand again after it had stopped answering: the user knows.
-                req.picked && failedRecently(profile.id) -> profile.id
-                // The same server with new settings: the choice still stands.
-                manualPick == profile.id -> manualPick
-                else -> null
-            }
+            memory.onStarted(profile.id, automatic = req.switch != null, picked = req.picked)
             runtime.setShouldRun(true)
             withContext(Dispatchers.Main) { watcher.start() }
             // Only a server whose core came up becomes the selection.
@@ -300,6 +285,7 @@ class XrayVpnService : VpnService() {
             stopIfLatest = ::stopIfLatest,
             listener = engineEvents,
         )
+        memory = FailureMemory(clock)
         Notifications.ensureChannels(this)
     }
 
@@ -480,9 +466,6 @@ class XrayVpnService : VpnService() {
 
     // --------------------------------------------------------------- failover
 
-    private fun failedRecently(id: String): Boolean =
-        recentlyFailed[id]?.let { clock.elapsed() - it < Failover.RECENTLY_FAILED_MS } == true
-
     /**
      * Checks in the background that traffic gets through the tunnel, and
      * looks for another server if not. Never inside [TunnelEngine.submit]:
@@ -599,7 +582,7 @@ class XrayVpnService : VpnService() {
             publisher.show(Failover.NOTICE_SIGN_IN, e)
             return
         }
-        if (failed.id == manualPick && failedRecently(failed.id)) {
+        if (memory.keptByUser(failed.id)) {
             publisher.show(Failover.NOTICE_PICK_ANOTHER, e)
             return
         }
@@ -615,9 +598,7 @@ class XrayVpnService : VpnService() {
             publisher.show(Failover.NOTICE_PICK_ANOTHER, e)
             return
         }
-        val now = clock.elapsed()
-        recentlyFailed.entries.removeIf { now - it.value >= Failover.RECENTLY_FAILED_MS }
-        val exclude = recentlyFailed.keys.toSet()
+        val exclude = memory.exclude()
         val state = profiles.snapshot()
         val first = pick(state, failed, exclude, tried = emptyList())
         // The panel may have moved the servers meanwhile (new addresses or keys).
@@ -787,7 +768,7 @@ class XrayVpnService : VpnService() {
             // Only a switch that happened marks the failed server: one dropped
             // on the way (a reconnect came first) proves nothing about it.
             if (!returning && winner.id != failed.id && engine.session?.profile?.id == winner.id) {
-                recentlyFailed[failed.id] = clock.elapsed()
+                memory.markFailed(failed.id)
                 // Up on another server: the phone is online, so the failed
                 // one does not answer from this network.
                 if (report) reportBlocked(failed, saved, winner = winner)
@@ -891,7 +872,7 @@ class XrayVpnService : VpnService() {
     private suspend fun returnHomeIfItAnswers(e: Long, c: CoreHandle, running: StoredProfile) {
         val away = runtime.away() ?: return
         val now = clock.elapsed()
-        if (away.to != running.id || !Failover.returnDue(away, now) || failedRecently(away.home)) return
+        if (away.to != running.id || !Failover.returnDue(away, now) || memory.failedRecently(away.home)) return
         val saved = profiles.snapshot()
         val home = saved.profiles.firstOrNull { it.id == away.home }
         if (home == null) {
