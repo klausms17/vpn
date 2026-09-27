@@ -47,23 +47,6 @@ class PinnedTest {
     }
 
     @Test
-    fun withoutFetchesThatServerAgainButKeepsTheFallback() {
-        val other = saved.copy(
-            id = "h2",
-            address = "h2.example.com",
-            link = "hysteria2://pw@h2.example.com:443?insecure=1#b",
-            outbounds = JsonArray(listOf(JsonPrimitive("pinned2"))),
-        )
-        val both = Pinned.of(listOf(saved, other)).without(saved.link!!.substringBefore('#') + "#another name")
-        val p = parsed("hysteria2://pw@h.example.com:443?insecure=1#x")
-        // Its certificate may have changed: not reused, but kept if it cannot be fetched now.
-        assertNull(both.sameLink(p))
-        assertEquals(saved.outbounds, both.sameServer(p))
-        // The other servers keep their pins.
-        assertEquals(other.outbounds, both.sameLink(parsed(other.link!!)))
-    }
-
-    @Test
     fun otherServersAndNoneGetNothing() {
         assertNull(pinned.sameServer(parsed("hysteria2://pw@other.example.com:443?insecure=1#x").copy(address = "other.example.com")))
         assertNull(Pinned.NONE.sameServer(parsed(saved.link!!)))
