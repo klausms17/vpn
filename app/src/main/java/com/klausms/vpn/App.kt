@@ -12,6 +12,7 @@ import com.klausms.vpn.widget.VpnWidget
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.io.File
 
 class App : Application() {
@@ -41,6 +42,11 @@ class App : Application() {
             if (wanted) AppLog.i("vpn process started")
             logLastExit(wanted)
             VpnWidget.update(this)
+        } else {
+            // Decodes the saved servers and settings off the main thread
+            // before the first screen asks for them. The lazy is synchronized:
+            // the ViewModel waits for this read, or reads again if it failed.
+            appScope.launch(Dispatchers.IO) { runCatching { repository } }
         }
     }
 
