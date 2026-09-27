@@ -6,6 +6,7 @@ import com.klausms.vpn.data.StoredProfile
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -63,6 +64,18 @@ class ViewModelLogicTest {
         assertTrue(updateRetryDue(t, t + UPDATE_RETRY_MS))
         // A clock set back does not block checks for long.
         assertTrue(updateRetryDue(t, t - 1))
+    }
+
+    @Test
+    fun aSecondGeoUpdateWaitsForTheFirstToEnd() {
+        val geo = OneAtATime()
+        assertTrue(geo.tryStart())
+        assertTrue(geo.running.value)
+        // «Обновить списки» again, maybe from a reopened screen.
+        assertFalse(geo.tryStart())
+        geo.end()
+        assertFalse(geo.running.value)
+        assertTrue(geo.tryStart())
     }
 
     @Test

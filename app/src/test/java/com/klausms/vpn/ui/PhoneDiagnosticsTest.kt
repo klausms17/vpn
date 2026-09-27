@@ -56,13 +56,33 @@ class PhoneDiagnosticsTest {
         // force-stop by a cleaner or a firmware power manager.
         val forceStop = 10
         val crash = 4
-        val cachedKill = 13 // REASON_OTHER, e.g. an idle process cleared away
-        assertTrue(ProcessExits.worthLogging(forceStop, tunnelWanted = true))
-        assertTrue(ProcessExits.worthLogging(cachedKill, tunnelWanted = true))
-        assertFalse(ProcessExits.worthLogging(forceStop, tunnelWanted = false))
-        assertFalse(ProcessExits.worthLogging(cachedKill, tunnelWanted = false))
-        assertTrue(ProcessExits.worthLogging(crash, tunnelWanted = false))
-        assertTrue(ProcessExits.reasonName(forceStop).startsWith("force-stopped"))
+        val other = 13 // REASON_OTHER, e.g. an idle process cleared away
+        // RunningAppProcessInfo importance: running the tunnel (a foreground
+        // service), or idle in the cache.
+        val tunnel = 125
+        val cached = 400
+        assertTrue(ProcessExits.worthLogging(forceStop, tunnelWanted = true, importance = tunnel))
+        assertTrue(ProcessExits.worthLogging(other, tunnelWanted = true, importance = tunnel))
+        assertFalse(ProcessExits.worthLogging(forceStop, tunnelWanted = false, importance = tunnel))
+        assertFalse(ProcessExits.worthLogging(other, tunnelWanted = false, importance = cached))
+        assertTrue(ProcessExits.worthLogging(crash, tunnelWanted = false, importance = cached))
+    }
+
+    @Test
+    fun anIdleProcessClearedAwayIsNotNewsEvenWithTheVpnMeantToBeOn() {
+        // The tunnel did not come back (e.g. the firmware blocked the restart);
+        // the widget's half-hourly redraw starts the process, which then idles
+        // in the cache until it is cleared: once every 30 minutes.
+        assertFalse(ProcessExits.worthLogging(13, tunnelWanted = true, importance = 400))
+        // A crash is logged all the same.
+        assertTrue(ProcessExits.worthLogging(5, tunnelWanted = true, importance = 400))
+        // Importance unknown (IMPORTANCE_GONE): better one line too many.
+        assertTrue(ProcessExits.worthLogging(10, tunnelWanted = true, importance = 1000))
+    }
+
+    @Test
+    fun exitReasonsHaveNames() {
+        assertTrue(ProcessExits.reasonName(10).startsWith("force-stopped"))
         assertEquals("reason 99", ProcessExits.reasonName(99))
     }
 

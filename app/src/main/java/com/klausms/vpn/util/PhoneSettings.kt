@@ -83,20 +83,35 @@ object PhoneSettings {
     fun oem(): Oem? = oem(Build.MANUFACTURER, Build.BRAND)
 
     /** On Android's battery allowlist («Без ограничений»). */
-    fun batteryUnrestricted(context: Context): Boolean =
+    fun batteryUnrestricted(context: Context): Boolean = probe("battery allowlist", fallback = false) {
         context.getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(context.packageName) == true
+    }
 
     /**
      * «Ограничено» battery mode or "Restrict background activity": Android
      * may then silently drop the widget's "on" and hide the VPN notification.
      */
-    fun backgroundRestricted(context: Context): Boolean =
+    fun backgroundRestricted(context: Context): Boolean = probe("background restriction", fallback = false) {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
             context.getSystemService(ActivityManager::class.java)?.isBackgroundRestricted == true
+    }
 
     /** Off means the "VPN switched off" and "server switched" messages are never seen. */
-    fun notificationsEnabled(context: Context): Boolean =
+    fun notificationsEnabled(context: Context): Boolean = probe("notifications", fallback = true) {
         context.getSystemService(NotificationManager::class.java)?.areNotificationsEnabled() != false
+    }
+
+    /**
+     * [read], or [fallback] when the system service fails: these are read
+     * while drawing Settings and when the app starts, where a throw would
+     * crash the screen or skip setting up the core.
+     */
+    private inline fun probe(what: String, fallback: Boolean, read: () -> Boolean): Boolean = try {
+        read()
+    } catch (e: Exception) {
+        AppLog.w("cannot read $what", e)
+        fallback
+    }
 
     /** Something here may stop the VPN in the background. */
     fun needsSetup(context: Context): Boolean =

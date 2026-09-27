@@ -33,19 +33,24 @@ class App : Application() {
         // A fresh VPN process means any widget picture from before (e.g. a
         // tunnel that was killed) may be stale.
         if (isVpnProcess) {
-            AppLog.i("vpn process started")
-            logLastExit()
+            // Read before anything in this process changes it: it still says
+            // whether the VPN was meant to be on when the last process ended.
+            val wanted = RuntimeState.shouldRun(this)
+            // With the VPN off, the process also starts just to redraw the
+            // widget (about every 30 minutes): a line each time would push
+            // the useful ones out of the short log.
+            if (wanted) AppLog.i("vpn process started")
+            logLastExit(wanted)
             VpnWidget.update(this)
         }
     }
 
     /**
      * Why the previous VPN process ended: a tunnel that went off by itself
-     * then leaves a trace in the log the user can send. Read before anything
-     * in this process changes should_run, so it still says whether the VPN
+     * then leaves a trace in the log the user can send. [wanted]: the VPN
      * was meant to be on.
      */
-    private fun logLastExit() {
+    private fun logLastExit(wanted: Boolean) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         try {
             val am = getSystemService(ActivityManager::class.java) ?: return
@@ -56,8 +61,7 @@ class App : Application() {
             val prefs = getSharedPreferences("exit_log", Context.MODE_PRIVATE)
             if (prefs.getLong("last_logged", 0L) == last.timestamp) return
             prefs.edit { putLong("last_logged", last.timestamp) }
-            val wanted = RuntimeState.shouldRun(this)
-            if (!ProcessExits.worthLogging(last.reason, wanted)) return
+            if (!ProcessExits.worthLogging(last.reason, wanted, last.importance)) return
             val ago = (System.currentTimeMillis() - last.timestamp) / 1000
             AppLog.w(
                 "previous vpn process ended ${ago}s ago" + (if (wanted) " while the VPN was on" else "") +

@@ -74,6 +74,27 @@ internal class BusyTexts {
     }
 }
 
+/** Work that must not run twice at once; [running] is shown on screen. */
+internal class OneAtATime {
+    private val _running = MutableStateFlow(false)
+    val running: StateFlow<Boolean> = _running.asStateFlow()
+
+    /** False when a run is already going. */
+    fun tryStart(): Boolean = _running.compareAndSet(expect = false, update = true)
+
+    fun end() {
+        _running.value = false
+    }
+}
+
+/**
+ * «Обновить списки», for the whole app process rather than one screen: a run
+ * whose screen was closed keeps downloading until it ends (the download
+ * cannot be interrupted), and a reopened screen must not start a second run
+ * over the same files meanwhile.
+ */
+private val geoUpdate = OneAtATime()
+
 /** [id] selected, or unchanged when that server is gone (the VPN process replaced the list meanwhile). */
 internal fun ProfilesState.withSelected(id: String): ProfilesState =
     if (selectedId != id && profiles.any { it.id == id }) copy(selectedId = id) else this
@@ -117,11 +138,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val busyTexts = BusyTexts()
     val busy: StateFlow<String?> = busyTexts.text
 
-    private var geoJob: Job? = null
-    private val _geoUpdating = MutableStateFlow(false)
-
     /** «Обновить списки» is running; a second run would delete this one's files. */
-    val geoUpdating: StateFlow<Boolean> = _geoUpdating.asStateFlow()
+    val geoUpdating: StateFlow<Boolean> = geoUpdate.running
 
     private val _backgroundTip = MutableStateFlow(false)
 
@@ -598,12 +616,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** One run at a time: runs share their download folder and files. */
+    /** One run at a time in the app ([geoUpdate]): runs share their download folder and files. */
     fun updateGeo() {
-        if (geoJob?.isActive == true) return
-        geoJob = viewModelScope.launch {
+        if (geoUpdate.running.value) return
+        viewModelScope.launch {
+            // Taken inside the launch: a launch that never runs (the screen
+            // is closing) must not keep the updates locked.
+            if (!geoUpdate.tryStart()) return@launch
             val app = getApplication<Application>()
-            _geoUpdating.value = true
             val op = busyTexts.start("Обновление баз…")
             try {
                 val via = profiles.value.selected?.outbounds
@@ -617,7 +637,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 message("Не удалось обновить базы: ${e.userMessage()}")
             } finally {
                 op.end()
-                _geoUpdating.value = false
+                // A cancelled run gets here only once its download has ended
+                // (withContext waits for the blocking work), so the files are
+                // free by then.
+                geoUpdate.end()
             }
         }
     }

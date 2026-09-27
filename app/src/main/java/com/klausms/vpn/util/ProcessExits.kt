@@ -1,23 +1,31 @@
 package com.klausms.vpn.util
 
+import android.app.ActivityManager.RunningAppProcessInfo
 import android.app.ApplicationExitInfo
 
 /** How an ended VPN process is written to the log (ApplicationExitInfo, Android 11+). */
 object ProcessExits {
     /**
-     * Whether the end is worth a warning. [tunnelWanted]: the VPN was meant
-     * to be on when the process ended. Then any end is news, a force-stop
-     * too: firmware power managers and cleaners stop apps that way, and
-     * Android files it as "user requested". With the VPN off only a crash
-     * matters; an idle process being cleared away is routine.
+     * Whether the end is worth a warning. A crash always is. [tunnelWanted]:
+     * the VPN was meant to be on when the process ended. Then any end of a
+     * process that was running the tunnel is news, a force-stop too:
+     * firmware power managers and cleaners stop apps that way, and Android
+     * files it as "user requested". [importance] (Android's, at the end)
+     * tells which: a running tunnel keeps its process in the foreground,
+     * while a cached one was idle, e.g. only started to redraw the widget,
+     * and clearing it away is routine.
      */
-    fun worthLogging(reason: Int, tunnelWanted: Boolean): Boolean =
-        tunnelWanted ||
-            reason == ApplicationExitInfo.REASON_CRASH ||
+    fun worthLogging(reason: Int, tunnelWanted: Boolean, importance: Int): Boolean =
+        reason == ApplicationExitInfo.REASON_CRASH ||
             reason == ApplicationExitInfo.REASON_CRASH_NATIVE ||
             reason == ApplicationExitInfo.REASON_ANR ||
             reason == ApplicationExitInfo.REASON_INITIALIZATION_FAILURE ||
-            reason == ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE
+            reason == ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE ||
+            (tunnelWanted && !wasIdle(importance))
+
+    /** Cached when it ended; an unknown importance counts as running. */
+    private fun wasIdle(importance: Int) =
+        importance >= RunningAppProcessInfo.IMPORTANCE_CACHED && importance < RunningAppProcessInfo.IMPORTANCE_GONE
 
     fun reasonName(reason: Int): String = when (reason) {
         ApplicationExitInfo.REASON_UNKNOWN -> "unknown"
