@@ -161,17 +161,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * The app is on screen since [onAppVisible], until [onAppHidden]. Main
+     * thread only. A rotation recreates the activity but not this ViewModel:
+     * the new activity's start is not a new visit.
+     */
+    private var onScreen = false
+
+    /**
      * The app came on screen (also back from Recents): picks up what the VPN
      * process saved meanwhile, then refreshes old subscriptions and looks
      * for a newer app build.
      */
-    fun onAppVisible() = viewModelScope.launch {
-        repo.reload()
-        if (staleJob?.isActive == true) return@launch
-        staleJob = viewModelScope.launch {
-            refreshStaleSubscriptions()
-            // After the refresh: it may have brought the panel's app address.
-            checkForUpdate()
+    fun onAppVisible() {
+        if (onScreen) return
+        onScreen = true
+        viewModelScope.launch {
+            repo.reload()
+            if (staleJob?.isActive == true) return@launch
+            staleJob = viewModelScope.launch {
+                refreshStaleSubscriptions()
+                // After the refresh: it may have brought the panel's app address.
+                checkForUpdate()
+            }
         }
     }
 
@@ -307,6 +318,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * away from Recents).
      */
     fun onAppHidden() {
+        onScreen = false
         val pending = reconnectJob ?: return
         if (!pending.isActive) return
         pending.cancel()

@@ -3,6 +3,7 @@ package com.klausms.vpn.ui.screens
 import android.content.Context
 import android.content.Intent
 import android.util.LruCache
+import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -51,6 +52,7 @@ import com.klausms.vpn.ui.components.ListRow
 import com.klausms.vpn.ui.components.NavBar
 import com.klausms.vpn.ui.components.RowDivider
 import com.klausms.vpn.ui.components.SectionFooter
+import com.klausms.vpn.ui.components.groupRow
 import com.klausms.vpn.ui.components.navBarClearance
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
@@ -93,11 +95,16 @@ fun AppsScreen(vm: MainViewModel, onBack: () -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
     val excluded = settings.excludedApps
     val icons = remember { IconCache() }
+    val activity = LocalActivity.current
 
     // The tunnel takes the new list once, when this screen closes or the
     // app goes to the background (e.g. Home, to open the app just excluded).
-    DisposableEffect(vm) { onDispose { vm.applyAppLists() } }
-    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { vm.applyAppLists() }
+    // Not on a rotation: the screen comes back at once with the list open.
+    fun applyUnlessRotating() {
+        if (activity?.isChangingConfigurations != true) vm.applyAppLists()
+    }
+    DisposableEffect(vm) { onDispose { applyUnlessRotating() } }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { applyUnlessRotating() }
 
     fun toggle(pkg: String) = vm.updateAppLists { s ->
         s.copy(excludedApps = if (pkg in s.excludedApps) s.excludedApps - pkg else s.excludedApps + pkg)
@@ -155,15 +162,7 @@ fun AppsScreen(vm: MainViewModel, onBack: () -> Unit) {
             // One lazy item per app (a phone can have hundreds), drawn as
             // one inset group: rounded corners on the first and last row.
             itemsIndexed(shown, key = { _, app -> app.pkg }) { i, app ->
-                val top = if (i == 0) 26.dp else 0.dp
-                val bottom = if (i == shown.lastIndex) 26.dp else 0.dp
-                Column(
-                    Modifier
-                        .padding(horizontal = 20.dp)
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(topStart = top, topEnd = top, bottomStart = bottom, bottomEnd = bottom))
-                        .background(kc.card),
-                ) {
+                Column(Modifier.groupRow(first = i == 0, last = i == shown.lastIndex).background(kc.card)) {
                     if (i > 0) RowDivider(start = 68.dp)
                     val checked = app.pkg in excluded
                     ListRow(

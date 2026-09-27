@@ -88,7 +88,7 @@ fun HomeScreen(
     onToggle: () -> Unit,
     onAdd: () -> Unit,
     onOpenSettings: () -> Unit,
-    onPaste: () -> Boolean = { false },
+    onPaste: suspend () -> Boolean = { false },
     onScan: (() -> Unit)? = null,
 ) {
     val profiles by vm.profiles.collectAsStateWithLifecycle()
@@ -146,7 +146,7 @@ fun HomeContent(
     onUpdate: (AppUpdate) -> Unit = {},
     onDismissUpdate: () -> Unit = {},
     /** Imports the clipboard; false when it holds no text. */
-    onPaste: () -> Boolean = { false },
+    onPaste: suspend () -> Boolean = { false },
     /** Opens the QR scanner; null without a camera. */
     onScan: (() -> Unit)? = null,
 ) {

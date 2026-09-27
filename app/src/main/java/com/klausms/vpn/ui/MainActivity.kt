@@ -4,11 +4,9 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
-import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
@@ -62,8 +60,10 @@ import com.klausms.vpn.util.PhoneSettings
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.KlausTheme
 import com.klausms.vpn.ui.theme.kc
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 class MainActivity : ComponentActivity() {
@@ -76,6 +76,7 @@ class MainActivity : ComponentActivity() {
         const val ACTION_CONNECT = "com.klausms.vpn.ui.CONNECT"
 
         private const val KEY_SHARED_TEXT = "shared_text"
+        private const val KEY_CAMERA_REFUSED = "camera_refused"
 
         /** How long a tap waits for the VPN process's own state after the app comes back. */
         private const val STATUS_WAIT_MS = 2_000L
@@ -124,11 +125,16 @@ class MainActivity : ComponentActivity() {
             }
 
             override fun onStop(owner: LifecycleOwner) {
+                // A rotation is not leaving the app: the ViewModel, its binding
+                // and a change waiting to reach the tunnel carry over to the
+                // new activity.
+                if (isChangingConfigurations) return
                 vm.onAppHidden()
                 vm.vpn.unbind()
             }
         })
         sharedText = savedInstanceState?.getString(KEY_SHARED_TEXT)
+        cameraRefused = savedInstanceState?.getBoolean(KEY_CAMERA_REFUSED) == true
         // Handle the launch intent once: not again after a rotation or when
         // reopened from Recents, which re-deliver the original intent.
         val fromHistory = (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0
@@ -224,7 +230,7 @@ class MainActivity : ComponentActivity() {
                     )
                 },
                 confirmButton = {
-                    TextButton(onClick = { cameraRefused = false; openAppSettings() }) { Text("Настройки", color = kc.green) }
+                    TextButton(onClick = { cameraRefused = false; PhoneSettings.openAppDetails(this@MainActivity) }) { Text("Настройки", color = kc.green) }
                 },
                 dismissButton = { TextButton(onClick = { cameraRefused = false }) { Text("Отмена", color = kc.green) } },
             )
@@ -300,6 +306,7 @@ class MainActivity : ComponentActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         sharedText?.let { outState.putString(KEY_SHARED_TEXT, it) }
+        outState.putBoolean(KEY_CAMERA_REFUSED, cameraRefused)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -323,9 +330,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Adds what was copied (a key, several, or a subscription link); false when the clipboard has no text. */
-    private fun pasteClipboard(): Boolean {
-        val text = readClipboard(this) ?: return false
+    /**
+     * Adds what was copied (a key, several, or a subscription link); false
+     * when the clipboard has no text. Read off the main thread: a clip can be
+     * a file the system has to read.
+     */
+    private suspend fun pasteClipboard(): Boolean {
+        val text = withContext(Dispatchers.IO) { readClipboard(this@MainActivity) } ?: return false
         vm.import(text.take(256 * 1024))
         return true
     }
@@ -335,17 +346,6 @@ class MainActivity : ComponentActivity() {
             scanRequested = true
         } else {
             cameraPermission.launch(Manifest.permission.CAMERA)
-        }
-    }
-
-    private fun openAppSettings() {
-        try {
-            startActivity(
-                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
-        } catch (e: Exception) {
-            AppLog.w("app settings did not open", e)
         }
     }
 

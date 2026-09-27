@@ -31,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -67,6 +68,7 @@ import com.klausms.vpn.ui.components.tap
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
 import com.klausms.vpn.util.formatBytes
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -96,7 +98,7 @@ fun LazyListScope.serverSections(
     onRename: (StoredProfile) -> Unit,
     onAdd: () -> Unit,
     /** Imports what is in the clipboard; false when it holds no text. */
-    onPaste: () -> Boolean = { false },
+    onPaste: suspend () -> Boolean = { false },
     /** Opens the QR scanner; null without a camera. */
     onScan: (() -> Unit)? = null,
 ) {
@@ -182,8 +184,9 @@ private fun ServersTitle(showPingAll: Boolean, onPingAll: () -> Unit) {
  * goes in with one tap, or from a QR code; typing is the last resort.
  */
 @Composable
-private fun EmptyServers(onAdd: () -> Unit, onPaste: () -> Boolean, onScan: (() -> Unit)?) {
+private fun EmptyServers(onAdd: () -> Unit, onPaste: suspend () -> Boolean, onScan: (() -> Unit)?) {
     var clipboardEmpty by rememberSaveable { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     Column(
         Modifier
             .padding(horizontal = 20.dp, vertical = 8.dp)
@@ -206,7 +209,7 @@ private fun EmptyServers(onAdd: () -> Unit, onPaste: () -> Boolean, onScan: (() 
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(16.dp))
-        PrimaryButton("Вставить из буфера", onClick = { clipboardEmpty = !onPaste() }, icon = R.drawable.ic_clipboard_ios)
+        PrimaryButton("Вставить из буфера", onClick = { scope.launch { clipboardEmpty = !onPaste() } }, icon = R.drawable.ic_clipboard_ios)
         if (clipboardEmpty) {
             Text(
                 "В буфере обмена нет текста: сначала скопируйте ключ или ссылку",
