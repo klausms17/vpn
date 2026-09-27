@@ -108,6 +108,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         appScope,
         VpnTunnelCommands(app),
         isUp = { isTunnelUp },
+        isFresh = { vpn.fresh.value },
         awaitSaves = repo::awaitSaves,
     )
 

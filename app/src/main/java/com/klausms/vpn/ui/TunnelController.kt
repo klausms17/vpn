@@ -41,12 +41,16 @@ internal class VpnTunnelCommands(private val context: Context) : TunnelCommands 
  * called from any thread. [scope] must run on the main thread.
  *
  * @param isUp whether the tunnel runs or is starting, as last reported.
+ * @param isFresh whether that report is the VPN process's current one
+ *   ([VpnClient.fresh]): after the app left the screen it is not, and the
+ *   tile or the widget may have started the tunnel since.
  * @param awaitSaves returns once the settings saves started before it are done.
  */
 internal class TunnelController(
     private val scope: CoroutineScope,
     private val commands: TunnelCommands,
     private val isUp: () -> Boolean,
+    private val isFresh: () -> Boolean,
     private val awaitSaves: suspend () -> Unit,
 ) {
     private var reconnectJob: Job? = null
@@ -74,24 +78,25 @@ internal class TunnelController(
     /**
      * The user picked server [id] ([up]: the tunnel was running or starting).
      * A running tunnel moves to it now; otherwise the next [connect] says
-     * that it was picked by hand.
+     * that it was picked by hand. With a status that is not current, both.
      */
     fun picked(id: String, up: Boolean) {
-        if (up) {
+        if (up || !isFresh()) {
             // Also brings a settings change still waiting out its pause.
             reconnectJob?.cancel()
             send(picked = true)
-        } else {
-            pickedWhileOff = id
         }
+        if (!up) pickedWhileOff = id
     }
 
     /**
-     * Re-applies server/settings to a running tunnel (debounced). In the app
-     * scope: leaving the app during the pause must not lose the change.
+     * Re-applies server/settings to a running tunnel (debounced), also to
+     * one a status that is not current shows as off: the service drops a
+     * reconnect for a tunnel that should not run. In the app scope: leaving
+     * the app during the pause must not lose the change.
      */
     fun reconnectIfRunning(delayMs: Long = 0) {
-        if (!isUp()) return
+        if (!isUp() && isFresh()) return
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
             delay(delayMs)

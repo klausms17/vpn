@@ -31,9 +31,10 @@ class TunnelControllerTest {
 
     private val commands = RecordingCommands()
     private var up = true
+    private var fresh = true
 
     private fun TestScope.controller() =
-        TunnelController(backgroundScope, commands, isUp = { up }, awaitSaves = {})
+        TunnelController(backgroundScope, commands, isUp = { up }, isFresh = { fresh }, awaitSaves = {})
 
     @Test
     fun changesInQuickSuccessionReconnectOnceAfterTheLastPause() = runTest {
@@ -126,6 +127,23 @@ class TunnelControllerTest {
         advanceTimeBy(10_000)
         tunnel.flushPending()
         assertEquals(emptyList<String>(), commands.sent)
+    }
+
+    @Test
+    fun aTunnelAnOldStatusShowsAsOffGetsTheChangeAndThePickAnyway() = runTest {
+        // The app left the screen: the tile may have started the tunnel since.
+        up = false
+        fresh = false
+        val tunnel = controller()
+        tunnel.reconnectIfRunning()
+        runCurrent()
+        tunnel.picked("a", up = false)
+        // It was off after all (the service dropped both): the connect still says it was picked.
+        tunnel.connect("a")
+        assertEquals(
+            listOf("reconnect(picked=false)", "reconnect(picked=true)", "connect(picked=true)"),
+            commands.sent,
+        )
     }
 
     @Test
