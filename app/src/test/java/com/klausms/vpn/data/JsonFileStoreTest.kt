@@ -3,6 +3,7 @@ package com.klausms.vpn.data
 import kotlinx.serialization.Serializable
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -18,8 +19,12 @@ class JsonFileStoreTest {
     private val dir: File = Files.createTempDirectory("store").toFile()
     private val file = File(dir, "counter.json")
 
+    private val logged = mutableListOf<String>()
+
     // A new store per call, as Stores does: the lock must not depend on the instance.
-    private fun store() = JsonFileStore(file, Counter.serializer()) { Counter() }
+    private fun store() = JsonFileStore(file, Counter.serializer(), log = { logged += it }) { Counter() }
+
+    private fun corruptCopies() = dir.list()!!.filter { it.startsWith("counter.json.corrupt-") }
 
     @After
     fun cleanUp() {
@@ -54,17 +59,51 @@ class JsonFileStoreTest {
     }
 
     @Test
-    fun brokenFileIsNeverOverwritten() {
-        file.writeText("{not json")
+    fun brokenFileIsSetAsideAndSavingWorksAgain() {
+        val broken = "{\"value\": \"vless://secret-key@1.2.3.4\""
+        file.writeText(broken)
+        // The lenient read gives the app something to show; the strict one refuses.
+        assertEquals(Counter(), store().read())
         try {
-            store().update { it.copy(value = 5) }
-            fail("update must refuse to replace a file it cannot read")
-        } catch (e: IllegalStateException) {
+            store().readStrict()
+            fail("readStrict must refuse a file it cannot decode")
+        } catch (e: CorruptFileException) {
             assertTrue(e.message!!.contains("counter.json"))
         }
-        assertEquals("{not json", file.readText())
-        // The lenient read still gives the app something to show.
-        assertEquals(Counter(), store().read())
+        // Not stuck: the change starts from the default, the broken file is kept untouched.
+        assertEquals(Counter(value = 5), store().update { it.copy(value = 5) })
+        assertEquals(Counter(value = 5), store().readStrict())
+        assertEquals(broken, File(dir, corruptCopies().single()).readText())
+        // Logged, but never the content: it holds the user's keys.
+        assertFalse(logged.single().contains("secret"))
+        assertFalse(logged.single().contains("1.2.3.4"))
+    }
+
+    @Test
+    fun onlyTheFirstBrokenFilesAreKept() {
+        repeat(5) { i ->
+            file.writeText("broken $i")
+            store().update { it.copy(value = i) }
+            Thread.sleep(2) // the copies are named by the millisecond
+        }
+        assertEquals(3, corruptCopies().size)
+        // The first ones are the likeliest to hold the user's own keys.
+        assertEquals(setOf("broken 0", "broken 1", "broken 2"), corruptCopies().map { File(dir, it).readText() }.toSet())
+        assertEquals(Counter(value = 4), store().read())
+    }
+
+    @Test
+    fun unreadableFileIsLeftAlone() {
+        // Not a decoding problem but an I/O error: refuse and change nothing.
+        file.mkdirs()
+        try {
+            store().update { it.copy(value = 5) }
+            fail("update must refuse a file it cannot read")
+        } catch (e: Exception) {
+            assertFalse(e is CorruptFileException)
+        }
+        assertTrue(file.isDirectory)
+        assertTrue(corruptCopies().isEmpty())
     }
 
     @Test
