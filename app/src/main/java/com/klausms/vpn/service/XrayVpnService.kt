@@ -6,9 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.net.ConnectivityManager
 import android.net.Network
-import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
@@ -154,6 +152,8 @@ class XrayVpnService : VpnService() {
 
     private lateinit var profiles: ProfilesAccess
 
+    private lateinit var netInfo: SystemNetworkInfo
+
     private lateinit var publisher: StatusPublisher
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -218,7 +218,7 @@ class XrayVpnService : VpnService() {
     // (elapsedRealtime). Per network, so a phone going back and forth between
     // Wi-Fi and mobile data does not download on every change: mobile data
     // keeps its network across Wi-Fi gaps. Guarded by itself.
-    private val bulkFine = HashMap<Network?, Long>()
+    private val bulkFine = HashMap<NetId?, Long>()
 
     // elapsedRealtime of the last check started because Android's view of the network changed.
     @Volatile
@@ -231,7 +231,7 @@ class XrayVpnService : VpnService() {
     // Per network: when a search there last found nothing, and the notice it
     // showed. Another network may reach servers this one could not, and the
     // same network back (Wi-Fi flapping) remembers. Guarded by itself.
-    private val fruitless = HashMap<Network?, Pair<Long, String>>()
+    private val fruitless = HashMap<NetId?, Pair<Long, String>>()
 
     // One probe at a time: a probe's temporary core holds megabytes until it
     // ends, also when its result is no longer wanted.
@@ -310,6 +310,7 @@ class XrayVpnService : VpnService() {
         coreLog = XrayLog.file(this)
         direct = XrayDirectNet(this)
         profiles = DiskProfiles(this)
+        netInfo = SystemNetworkInfo(this)
         publisher = StatusPublisher(this, scope, epoch, clock) { lockdownConflict }
         Notifications.ensureChannels(this)
     }
@@ -949,7 +950,7 @@ class XrayVpnService : VpnService() {
         // It answers, but some operators freeze a foreign server's
         // connections after the first ~16 KB: pages and video then hang
         // while short answers still get through.
-        val network = activeNetwork()
+        val network = netInfo.active()
         if (bulkDue(reason, network) && stalls(c, network)) {
             if (!epoch.isCurrent(e)) return
             AppLog.w("downloads through the server stall (${reason.name.lowercase()})")
@@ -973,7 +974,7 @@ class XrayVpnService : VpnService() {
      * showed downloads working on [network] in the last half hour (a new
      * network, or a stall seen before).
      */
-    private fun bulkDue(reason: Reason, network: Network?): Boolean {
+    private fun bulkDue(reason: Reason, network: NetId?): Boolean {
         if (reason == Reason.START) return true
         val now = clock.elapsed()
         return synchronized(bulkFine) {
@@ -988,7 +989,7 @@ class XrayVpnService : VpnService() {
      * or cannot be reached from the server) proves nothing and counts as
      * fine. No app name is sent. Blocking.
      */
-    private fun stalls(c: CoreHandle, network: Network?): Boolean {
+    private fun stalls(c: CoreHandle, network: NetId?): Boolean {
         repeat(2) {
             val stalled = try {
                 c.fetchThroughTunnel(BULK_URL, "", BULK_HEADERS, BULK_TIMEOUT_MS)
@@ -1014,13 +1015,13 @@ class XrayVpnService : VpnService() {
      * for good when nothing answers: nothing ever leaks outside the VPN.
      */
     private suspend fun runFailover(e: Long, c: CoreHandle, failed: StoredProfile, stalled: Boolean) {
-        val caps = underlying()
-        if (!hasNetwork(caps)) {
+        val net = netInfo.state()
+        if (net?.hasNetwork != true) {
             AppLog.i("no network, not looking for another server")
             return
         }
         // Hotel or metro Wi-Fi before its login page: no server can answer yet.
-        if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL) == true) {
+        if (net.captive) {
             AppLog.i("the Wi-Fi asks to sign in, not looking for another server")
             publisher.show(Failover.NOTICE_SIGN_IN, e)
             return
@@ -1029,7 +1030,7 @@ class XrayVpnService : VpnService() {
             publisher.show(Failover.NOTICE_PICK_ANOTHER, e)
             return
         }
-        val network = activeNetwork()
+        val network = netInfo.active()
         // Nothing answered on this network moments ago: say so again, search later.
         val last = fruitlessNotice(network)
         if (last != null) {
@@ -1131,7 +1132,7 @@ class XrayVpnService : VpnService() {
      * the whitelist when it is), and only with [report] (false: [failed]
      * itself answered a new connection).
      */
-    private suspend fun nothingAnswers(e: Long, failed: StoredProfile, state: ProfilesState, probed: Int, network: Network?, report: Boolean) {
+    private suspend fun nothingAnswers(e: Long, failed: StoredProfile, state: ProfilesState, probed: Int, network: NetId?, report: Boolean) {
         val online = direct.opens(DirectNet.DIRECT_URL)
         val whitelist = online && onMobileData() && !direct.opens(XrayCore.TEST_URL)
         if (!epoch.isCurrent(e)) return
@@ -1151,13 +1152,13 @@ class XrayVpnService : VpnService() {
     }
 
     /** The notice of a search that found nothing on [network] in the last minutes, or null. */
-    private fun fruitlessNotice(network: Network?): String? = synchronized(fruitless) {
+    private fun fruitlessNotice(network: NetId?): String? = synchronized(fruitless) {
         val now = clock.elapsed()
         fruitless.entries.removeIf { now - it.value.first >= FRUITLESS_RETRY_MS || it.value.first > now }
         fruitless[network]?.second
     }
 
-    private fun markFruitless(network: Network?, notice: String) {
+    private fun markFruitless(network: NetId?, notice: String) {
         synchronized(fruitless) { fruitless[network] = clock.elapsed() to notice }
     }
 
@@ -1445,23 +1446,5 @@ class XrayVpnService : VpnService() {
 
     // ---------------------------------------------------------------- network
 
-    private fun activeNetwork(): Network? = try {
-        getSystemService(ConnectivityManager::class.java)?.activeNetwork
-    } catch (_: Exception) {
-        null
-    }
-
-    /** The network under the tunnel (this app's own traffic never enters it). */
-    private fun underlying(): NetworkCapabilities? = try {
-        val cm = getSystemService(ConnectivityManager::class.java)
-        cm?.activeNetwork?.let { cm.getNetworkCapabilities(it) }
-    } catch (_: Exception) {
-        null
-    }
-
-    /** A network, and not paused for a moment (mobile data in a lift or a tunnel: the same one comes back). */
-    private fun hasNetwork(caps: NetworkCapabilities?): Boolean = caps != null &&
-        (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED))
-
-    private fun onMobileData(): Boolean = underlying()?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true
+    private fun onMobileData(): Boolean = netInfo.state()?.cellular == true
 }
