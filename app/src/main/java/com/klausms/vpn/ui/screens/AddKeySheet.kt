@@ -52,8 +52,8 @@ import kotlinx.coroutines.withContext
 
 /**
  * Pasted into the field at most: keys are short, and laying out a huge
- * text (a copied log) freezes a small phone. A big subscription body goes
- * through «Вставить из буфера» on the main screen instead.
+ * text (a copied log) freezes a small phone. A longer clip is added whole
+ * without being shown, as the main screen's «Вставить из буфера» does.
  */
 private const val FIELD_PASTE_MAX = 16 * 1024
 
@@ -76,7 +76,6 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit, onScan: (() -> U
     // Survives a rotation; a huge paste is not kept (instance state is small).
     var text by rememberSaveable(stateSaver = CappedText) { mutableStateOf("") }
     var clipboardEmpty by rememberSaveable { mutableStateOf(false) }
-    var clipboardCut by rememberSaveable { mutableStateOf(false) }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -135,10 +134,7 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit, onScan: (() -> U
                                     .size(22.dp)
                                     .clip(CircleShape)
                                     .background(kc.tertiary)
-                                    .clickable(onClickLabel = "Очистить", role = Role.Button) {
-                                        text = ""
-                                        clipboardCut = false
-                                    }
+                                    .clickable(onClickLabel = "Очистить", role = Role.Button) { text = "" }
                                     .semantics { contentDescription = "Очистить" },
                                 contentAlignment = Alignment.Center,
                             ) {
@@ -149,13 +145,9 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit, onScan: (() -> U
                 },
             )
             Text(
-                when {
-                    clipboardEmpty -> "В буфере обмена нет текста"
-                    clipboardCut -> "Текст очень длинный, вставлено только начало"
-                    else -> "Можно вставить несколько ключей, каждый с новой строки"
-                },
+                if (clipboardEmpty) "В буфере обмена нет текста" else "Можно вставить несколько ключей, каждый с новой строки",
                 style = IosType.footnote,
-                color = if (clipboardEmpty || clipboardCut) kc.orange else kc.secondary,
+                color = if (clipboardEmpty) kc.orange else kc.secondary,
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
             )
             Spacer(Modifier.height(20.dp))
@@ -165,12 +157,16 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit, onScan: (() -> U
                 // Off the main thread: a clip can be a file the system has to read.
                 scope.launch {
                     val clip = withContext(Dispatchers.IO) { readClipboard(context) }
-                    if (clip == null) {
-                        clipboardEmpty = true
-                    } else {
-                        clipboardEmpty = false
-                        clipboardCut = clip.length > FIELD_PASTE_MAX
-                        text = if (clipboardCut) cutAtLine(clip, FIELD_PASTE_MAX) else clip
+                    when {
+                        clip == null -> clipboardEmpty = true
+                        // A subscription body with many servers, or a copied
+                        // log: too long to show, and cutting it would lose
+                        // servers. Added whole; the toast says what was found.
+                        clip.length > FIELD_PASTE_MAX -> close { onAdd(clip.take(256 * 1024)) }
+                        else -> {
+                            clipboardEmpty = false
+                            text = clip
+                        }
                     }
                 }
             }
@@ -194,13 +190,6 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit, onScan: (() -> U
             )
         }
     }
-}
-
-/** The start of [text], at most [max] chars, ending at a line break when there is one (no half key). */
-private fun cutAtLine(text: String, max: Int): String {
-    val head = text.take(max)
-    val lastBreak = head.lastIndexOf('\n')
-    return if (lastBreak > 0) head.take(lastBreak) else head
 }
 
 private val CappedText = Saver<String, String>(
