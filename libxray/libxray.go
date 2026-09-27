@@ -405,15 +405,16 @@ func (c *Controller) ProbeOutbounds(candidatesJSON string, url string, timeoutMs
 }
 
 // probeCandidate namespaces one candidate's outbounds and checks each of
-// them the way the core will, so a single bad candidate is reported as -1
-// instead of failing the whole batch.
-func probeCandidate(raw json.RawMessage, prefix string) ([]any, string, error) {
+// them the way the core will, so a single bad candidate, even one that
+// panics a parser, is reported as -1 instead of failing the whole batch.
+func probeCandidate(raw json.RawMessage, prefix string) (obs []any, root string, err error) {
+	defer recoverInto(&err)
+
 	var outbounds []json.RawMessage
 	if err := json.Unmarshal(raw, &outbounds); err != nil {
 		return nil, "", err
 	}
-	obs, root, err := namespaceOutbounds(outbounds, prefix)
-	if err != nil {
+	if obs, root, err = namespaceOutbounds(outbounds, prefix); err != nil {
 		return nil, "", err
 	}
 	for _, ob := range obs {
@@ -547,8 +548,10 @@ func releaseMemory() {
 	debug.FreeOSMemory()
 }
 
-// recoverInto converts a panic inside Xray into an ordinary error so a bad
-// config can never take the whole VPN process down during start/stop.
+// recoverInto turns a panic into an ordinary error. gomobile does not
+// recover panics, so one inside Xray or in a parser fed with a panel's
+// answer would take the whole app or VPN process down. Exported functions
+// that parse input or run Xray defer it.
 func recoverInto(err *error) {
 	if r := recover(); r != nil {
 		*err = fmt.Errorf("xray panic: %v", r)

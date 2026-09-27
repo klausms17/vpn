@@ -150,6 +150,7 @@ func TestProbeAndTunnelFetch(t *testing.T) {
 			`{"not":"an array"}`,                                  // 5 invalid
 			outboundsJSON(t, mustParse(t, s.trojanLink(s.portB))), // 6 B directly
 			outboundsJSON(t, badKey),                              // 7 refused by the core
+			`[null]`,                                              // 8 invalid
 		}, ",") + "]"
 		start := time.Now()
 		out, err := ctrl.ProbeOutbounds(candidates, testURL, 5000, 4)
@@ -161,7 +162,7 @@ func TestProbeAndTunnelFetch(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &res); err != nil {
 			t.Fatal(err)
 		}
-		want := []bool{true, false, true, false, false, false, true, false}
+		want := []bool{true, false, true, false, false, false, true, false, false}
 		if len(res) != len(want) {
 			t.Fatalf("got %d results for %d candidates", len(res), len(want))
 		}

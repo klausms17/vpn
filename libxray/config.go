@@ -87,7 +87,9 @@ type BuildOptions struct {
 }
 
 // BuildConfig turns BuildOptions (JSON) into a complete Xray config (JSON).
-func BuildConfig(optionsJSON string) (string, error) {
+func BuildConfig(optionsJSON string) (configJSON string, err error) {
+	defer recoverInto(&err)
+
 	var o BuildOptions
 	if err := json.Unmarshal([]byte(optionsJSON), &o); err != nil {
 		return "", fmt.Errorf("bad options: %w", err)
@@ -102,7 +104,9 @@ func BuildConfig(optionsJSON string) (string, error) {
 
 // BuildProxyOnlyConfig makes the minimal config used for delay tests and
 // downloads through a profile: just the profile outbounds, no routing.
-func BuildProxyOnlyConfig(outboundsJSON string) (string, error) {
+func BuildProxyOnlyConfig(outboundsJSON string) (configJSON string, err error) {
+	defer recoverInto(&err)
+
 	var outbounds []json.RawMessage
 	if err := json.Unmarshal([]byte(outboundsJSON), &outbounds); err != nil {
 		return "", fmt.Errorf("bad outbounds: %w", err)
@@ -128,6 +132,9 @@ func prepareOutbounds(outbounds []json.RawMessage) ([]any, error) {
 		var ob map[string]any
 		if err := json.Unmarshal(raw, &ob); err != nil {
 			return nil, fmt.Errorf("outbound %d: %w", i, err)
+		}
+		if ob == nil {
+			return nil, fmt.Errorf("outbound %d is not an object", i)
 		}
 		sanitizeOutbound(ob)
 		for k, settings := range ob {

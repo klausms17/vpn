@@ -37,7 +37,9 @@ type Profile struct {
 
 // ParseLink parses one share link (vless://, vmess://, trojan://, ss://,
 // hysteria2:// / hy2://) and returns the Profile as JSON.
-func ParseLink(link string) (string, error) {
+func ParseLink(link string) (profileJSON string, err error) {
+	defer recoverInto(&err)
+
 	p, err := parseLink(link)
 	if err != nil {
 		return "", err
@@ -923,7 +925,9 @@ func decodeBase64Loose(s string) ([]byte, error) {
 // PinCertificate returns profileJSON with pinnedPeerCertSha256 set on the
 // proxy outbound's TLS settings. Used after FetchCertSha256 for links that
 // asked for "allowInsecure".
-func PinCertificate(profileJSON string, sha256Hex string) (string, error) {
+func PinCertificate(profileJSON string, sha256Hex string) (pinnedJSON string, err error) {
+	defer recoverInto(&err)
+
 	var p Profile
 	if err := json.Unmarshal([]byte(profileJSON), &p); err != nil {
 		return "", err

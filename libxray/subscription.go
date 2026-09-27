@@ -31,7 +31,9 @@ var errEncrypted = errf("подписка зашифрована для друг
 // ParseSubscription understands the formats subscription panels serve:
 // base64 list of links, plain list of links, and Xray JSON configs (a single
 // config or an array of them, as served to Happ/v2rayNG).
-func ParseSubscription(body []byte) (string, error) {
+func ParseSubscription(body []byte) (resultJSON string, err error) {
+	defer recoverInto(&err)
+
 	res, err := parseSubscription(body)
 	if err != nil {
 		return "", err
