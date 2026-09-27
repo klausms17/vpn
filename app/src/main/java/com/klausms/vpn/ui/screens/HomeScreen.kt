@@ -1,6 +1,5 @@
 package com.klausms.vpn.ui.screens
 
-import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import androidx.compose.animation.AnimatedVisibility
@@ -324,12 +323,12 @@ private fun UpdateCard(update: AppUpdate?, onUpdate: (AppUpdate) -> Unit, onLate
     }
 }
 
-/** Opens [url] in the browser; false when the phone has none. */
+/** Opens [url] in the browser; false when it cannot, usually because the phone has none. */
 private fun openInBrowser(context: Context, url: String): Boolean = try {
     context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri()).addCategory(Intent.CATEGORY_BROWSABLE))
     true
-} catch (e: ActivityNotFoundException) {
-    AppLog.w("nothing opens the update link", e)
+} catch (e: Exception) {
+    AppLog.w("the update link did not open", e)
     false
 }
 

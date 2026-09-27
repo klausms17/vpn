@@ -22,11 +22,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -47,6 +44,7 @@ import androidx.lifecycle.lifecycleScope
 import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.ui.components.BusyPill
 import com.klausms.vpn.ui.components.GlassToast
+import com.klausms.vpn.ui.components.IosAlert
 import com.klausms.vpn.ui.screens.AddKeySheet
 import com.klausms.vpn.ui.screens.AppsScreen
 import com.klausms.vpn.ui.screens.HomeScreen
@@ -57,7 +55,6 @@ import com.klausms.vpn.ui.screens.SettingsScreen
 import com.klausms.vpn.ui.screens.readClipboard
 import com.klausms.vpn.util.AppLog
 import com.klausms.vpn.util.PhoneSettings
-import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.KlausTheme
 import com.klausms.vpn.ui.theme.kc
 import kotlinx.coroutines.Dispatchers
@@ -218,46 +215,28 @@ class MainActivity : ComponentActivity() {
             )
         }
         if (cameraRefused) {
-            AlertDialog(
-                onDismissRequest = { cameraRefused = false },
-                containerColor = kc.card,
-                title = { Text("Нет доступа к камере", style = IosType.headline, color = kc.label) },
-                text = {
-                    Text(
-                        "Чтобы сканировать QR-коды, разрешите приложению камеру в настройках. Или скопируйте ключ и нажмите «Вставить из буфера».",
-                        style = IosType.subhead,
-                        color = kc.secondary,
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = { cameraRefused = false; PhoneSettings.openAppDetails(this@MainActivity) }) { Text("Настройки", color = kc.green) }
-                },
-                dismissButton = { TextButton(onClick = { cameraRefused = false }) { Text("Отмена", color = kc.green) } },
+            IosAlert(
+                title = "Нет доступа к камере",
+                text = "Чтобы сканировать QR-коды, разрешите приложению камеру в настройках. Или скопируйте ключ и нажмите «Вставить из буфера».",
+                onDismiss = { cameraRefused = false },
+                confirm = "Настройки",
+                onConfirm = { cameraRefused = false; PhoneSettings.openAppDetails(this@MainActivity) },
             )
         }
         // Shared keys and "add" links are confirmed on whatever screen is open.
         sharedText?.let { text ->
             // Any web page can open a link: say where the subscription comes from.
             val host = ImportText.subscriptionUrl(text)?.let(DeepLink::urlHost)
-            AlertDialog(
-                onDismissRequest = { sharedText = null },
-                containerColor = kc.card,
-                title = { Text("Добавить ключи или подписку?", style = IosType.headline, color = kc.label) },
-                text = {
-                    Text(
-                        if (host != null) {
-                            "Подписка с адреса $host. Добавляйте только ссылки от тех, кому доверяете."
-                        } else {
-                            "Приложение получило текст. Если в нём есть ключи или ссылка на подписку, они будут добавлены."
-                        },
-                        style = IosType.subhead,
-                        color = kc.secondary,
-                    )
+            IosAlert(
+                title = "Добавить ключи или подписку?",
+                text = if (host != null) {
+                    "Подписка с адреса $host. Добавляйте только ссылки от тех, кому доверяете."
+                } else {
+                    "Приложение получило текст. Если в нём есть ключи или ссылка на подписку, они будут добавлены."
                 },
-                confirmButton = {
-                    TextButton(onClick = { vm.import(text); sharedText = null }) { Text("Добавить", color = kc.green) }
-                },
-                dismissButton = { TextButton(onClick = { sharedText = null }) { Text("Отмена", color = kc.green) } },
+                onDismiss = { sharedText = null },
+                confirm = "Добавить",
+                onConfirm = { vm.import(text); sharedText = null },
             )
         }
     }
@@ -272,34 +251,24 @@ class MainActivity : ComponentActivity() {
     private fun BackgroundTip(onSetUp: () -> Unit, onLater: () -> Unit) {
         val context = LocalContext.current
         val oem = remember { PhoneSettings.oem() }
-        AlertDialog(
-            onDismissRequest = onLater,
-            containerColor = kc.card,
-            title = { Text("Чтобы VPN не выключался", style = IosType.headline, color = kc.label) },
-            text = {
-                Text(
-                    if (oem != null) {
-                        "Телефон может закрывать приложения в фоне, чтобы беречь заряд, и VPN выключится. Разрешите Klaus VPN работу в фоне и автозапуск."
-                    } else {
-                        "Телефон может закрывать приложения в фоне, чтобы беречь заряд, и VPN выключится. Разрешите Klaus VPN работу в фоне."
-                    },
-                    style = IosType.subhead,
-                    color = kc.secondary,
-                )
+        IosAlert(
+            title = "Чтобы VPN не выключался",
+            text = if (oem != null) {
+                "Телефон может закрывать приложения в фоне, чтобы беречь заряд, и VPN выключится. Разрешите Klaus VPN работу в фоне и автозапуск."
+            } else {
+                "Телефон может закрывать приложения в фоне, чтобы беречь заряд, и VPN выключится. Разрешите Klaus VPN работу в фоне."
             },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        if (oem != null) {
-                            onSetUp()
-                        } else {
-                            onLater()
-                            PhoneSettings.openBatterySettings(context)
-                        }
-                    },
-                ) { Text(if (oem != null) "Настроить" else "Разрешить", color = kc.green) }
+            onDismiss = onLater,
+            confirm = if (oem != null) "Настроить" else "Разрешить",
+            onConfirm = {
+                if (oem != null) {
+                    onSetUp()
+                } else {
+                    onLater()
+                    PhoneSettings.openBatterySettings(context)
+                }
             },
-            dismissButton = { TextButton(onClick = onLater) { Text("Позже", color = kc.green) } },
+            dismiss = "Позже",
         )
     }
 

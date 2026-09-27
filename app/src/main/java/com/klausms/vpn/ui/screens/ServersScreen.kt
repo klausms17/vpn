@@ -22,11 +22,9 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -54,6 +52,7 @@ import com.klausms.vpn.data.Subscription
 import com.klausms.vpn.ui.PingResult
 import com.klausms.vpn.ui.components.CircleFlag
 import com.klausms.vpn.ui.components.Countries
+import com.klausms.vpn.ui.components.IosAlert
 import com.klausms.vpn.ui.components.IosIcon
 import com.klausms.vpn.ui.components.PrimaryButton
 import com.klausms.vpn.ui.components.RowDivider
@@ -302,12 +301,12 @@ private fun ServerRow(
         }
     }
     if (confirmDelete) {
-        AlertDialog(
-            onDismissRequest = { confirmDelete = false },
-            containerColor = kc.card,
-            title = { Text("Удалить «${Countries.stripFlags(profile.name)}»?", style = IosType.headline, color = kc.label) },
-            confirmButton = { TextButton(onClick = { confirmDelete = false; actions.delete(profile.id) }) { Text("Удалить", color = kc.red) } },
-            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Отмена", color = kc.green) } },
+        IosAlert(
+            title = "Удалить «${Countries.stripFlags(profile.name)}»?",
+            onDismiss = { confirmDelete = false },
+            confirm = "Удалить",
+            onConfirm = { confirmDelete = false; actions.delete(profile.id) },
+            destructive = true,
         )
     }
 }
@@ -422,12 +421,12 @@ private fun SubscriptionHeader(sub: Subscription, onRefresh: () -> Unit, onDelet
         }
     }
     if (confirmDelete) {
-        AlertDialog(
-            onDismissRequest = { confirmDelete = false },
-            containerColor = kc.card,
-            title = { Text("Удалить подписку «${sub.name}» со всеми серверами?", style = IosType.headline, color = kc.label) },
-            confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Удалить", color = kc.red) } },
-            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Отмена", color = kc.green) } },
+        IosAlert(
+            title = "Удалить подписку «${sub.name}» со всеми серверами?",
+            onDismiss = { confirmDelete = false },
+            confirm = "Удалить",
+            onConfirm = { confirmDelete = false; onDelete() },
+            destructive = true,
         )
     }
 }
@@ -485,11 +484,13 @@ private fun parseUserInfo(raw: String?): Usage? {
 @Composable
 internal fun RenameDialog(current: String, onDismiss: () -> Unit, onRename: (String) -> Unit) {
     var text by rememberSaveable { mutableStateOf(current) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = kc.card,
-        title = { Text("Название сервера", style = IosType.headline, color = kc.label) },
-        text = {
+    IosAlert(
+        title = "Название сервера",
+        onDismiss = onDismiss,
+        confirm = "Готово",
+        onConfirm = { onRename(text.trim()) },
+        confirmEnabled = text.isNotBlank(),
+        content = {
             BasicTextField(
                 value = text,
                 onValueChange = { text = it.take(80) },
@@ -503,9 +504,5 @@ internal fun RenameDialog(current: String, onDismiss: () -> Unit, onRename: (Str
                     .padding(horizontal = 12.dp, vertical = 11.dp),
             )
         },
-        confirmButton = {
-            TextButton(onClick = { onRename(text.trim()) }, enabled = text.isNotBlank()) { Text("Готово", color = kc.green) }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена", color = kc.green) } },
     )
 }
