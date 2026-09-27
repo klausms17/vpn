@@ -6,9 +6,9 @@ import android.os.IBinder
 import androidx.core.app.ServiceCompat
 import com.klausms.vpn.core.CoreHandle
 import com.klausms.vpn.core.DirectNet
-import com.klausms.vpn.core.XrayCore
 import com.klausms.vpn.core.XrayCoreHandle
 import com.klausms.vpn.core.XrayDirectNet
+import com.klausms.vpn.core.onlyWhitelistOpens
 import com.klausms.vpn.data.DiskProfiles
 import com.klausms.vpn.data.ProfilesAccess
 import com.klausms.vpn.data.ProfilesState
@@ -673,7 +673,7 @@ class XrayVpnService : VpnService() {
      */
     private suspend fun nothingAnswers(e: Long, failed: StoredProfile, state: ProfilesState, probed: Int, network: NetId?, report: Boolean) {
         val online = direct.opens(DirectNet.DIRECT_URL)
-        val whitelist = online && onMobileData() && !direct.opens(XrayCore.TEST_URL)
+        val whitelist = online && netInfo.onMobileData() && direct.onlyWhitelistOpens(russianOpens = online)
         if (!epoch.isCurrent(e)) return
         val notice = Failover.nothingAnswersNotice(online, whitelist, probed)
         if (online) {
@@ -841,7 +841,7 @@ class XrayVpnService : VpnService() {
      */
     private suspend fun pick(state: ProfilesState, failed: StoredProfile, exclude: Set<String>, tried: List<JsonArray>): List<StoredProfile> {
         val pool = Failover.pickCandidates(state, failed, exclude, tried, limit = Int.MAX_VALUE)
-        val mobile = onMobileData()
+        val mobile = netInfo.onMobileData()
         // Every one of them is probed anyway.
         if (!mobile && pool.size <= Failover.MAX_CANDIDATES) return pool
         val preferred = mobileWhitelist.listed(pool.map { Failover.host(it) }.distinct().take(WhitelistLookup.MAX_HOSTS))
@@ -861,8 +861,4 @@ class XrayVpnService : VpnService() {
             }
         }
     }
-
-    // ---------------------------------------------------------------- network
-
-    private fun onMobileData(): Boolean = netInfo.state()?.cellular == true
 }

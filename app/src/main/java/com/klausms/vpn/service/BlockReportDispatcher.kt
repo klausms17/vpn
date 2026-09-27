@@ -4,7 +4,7 @@ import android.content.Context
 import android.net.Network
 import com.klausms.vpn.core.CoreHandle
 import com.klausms.vpn.core.DirectNet
-import com.klausms.vpn.core.XrayCore
+import com.klausms.vpn.core.onlyWhitelistOpens
 import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.util.AppLog
@@ -27,7 +27,7 @@ internal class BlockReportDispatcher(
     context: Context,
     private val scope: CoroutineScope,
     private val io: CoroutineDispatcher,
-    private val netInfo: SystemNetworkInfo,
+    private val netInfo: NetworkInfo,
     private val underlying: () -> Network?,
     private val mobileWhitelist: WhitelistLookup,
     private val direct: DirectNet,
@@ -67,15 +67,13 @@ internal class BlockReportDispatcher(
      * Whether the switch from [failed] to [winner] looks like the mobile
      * operator letting through only its whitelist, not a block of [failed]:
      * on mobile data, [winner] is on the whitelist and [failed] is not, and
-     * outside the tunnel a foreign site does not open while a Russian one
-     * does (a block of [failed] alone would leave the foreign site open).
+     * only the whitelist seems to open outside the tunnel.
      */
     private suspend fun looksLikeWhitelist(failed: StoredProfile, winner: StoredProfile): Boolean {
-        if (netInfo.state()?.cellular != true) return false
+        if (!netInfo.onMobileData()) return false
         val winnerHost = Failover.host(winner)
         val failedHost = Failover.host(failed)
         val listed = mobileWhitelist.listed(listOf(winnerHost, failedHost).distinct())
-        return winnerHost in listed && failedHost !in listed &&
-            !direct.opens(XrayCore.TEST_URL) && direct.opens(DirectNet.DIRECT_URL)
+        return winnerHost in listed && failedHost !in listed && direct.onlyWhitelistOpens()
     }
 }

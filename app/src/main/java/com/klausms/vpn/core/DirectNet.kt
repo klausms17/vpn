@@ -28,6 +28,17 @@ internal interface DirectNet {
     }
 }
 
+/**
+ * Whether the network seems to let through only the mobile operator's
+ * whitelist: outside the tunnel a foreign site does not open while a
+ * Russian one does. A block of the servers alone would leave the foreign
+ * site open. Only meaningful on mobile data. Asks the foreign site first;
+ * [russianOpens] is what the caller already knows about the Russian one,
+ * which is asked last when null. Blocking.
+ */
+internal fun DirectNet.onlyWhitelistOpens(russianOpens: Boolean? = null): Boolean =
+    !opens(XrayCore.TEST_URL) && (russianOpens ?: opens(DirectNet.DIRECT_URL))
+
 /** [DirectNet] through the Go core's own HTTP client. Stateless and thread-safe. */
 internal class XrayDirectNet(context: Context) : DirectNet {
     private val appContext = context.applicationContext
