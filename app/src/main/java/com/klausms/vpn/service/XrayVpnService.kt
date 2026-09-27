@@ -28,9 +28,17 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   costs no extra battery.
  * - Whether traffic really gets through is checked on events (connect,
  *   network change, Android losing or regaining internet on the network,
- *   unlock, app opened) and every few minutes while the screen is on; a
- *   server that stopped answering is replaced by one that answers (see
- *   [Failover]).
+ *   unlock, app opened) and every few minutes while the screen is on (see
+ *   [HealthMonitor]); a server that stopped answering is replaced by one
+ *   that answers (see [FailoverSearch] and [ServerSwitcher]).
+ *
+ * This class is the Android side and the wiring. It builds the
+ * collaborators in [onCreate], turns start commands into starts and stops
+ * of the [TunnelEngine], and passes on what the network watcher, the
+ * engine and the app report. It owns the one coroutine scope they all
+ * share and which command is the newest. Threading: the lifecycle calls
+ * run on the main thread, the binder's on binder threads, and the blocks
+ * it submits on the engine's worker.
  */
 class XrayVpnService : VpnService() {
 

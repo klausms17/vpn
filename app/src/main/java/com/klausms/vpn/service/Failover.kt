@@ -8,8 +8,8 @@ import java.util.Locale
 
 /**
  * Rules of the automatic switch to another server when the running one
- * stops passing traffic. Pure logic: XrayVpnService does the checking,
- * probing and switching.
+ * stops passing traffic. Pure logic and stateless: [HealthMonitor] checks,
+ * [FailoverSearch] probes and [ServerSwitcher] switches.
  */
 internal object Failover {
     /** Servers probed at most per round, and at the same time. */

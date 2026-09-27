@@ -19,7 +19,7 @@ internal class UpdaterSubscriptionSource(context: Context, profiles: ProfilesAcc
     private val updater = SubscriptionUpdater(context, profiles)
 
     override suspend fun refresh(subId: String, through: CoreHandle?, runningId: String?): Refreshed = try {
-        val downloader = through?.downloader() ?: Downloader { url, headers -> XrayCore.fetch(url, null, headers, DIRECT_TIMEOUT_MS) }
+        val downloader = through?.downloader() ?: Downloader { url, headers -> XrayCore.fetch(url, null, headers, REFRESH_TIMEOUT_MS) }
         val outcome = updater.refresh(subId, downloader, runningId = runningId)
         Refreshed(applied = outcome?.applied ?: false, runningChanged = outcome?.runningChanged == true)
     } catch (e: Exception) {
@@ -29,6 +29,6 @@ internal class UpdaterSubscriptionSource(context: Context, profiles: ProfilesAcc
     }
 
     private companion object {
-        const val DIRECT_TIMEOUT_MS = 10_000
+        const val REFRESH_TIMEOUT_MS = 10_000
     }
 }
