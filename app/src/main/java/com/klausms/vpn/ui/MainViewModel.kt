@@ -17,7 +17,11 @@ import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.SubscriptionUpdater
 import com.klausms.vpn.data.pinWhereNeeded
-import com.klausms.vpn.data.toStored
+import com.klausms.vpn.data.renamed
+import com.klausms.vpn.data.withNewKeys
+import com.klausms.vpn.data.withSelected
+import com.klausms.vpn.data.withoutProfile
+import com.klausms.vpn.data.withoutSubscription
 import com.klausms.vpn.service.VpnCommands
 import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.util.AppLog
@@ -94,18 +98,6 @@ internal class OneAtATime {
  * over the same files meanwhile.
  */
 private val geoUpdate = OneAtATime()
-
-/** [id] selected, or unchanged when that server is gone (the VPN process replaced the list meanwhile). */
-internal fun ProfilesState.withSelected(id: String): ProfilesState =
-    if (selectedId != id && profiles.any { it.id == id }) copy(selectedId = id) else this
-
-/** [added] appended; the selection is kept if it still names a server, else the first new one. */
-internal fun ProfilesState.withAdded(added: List<StoredProfile>): ProfilesState =
-    if (added.isEmpty()) this else copy(profiles = profiles + added, selectedId = selected?.id ?: added.first().id)
-
-/** Keys not saved yet, each once (a message may repeat a key, e.g. in a quote). */
-internal fun freshKeys(ready: List<ParsedProfile>, saved: Set<String>): List<ParsedProfile> =
-    ready.filter { it.link == null || it.link !in saved }.distinctBy { it.link ?: it.outbounds.toString() }
 
 /**
  * Whether an update check may run now, [lastAttempt] being the start of the
@@ -417,15 +409,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun rename(id: String, name: String) = viewModelScope.launch(saveErrors) {
         val clean = name.trim().take(80)
         if (clean.isEmpty()) return@launch
-        repo.updateProfiles { s -> s.copy(profiles = s.profiles.map { if (it.id == id) it.copy(name = clean) else it }) }
+        repo.updateProfiles { s -> s.renamed(id, clean) }
     }
 
     fun delete(id: String) = appScope.launch(saveErrors) {
         val wasSelected = profiles.value.selectedId == id
-        val next = repo.updateProfiles { s ->
-            val rest = s.profiles.filterNot { it.id == id }
-            s.copy(profiles = rest, selectedId = if (s.selectedId == id) rest.firstOrNull()?.id else s.selectedId)
-        }
+        val next = repo.updateProfiles { s -> s.withoutProfile(id) }
         _pings.update { it - id }
         if (wasSelected) {
             if (next.selected == null) stopVpn() else reconnectIfRunning()
@@ -472,17 +461,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         val ready = pinWhereNeeded(parsed, errors)
-        val existing = profiles.value.profiles.mapNotNull { it.link }.toSet()
-        val fresh = freshKeys(ready, existing)
-        if (fresh.isNotEmpty()) {
-            val stored = fresh.map { it.toStored(null) }
-            repo.updateProfiles { s -> s.withAdded(stored) }
-            checkWhitelist(stored)
+        var added = emptyList<StoredProfile>()
+        if (ready.isNotEmpty()) {
+            // Against the saved list, inside the save: another import may have just added these keys.
+            repo.updateProfiles { s -> s.withNewKeys(ready).also { added = it.second }.first }
+            checkWhitelist(added)
         }
         message(
             when {
-                fresh.isNotEmpty() && errors.isEmpty() -> "Добавлено серверов: ${fresh.size}"
-                fresh.isNotEmpty() -> "Добавлено: ${fresh.size}, пропущено: ${errors.size} (${errors.first()})"
+                added.isNotEmpty() && errors.isEmpty() -> "Добавлено серверов: ${added.size}"
+                added.isNotEmpty() -> "Добавлено: ${added.size}, пропущено: ${errors.size} (${errors.first()})"
                 ready.isNotEmpty() -> "Эти ключи уже добавлены"
                 errors.isNotEmpty() -> errors.first()
                 else -> "Не найдено ни одного ключа"
@@ -538,14 +526,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteSubscription(id: String) = appScope.launch(saveErrors) {
         val selectedWasInside = profiles.value.selected?.subscriptionId == id
-        val next = repo.updateProfiles { s ->
-            val rest = s.profiles.filterNot { it.subscriptionId == id }
-            s.copy(
-                profiles = rest,
-                subscriptions = s.subscriptions.filterNot { it.id == id },
-                selectedId = if (rest.any { it.id == s.selectedId }) s.selectedId else rest.firstOrNull()?.id,
-            )
-        }
+        val next = repo.updateProfiles { s -> s.withoutSubscription(id) }
         if (selectedWasInside) {
             if (next.selected == null) stopVpn() else reconnectIfRunning()
         }
