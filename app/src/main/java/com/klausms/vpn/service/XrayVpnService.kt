@@ -1689,18 +1689,3 @@ class XrayVpnService : VpnService() {
 
     private fun isAppVisible(): Boolean = callbacks.registeredCallbackCount > 0
 }
-
-private class VpnStartException(message: String) : Exception(message)
-
-/**
- * What made the service check that traffic gets through: a start, another
- * network, Android's view of the same network (LINK), unlocking, the app
- * opened, the screen on for a while.
- */
-private enum class Reason { START, NETWORK, LINK, UNLOCK, APP, SCREEN }
-
-/** What a subscription refresh in the VPN process did: [applied] is null when the download failed. */
-private class Refreshed(val applied: Boolean?, val runningChanged: Boolean)
-
-/** An automatic restart found another app's VPN in place. */
-private class AnotherVpnException : Exception("another VPN is active")
