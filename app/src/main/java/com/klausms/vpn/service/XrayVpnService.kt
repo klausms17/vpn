@@ -1,6 +1,5 @@
 package com.klausms.vpn.service
 
-import android.app.ActivityManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -38,6 +37,7 @@ import com.klausms.vpn.data.SubscriptionUpdater
 import com.klausms.vpn.ui.MainActivity
 import com.klausms.vpn.util.AppLog
 import com.klausms.vpn.util.PhoneSettings
+import com.klausms.vpn.util.ProcessExits
 import com.klausms.vpn.widget.VpnWidget
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -62,6 +62,7 @@ import libxray.Controller
 import libxray.Libxray
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -282,8 +283,7 @@ class XrayVpnService : VpnService() {
     private var manualPick: String? = null
 
     // A reconnect asked for with EXTRA_PICKED; merged reconnects keep it.
-    @Volatile
-    private var pickPending = false
+    private val pickPending = AtomicBoolean()
 
     // The "switched to another server" notice on screen, and since when (elapsedRealtime).
     @Volatile
@@ -398,7 +398,7 @@ class XrayVpnService : VpnService() {
                 // A running tunnel keeps working while new settings apply.
                 enterForegroundUnlessUp("Переподключение…")
                 lastReconnectId = startId
-                if (intent.getBooleanExtra(EXTRA_PICKED, false)) pickPending = true
+                if (intent.getBooleanExtra(EXTRA_PICKED, false)) pickPending.set(true)
                 AppLog.i("reconnect asked (#$startId)")
                 enqueue {
                     when {
@@ -407,14 +407,11 @@ class XrayVpnService : VpnService() {
                         // A late "apply new settings" must not switch on a
                         // VPN the user has turned off meanwhile.
                         config == null && !RuntimeState.shouldRun(this) -> {
-                            pickPending = false
+                            pickPending.set(false)
                             withContext(Dispatchers.Main) { stopIfLatest(startId) }
                         }
-                        else -> {
-                            val picked = pickPending
-                            pickPending = false
-                            startTunnel(startId, userRequested = true, picked = picked)
-                        }
+                        // Read and cleared in one step: a pick sent meanwhile is never lost.
+                        else -> startTunnel(startId, userRequested = true, picked = pickPending.getAndSet(false))
                     }
                 }
             }
@@ -1787,25 +1784,12 @@ internal object RuntimeState {
      * every end counts. By time since boot, so a clock change cannot fool it.
      */
     fun allowAutoRestart(context: Context): Boolean {
-        val reason = lastExitReason(context)
+        val reason = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) ProcessExits.lastVpnExit(context)?.reason else null
         if (reason != null && !RestartGuard.isCrash(reason)) return true
         val p = prefs(context)
         val next = RestartGuard.countRestart(p.getString("restarts", "") ?: "", SystemClock.elapsedRealtime()) ?: return false
         p.edit { putString("restarts", next) }
         return true
-    }
-
-    /** Why the last VPN process before this one ended (ApplicationExitInfo.REASON_*), or null when unknown. */
-    private fun lastExitReason(context: Context): Int? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
-        return try {
-            context.getSystemService(ActivityManager::class.java)
-                ?.getHistoricalProcessExitReasons(context.packageName, 0, 5)
-                ?.firstOrNull { it.processName.endsWith(":vpn") }
-                ?.reason
-        } catch (_: Exception) {
-            null
-        }
     }
 
     fun away(context: Context): Failover.Away? {

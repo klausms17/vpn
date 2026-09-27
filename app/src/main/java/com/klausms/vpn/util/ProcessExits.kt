@@ -1,11 +1,26 @@
 package com.klausms.vpn.util
 
+import android.app.ActivityManager
 import android.app.ActivityManager.RunningAppProcessInfo
 import android.app.ApplicationExitInfo
+import android.content.Context
+import android.os.Build
+import androidx.annotation.RequiresApi
 import com.klausms.vpn.service.RestartGuard
 
-/** How an ended VPN process is written to the log (ApplicationExitInfo, Android 11+). */
+/** How the VPN process ended (ApplicationExitInfo, Android 11+), for the log and the restart guard. */
 object ProcessExits {
+    /** The end of the last VPN process before this one, or null when the system cannot say. */
+    @RequiresApi(Build.VERSION_CODES.R)
+    fun lastVpnExit(context: Context): ApplicationExitInfo? = try {
+        context.getSystemService(ActivityManager::class.java)
+            ?.getHistoricalProcessExitReasons(context.packageName, 0, 10)
+            ?.firstOrNull { it.processName.endsWith(":vpn") }
+    } catch (e: Exception) {
+        AppLog.w("exit reasons", e)
+        null
+    }
+
     /**
      * Whether the end is worth a warning. A crash always is. [tunnelWanted]:
      * the VPN was meant to be on when the process ended. Then any end of a

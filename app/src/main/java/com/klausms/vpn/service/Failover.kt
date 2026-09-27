@@ -168,12 +168,6 @@ internal object Failover {
 
     // ------------------------------------------------------------- budget
 
-    /** The switch times from [saved] ("t1,t2,…", elapsed realtime) still inside the window. */
-    fun recentSwitches(saved: String, now: Long): List<Long> =
-        saved.split(',').mapNotNull { it.trim().toLongOrNull() }
-            // Times after [now] are from before a reboot.
-            .filter { it <= now && now - it < SWITCH_WINDOW_MS }
-
     /** [saved] with a switch at [now] counted, or null when the budget is used up. */
     fun countSwitch(saved: String, now: Long): String? = count(saved, now, MAX_SWITCHES, SWITCH_WINDOW_MS)
 

@@ -222,22 +222,21 @@ class FailoverTest {
             saved = Failover.countSwitch(saved, now) ?: error("switch ${it + 1} refused")
             now += minute
         }
-        assertEquals(3, Failover.recentSwitches(saved, now).size)
+        assertEquals("${10 * minute},${11 * minute},${12 * minute}", saved)
         assertNull(Failover.countSwitch(saved, now))
         // The first switch leaves the window 30 minutes after it happened.
         assertNull(Failover.countSwitch(saved, 10 * minute + Failover.SWITCH_WINDOW_MS - 1))
         val later = 10 * minute + Failover.SWITCH_WINDOW_MS
         val next = Failover.countSwitch(saved, later)!!
-        assertEquals(listOf(11 * minute, 12 * minute, later), Failover.recentSwitches(next, later))
+        assertEquals("${11 * minute},${12 * minute},$later", next)
     }
 
     @Test
     fun budgetSurvivesJunkAndStartsOverAfterAReboot() {
-        assertEquals(emptyList<Long>(), Failover.recentSwitches("", 5 * minute))
-        assertEquals(listOf(4 * minute, 7L), Failover.recentSwitches("x,,${4 * minute}, 7", 5 * minute))
+        assertEquals("${5 * minute}", Failover.countSwitch("", 5 * minute))
+        assertEquals("${4 * minute},7,${5 * minute}", Failover.countSwitch("x,,${4 * minute}, 7", 5 * minute))
         // Saved before a reboot: time since boot is smaller now.
         val beforeReboot = listOf(50 * minute, 51 * minute, 52 * minute).joinToString(",")
-        assertEquals(emptyList<Long>(), Failover.recentSwitches(beforeReboot, 2 * minute))
         assertEquals("${2 * minute}", Failover.countSwitch(beforeReboot, 2 * minute))
     }
 

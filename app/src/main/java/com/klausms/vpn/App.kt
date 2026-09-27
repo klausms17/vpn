@@ -1,6 +1,5 @@
 package com.klausms.vpn
 
-import android.app.ActivityManager
 import android.app.Application
 import android.content.Context
 import android.os.Build
@@ -52,25 +51,19 @@ class App : Application() {
      */
     private fun logLastExit(wanted: Boolean) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
-        try {
-            val am = getSystemService(ActivityManager::class.java) ?: return
-            val last = am.getHistoricalProcessExitReasons(packageName, 0, 10)
-                .firstOrNull { it.processName.endsWith(":vpn") } ?: return
-            // Each end once, even if this process is started again before
-            // another one ends.
-            val prefs = getSharedPreferences("exit_log", Context.MODE_PRIVATE)
-            if (prefs.getLong("last_logged", 0L) == last.timestamp) return
-            prefs.edit { putLong("last_logged", last.timestamp) }
-            if (!ProcessExits.worthLogging(last.reason, wanted, last.importance)) return
-            val ago = (System.currentTimeMillis() - last.timestamp) / 1000
-            AppLog.w(
-                "previous vpn process ended ${ago}s ago" + (if (wanted) " while the VPN was on" else "") +
-                    ": ${ProcessExits.reasonName(last.reason)}, importance ${last.importance}, status ${last.status}, " +
-                    (last.description ?: "no description"),
-            )
-        } catch (e: Exception) {
-            AppLog.w("exit reasons", e)
-        }
+        val last = ProcessExits.lastVpnExit(this) ?: return
+        // Each end once, even if this process is started again before
+        // another one ends.
+        val prefs = getSharedPreferences("exit_log", Context.MODE_PRIVATE)
+        if (prefs.getLong("last_logged", 0L) == last.timestamp) return
+        prefs.edit { putLong("last_logged", last.timestamp) }
+        if (!ProcessExits.worthLogging(last.reason, wanted, last.importance)) return
+        val ago = (System.currentTimeMillis() - last.timestamp) / 1000
+        AppLog.w(
+            "previous vpn process ended ${ago}s ago" + (if (wanted) " while the VPN was on" else "") +
+                ": ${ProcessExits.reasonName(last.reason)}, importance ${last.importance}, status ${last.status}, " +
+                (last.description ?: "no description"),
+        )
     }
 
     private fun currentProcessName(): String =

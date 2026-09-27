@@ -12,9 +12,9 @@ library only), behind Caddy at https://<SUB_DOMAIN>/klaus/:
       (wifi|mobile|other), o the mobile operator, v the app version. w=1:
       on mobile data the app moved from a server outside the operator's
       whitelist to one inside it, and a foreign site did not open directly
-      either (the "whitelist" regime, not a block). a=1: no
-      server answered at all while a Russian site opened directly; it
-      counts like any other report.
+      either (the "whitelist" regime, not a block). a=1: no server answered
+      at all while a Russian site opened directly; it counts like any other
+      report.
   GET /klaus/health
 
 When REPORT_THRESHOLD different subscriptions report the same server within
