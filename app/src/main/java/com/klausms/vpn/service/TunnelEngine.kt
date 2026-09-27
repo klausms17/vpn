@@ -34,6 +34,32 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
+ * The tunnel as the checks and the server switch drive it; a fake in
+ * tests. See [TunnelEngine] for the threading.
+ */
+internal interface TunnelControl {
+    /** The tunnel that runs, null while no core does. Any thread. */
+    val session: TunnelSession?
+
+    /** The newest start command's id: a start made for it that fails for good stops the service. */
+    fun latestStartId(): Int
+
+    /** Runs [block] once every earlier start, stop and reset has finished. */
+    fun submit(block: suspend () -> Unit): Job
+
+    /** Starts the tunnel for [req], replacing the one that runs. Only inside [submit]. */
+    suspend fun start(req: StartRequest)
+
+    /**
+     * Restarts the running core on the same server and settings after
+     * [delayMs]: every connection is reset at once. [expectedEpoch]: only
+     * if nothing changed since. Returns whether the reset was queued
+     * (false: [expectedEpoch] is outdated, and a pending reset is left alone).
+     */
+    fun resetInPlace(why: String, delayMs: Long = 0, expectedEpoch: Long? = null): Boolean
+}
+
+/**
  * Starts, stops and resets the tunnel. Owns the TUN interface, the [core]
  * running on it and the [session] that says which tunnel runs; nothing else
  * changes them. A new start brings the new interface up before the old one
@@ -64,10 +90,10 @@ internal class TunnelEngine(
     private val profiles: ProfilesAccess,
     private val coreLog: File,
     underlying: () -> Network?,
-    private val latestStartId: () -> Int,
+    private val lastStartId: () -> Int,
     private val stopIfLatest: (Int) -> Unit,
     private val listener: Listener,
-) {
+) : TunnelControl {
     /** What the service does about the tunnel. Called on the worker, under the start lock. */
     interface Listener {
         /**
@@ -90,23 +116,21 @@ internal class TunnelEngine(
     @Volatile
     private var tun: ParcelFileDescriptor? = null
 
-    /**
-     * The tunnel that runs, null while no core does. Set when a start
-     * succeeds and renewed by an in-place reset, both on the worker under
-     * the lock; cleared there or by [stopNow].
-     */
+    // Set when a start succeeds and renewed by an in-place reset, both on
+    // the worker under the lock; cleared there or by stopNow().
     @Volatile
-    var session: TunnelSession? = null
+    override var session: TunnelSession? = null
         private set
 
     // Counts starts; a retry planned for an older one is dropped. Under the lock only.
     private var startGeneration = 0
 
-    /** Runs [block] on the worker once every earlier start, stop and reset has finished. */
-    fun submit(block: suspend () -> Unit): Job = scope.launch(worker) { serial.withLock { block() } }
+    override fun latestStartId(): Int = lastStartId()
 
-    /** Starts the tunnel for [req], replacing the one that runs. Only inside [submit]. */
-    suspend fun start(req: StartRequest) {
+    // On the worker, under the lock.
+    override fun submit(block: suspend () -> Unit): Job = scope.launch(worker) { serial.withLock { block() } }
+
+    override suspend fun start(req: StartRequest) {
         // Also while a failed start waits to be retried with the interface
         // held: that is a tunnel that should run, not a first start.
         val restarting = session != null || tun != null
@@ -165,14 +189,8 @@ internal class TunnelEngine(
         withContext(Dispatchers.Main) { stopIfLatest(startId) }
     }
 
-    /**
-     * Restarts the running core on the same server and settings after
-     * [delayMs]: every connection is reset at once. [expectedEpoch]: only
-     * if nothing changed since. The TUN interface stays, so no traffic
-     * leaves the VPN meanwhile. Returns whether the reset was queued
-     * (false: [expectedEpoch] is outdated, and a pending reset is left alone).
-     */
-    fun resetInPlace(why: String, delayMs: Long = 0, expectedEpoch: Long? = null): Boolean {
+    // The TUN interface stays, so no traffic leaves the VPN meanwhile.
+    override fun resetInPlace(why: String, delayMs: Long, expectedEpoch: Long?): Boolean {
         val startId = latestStartId()
         return resets.schedule(delayMs, expectedEpoch) {
             serial.withLock {

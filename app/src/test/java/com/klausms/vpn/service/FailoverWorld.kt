@@ -11,10 +11,11 @@ import kotlinx.serialization.json.put
 
 /**
  * The failover logic wired as the service wires it, over fakes and on the
- * virtual time of [scope]. Tests set the fakes, then drive [search].
- * [profiles] starts with [SERVER_A] (selected and running), [SERVER_B] of
- * the same subscription and the own key [SERVER_C]; the subscription was
- * downloaded just now, so it is not downloaded again.
+ * virtual time of [scope]. Tests set the fakes, then drive [search] or
+ * [switcher]. [profiles] starts with [SERVER_A] (selected and running,
+ * connected), [SERVER_B] of the same subscription and the own key
+ * [SERVER_C]; the subscription was downloaded just now, so it is not
+ * downloaded again.
  */
 internal class FailoverWorld(scope: TestScope) {
     val io = StandardTestDispatcher(scope.testScheduler)
@@ -29,8 +30,28 @@ internal class FailoverWorld(scope: TestScope) {
     val source = FakeSubscriptionSource()
     val reports = FakeReports()
     val memory = FailureMemory(clock)
-    val refresher = SubscriptionRefresher(scope, io, clock, source, session = { null }, profilesChanged = {})
+    val tunnel = FakeTunnel(scope, io, epoch, clock, profiles, core)
+    var status = VpnStatus(VpnState.CONNECTED, SERVER_A.id, SERVER_A.name)
+
+    /** How often the app was told to reload the servers. */
+    var reloads = 0
+
+    val refresher = SubscriptionRefresher(scope, io, clock, source, session = { tunnel.session }, profilesChanged = { reloads++ })
     val search = FailoverSearch(clock, epoch, net, runtime, profiles, notices, direct, WhitelistLookup(scope, io, direct), memory, refresher, reports)
+    val switcher = ServerSwitcher(
+        tunnel, profiles, runtime, memory, search, reports, notices, clock, epoch,
+        status = { status },
+        profilesChanged = { reloads++ },
+    )
+
+    init {
+        tunnel.runOn(SERVER_A)
+        // What the service does when a start brought a server up.
+        tunnel.onUp = { session, req ->
+            memory.onStarted(session.profile.id, automatic = req.switch != null, picked = req.picked)
+            switcher.afterStart(session.profile.id, req)
+        }
+    }
 
     /** [servers] answer a probe, each in [ms]. */
     fun answering(vararg servers: StoredProfile, ms: Long = 100) {
