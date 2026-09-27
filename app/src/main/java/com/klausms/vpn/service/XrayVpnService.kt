@@ -28,17 +28,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -111,10 +106,6 @@ class XrayVpnService : VpnService() {
         private const val BULK_HEADERS = """{"Accept-Encoding":"identity"}"""
         private const val BULK_TIMEOUT_MS = 12_000
         private const val BULK_CHECK_MS = 30 * 60_000L
-
-        /** Hosts looked up in the mobile whitelist per search, and how long to wait for them. */
-        private const val WHITELIST_HOSTS = 32
-        private const val WHITELIST_WAIT_MS = 3_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -139,6 +130,8 @@ class XrayVpnService : VpnService() {
     private lateinit var engine: TunnelEngine
 
     private lateinit var memory: FailureMemory
+
+    private lateinit var mobileWhitelist: WhitelistLookup
 
     // The newest command's startId. A job only stops the service if no newer
     // command arrived meanwhile, so a quick "off, on" never loses the "on".
@@ -183,10 +176,6 @@ class XrayVpnService : VpnService() {
     // One probe at a time: a probe's temporary core holds megabytes until it
     // ends, also when its result is no longer wanted.
     private val probeLock = Mutex()
-
-    // Host -> on the Russian mobile whitelist. Kept while the process lives:
-    // few hosts, and the answer rarely changes.
-    private val whitelistCache = ConcurrentHashMap<String, Boolean>()
 
     // A reconnect asked for with EXTRA_PICKED; merged reconnects keep it.
     private val pickPending = AtomicBoolean()
@@ -286,6 +275,7 @@ class XrayVpnService : VpnService() {
             listener = engineEvents,
         )
         memory = FailureMemory(clock)
+        mobileWhitelist = WhitelistLookup(scope, Dispatchers.IO, direct)
         Notifications.ensureChannels(this)
     }
 
@@ -818,7 +808,7 @@ class XrayVpnService : VpnService() {
         if (!onMobileData()) return false
         val winnerHost = Failover.host(winner)
         val failedHost = Failover.host(failed)
-        val listed = whitelisted(listOf(winnerHost, failedHost).distinct())
+        val listed = mobileWhitelist.listed(listOf(winnerHost, failedHost).distinct())
         return winnerHost in listed && failedHost !in listed &&
             !direct.opens(XrayCore.TEST_URL) && direct.opens(DirectNet.DIRECT_URL)
     }
@@ -903,38 +893,9 @@ class XrayVpnService : VpnService() {
         val mobile = onMobileData()
         // Every one of them is probed anyway.
         if (!mobile && pool.size <= Failover.MAX_CANDIDATES) return pool
-        val preferred = whitelisted(pool.map { Failover.host(it) }.distinct().take(WHITELIST_HOSTS))
+        val preferred = mobileWhitelist.listed(pool.map { Failover.host(it) }.distinct().take(WhitelistLookup.MAX_HOSTS))
         val reserve = if (mobile) Failover.MAX_CANDIDATES else Failover.WHITELIST_RESERVED
         return Failover.pickCandidates(state, failed, exclude, tried, preferred, reserve = reserve)
-    }
-
-    /** Those of [hosts] on the Russian mobile whitelist; lookups that take too long count as not. */
-    private suspend fun whitelisted(hosts: List<String>): Set<String> {
-        val found = ConcurrentHashMap.newKeySet<String>()
-        hosts.filterTo(found) { whitelistCache[it] == true }
-        val limit = Semaphore(4)
-        // In the service scope: a DNS lookup cannot be interrupted, and the
-        // search must not wait for a slow one.
-        val lookups = hosts.filterNot { whitelistCache.containsKey(it) }.map { host ->
-            scope.launch(Dispatchers.IO) {
-                try {
-                    limit.withPermit {
-                        val status = direct.whitelistStatus(host)
-                        whitelistCache[host] = status == 1
-                        if (status == 1) found.add(host)
-                    }
-                } catch (ex: Exception) {
-                    // Not remembered: the next search asks again.
-                    if (ex is CancellationException) throw ex
-                }
-            }
-        }
-        try {
-            withTimeoutOrNull(WHITELIST_WAIT_MS) { lookups.joinAll() }
-        } finally {
-            lookups.forEach { it.cancel() }
-        }
-        return found.toSet()
     }
 
     /** The delay through each of [servers] in ms, or -1, in the same order. Never throws. */
