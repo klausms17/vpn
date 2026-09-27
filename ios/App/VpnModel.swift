@@ -71,8 +71,10 @@ final class VpnModel {
         if let observer { NotificationCenter.default.removeObserver(observer) }
         observer = NotificationCenter.default.addObserver(
             forName: .NEVPNStatusDidChange, object: connection, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.status = connection.status }
+        ) { [weak self] note in
+            // Read here: the connection object itself may not cross into the main-actor closure.
+            let status = (note.object as? NEVPNConnection)?.status ?? .invalid
+            MainActor.assumeIsolated { self?.status = status }
         }
     }
 

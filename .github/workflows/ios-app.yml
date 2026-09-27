@@ -81,18 +81,22 @@ jobs:
 
       - name: Check the app
         run: |
-          app="$(find "$RUNNER_TEMP/dd" -name KlausVPN.app -type d | head -n 1)"
-          test -n "$app"
-          test -d "$app/PlugIns/PacketTunnel.appex"
-          plutil -p "$app/PlugIns/PacketTunnel.appex/Info.plist" | grep -q packet-tunnel
-          test -s "$app/PlugIns/PacketTunnel.appex/geo/geoip.dat"
-          test -s "$app/PlugIns/PacketTunnel.appex/geo/geosite.dat"
-          # Apple refuses executables that still carry bitcode.
-          for bin in "$app/KlausVPN" "$app/PlugIns/PacketTunnel.appex/PacketTunnel"; do
-            test -f "$bin"
-            if otool -l "$bin" | grep -q "segname __LLVM"; then
-              echo "::error::$bin still contains bitcode"
-              exit 1
-            fi
+          app="$(find "$RUNNER_TEMP/dd" -name KlausVPN.app -type d -print -quit)"
+          appex="$app/PlugIns/PacketTunnel.appex"
+          fail() { echo "::error::$*"; ls -la "$app" "$appex" 2>/dev/null || true; exit 1; }
+          [ -n "$app" ] || fail "KlausVPN.app was not built"
+          [ -d "$appex" ] || fail "the packet tunnel extension is missing"
+          point="$(plutil -extract NSExtension.NSExtensionPointIdentifier raw "$appex/Info.plist")"
+          [ "$point" = com.apple.networkextension.packet-tunnel ] || fail "wrong extension point: $point"
+          for f in geoip.dat geosite.dat; do
+            [ -s "$appex/geo/$f" ] || fail "geo/$f is not in the extension"
           done
-          du -sh "$app" "$app/PlugIns/PacketTunnel.appex"
+          # Apple refuses executables that still carry bitcode. The load
+          # commands are captured first: a grep -q that stops reading early
+          # would fail the pipe under pipefail and hide a match.
+          for bin in "$app/KlausVPN" "$appex/PacketTunnel"; do
+            [ -f "$bin" ] || fail "$bin is missing"
+            commands="$(otool -l "$bin")"
+            if grep -q "segname __LLVM" <<<"$commands"; then fail "$bin still contains bitcode"; fi
+          done
+          du -sh "$app" "$appex"

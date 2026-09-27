@@ -40,6 +40,7 @@ targets:
         UILaunchScreen: {}
         UIUserInterfaceStyle: Dark
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIRequiresFullScreen: true   # portrait only, so no split-screen layouts
         NSCameraUsageDescription: "Камера нужна, чтобы отсканировать QR-код с ключом или ссылкой на подписку."
         CFBundleURLTypes:
           - CFBundleURLName: com.klausms.vpn
