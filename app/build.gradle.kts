@@ -79,7 +79,15 @@ android {
     }
 }
 
+// ScreenshotTest draws every screen with Robolectric: slow, and never a
+// reason to fail the build. Without -Pscreenshots every other test runs;
+// with it, only the screenshots (CI runs both, see android.yml).
+val screenshots = providers.gradleProperty("screenshots").isPresent
+
 tasks.withType<Test>().configureEach {
+    filter {
+        if (screenshots) includeTestsMatching("*.ScreenshotTest") else excludeTestsMatching("*.ScreenshotTest")
+    }
     systemProperty("screenshots.dir", layout.buildDirectory.dir("screenshots").get().asFile.absolutePath)
     // Real HWUI rendering: shadows and layers look as on a phone.
     systemProperty("robolectric.pixelCopyRenderMode", "hardware")

@@ -60,6 +60,7 @@ import javax.imageio.ImageIO
 /**
  * Draws the real screens and the widget into PNG files (build/screenshots),
  * so the look can be checked without a phone. Not a pass/fail comparison.
+ * Runs only with -Pscreenshots (see app/build.gradle.kts).
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)

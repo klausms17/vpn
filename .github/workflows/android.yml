@@ -137,21 +137,11 @@ jobs:
             exit 1
           }
 
-      # Plain JVM tests of the app's logic: everything in data, service, util
-      # and widget (new test classes there run by themselves), plus the ui
-      # tests by name. The screenshots have their own step below. A pattern
-      # nothing matches yet is fine while the others match something.
+      # Every JVM test of the app, new ones included, except the screenshots:
+      # app/build.gradle.kts leaves those out unless -Pscreenshots is given
+      # (their own step below).
       - name: Unit tests
-        run: >-
-          ./gradlew --no-daemon testDebugUnitTest
-          --tests 'com.klausms.vpn.data.*'
-          --tests 'com.klausms.vpn.service.*'
-          --tests 'com.klausms.vpn.util.*'
-          --tests 'com.klausms.vpn.widget.*'
-          --tests 'com.klausms.vpn.ui.DeepLinkTest'
-          --tests 'com.klausms.vpn.ui.QrDecoderTest'
-          --tests 'com.klausms.vpn.ui.PhoneDiagnosticsTest'
-          --tests 'com.klausms.vpn.ui.ViewModelLogicTest'
+        run: ./gradlew --no-daemon testDebugUnitTest
 
       - name: Check native library 16 KB alignment
         run: |
@@ -245,12 +235,12 @@ jobs:
 
       # A look at the real screens and the widget without a phone: drawn by
       # Robolectric into PNGs and kept on the ui-screenshots branch. Never
-      # blocks the build above.
+      # blocks the build above. -Pscreenshots runs ScreenshotTest alone.
       - name: Screenshots of the screens and the widget
         id: screenshots
         continue-on-error: true
         timeout-minutes: 20
-        run: ./gradlew --no-daemon testDebugUnitTest --tests 'com.klausms.vpn.ui.ScreenshotTest'
+        run: ./gradlew --no-daemon testDebugUnitTest -Pscreenshots
 
       - name: Publish screenshots
         if: always() && steps.screenshots.outcome != 'skipped'
