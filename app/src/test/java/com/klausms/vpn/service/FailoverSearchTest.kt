@@ -109,6 +109,15 @@ class FailoverSearchTest {
     }
 
     @Test
+    fun onMobileDataServersOnTheWhitelistAreProbedFirst() = runTest {
+        val w = world()
+        w.net.netState = NetState(hasNetwork = true, captive = false, cellular = true)
+        w.direct.statuses[Failover.host(SERVER_C)] = 1
+        w.searchFromA()
+        assertEquals(listOf("a", "c", "b"), w.probedIds(0))
+    }
+
+    @Test
     fun aControlThatAnsweredButDidNotRecoverStillSwitchesWithoutAReport() = runTest {
         val w = world()
         w.answering(SERVER_A, SERVER_B)

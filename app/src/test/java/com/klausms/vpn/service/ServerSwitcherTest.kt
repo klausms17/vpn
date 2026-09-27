@@ -1,5 +1,6 @@
 package com.klausms.vpn.service
 
+import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.service.FailoverWorld.Companion.SERVER_A
 import com.klausms.vpn.service.FailoverWorld.Companion.SERVER_B
 import com.klausms.vpn.service.FailoverWorld.Companion.SERVER_C
@@ -84,6 +85,17 @@ class ServerSwitcherTest {
     }
 
     @Test
+    fun theSameServerWithNewSettingsIsNoSwitchAway() = runTest {
+        val w = FailoverWorld(this)
+        w.switcher.switchTo(w.epoch.current, SERVER_A, SERVER_A.id)
+        assertEquals(SERVER_A.id, w.tunnel.starts.single().switch?.winnerId)
+        assertNull(w.tunnel.starts.single().switch?.notice)
+        assertFalse(w.memory.failedRecently(SERVER_A.id))
+        assertEquals(emptyList<FakeReports.Report>(), w.reports.sent)
+        assertNull(w.runtime.awayState)
+    }
+
+    @Test
     fun aSwitchThatDidNotBringTheWinnerUpMarksNothing() = runTest {
         val w = FailoverWorld(this)
         w.tunnel.startsFail = true
@@ -127,15 +139,54 @@ class ServerSwitcherTest {
     }
 
     @Test
-    fun theWayBackIsNotTriedTooSoonNorAfterANetworkChange() = runTest {
+    fun aWayBackWithoutSwitchesLeftSaysNothing() = runTest {
+        val w = switchedToB()
+        w.runtime.switchBudget = false
+        w.switcher.switchTo(w.epoch.current, SERVER_B, SERVER_A.id, returning = true)
+        assertEquals(1, w.tunnel.starts.size)
+        assertEquals(emptyList<String?>(), w.notices.shown)
+    }
+
+    private class NoWayBack(val name: String, val running: StoredProfile = SERVER_B, val setUp: FailoverWorld.() -> Unit = {})
+
+    @Test
+    fun theWayBackIsNotTriedWhileItCannotBeTaken() = runTest {
+        val cases = listOf(
+            NoWayBack("not due yet") { runtime.awayState = runtime.awayState?.copy(retryAt = clock.elapsed() + 1) },
+            NoWayBack("the user's server failed again lately") { memory.markFailed(SERVER_A.id) },
+            NoWayBack("the tunnel runs another server", running = SERVER_C),
+            NoWayBack("another server chosen") { profiles.state = profiles.state.copy(selectedId = SERVER_C.id) },
+            NoWayBack("switches used up") { runtime.switchBudget = false },
+        )
+        for (case in cases) {
+            val w = switchedToB()
+            advanceTimeBy(Failover.RECENTLY_FAILED_MS)
+            w.answering(SERVER_A)
+            case.setUp(w)
+            val away = w.runtime.awayState
+            w.switcher.returnHomeIfItAnswers(w.epoch.current, w.core, case.running)
+            advanceUntilIdle()
+            assertEquals(case.name, 0, w.core.probed.size)
+            assertEquals(case.name, 1, w.tunnel.starts.size)
+            assertSame(case.name, away, w.runtime.awayState)
+        }
+    }
+
+    @Test
+    fun aDeletedUsersServerIsNoLongerGoneBackTo() = runTest {
+        val w = switchedToB()
+        advanceTimeBy(Failover.RECENTLY_FAILED_MS)
+        w.profiles.state = w.profiles.state.copy(profiles = listOf(SERVER_B, SERVER_C))
+        w.switcher.returnHomeIfItAnswers(w.epoch.current, w.core, SERVER_B)
+        assertNull(w.runtime.awayState)
+        assertEquals(0, w.core.probed.size)
+    }
+
+    @Test
+    fun theWayBackSaysNothingAfterANetworkChangeDuringItsProbe() = runTest {
         val w = switchedToB()
         w.answering(SERVER_A)
-        advanceTimeBy(Failover.RECENTLY_FAILED_MS - 1)
-        w.switcher.returnHomeIfItAnswers(w.epoch.current, w.core, SERVER_B)
-        assertEquals(0, w.core.probed.size)
-
-        // An answer or its absence says nothing once the network changed during the probe.
-        advanceTimeBy(1)
+        advanceTimeBy(Failover.RECENTLY_FAILED_MS)
         val away = w.runtime.awayState
         for (answers in listOf(true, false)) {
             if (!answers) w.core.probeDelays.clear()

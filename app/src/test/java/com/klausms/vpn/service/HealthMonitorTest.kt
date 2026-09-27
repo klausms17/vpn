@@ -96,6 +96,15 @@ class HealthMonitorTest {
         advanceTimeBy(settle)
         runCurrent()
         assertEquals(2, w.checks())
+
+        // Exactly a minute after the last one counts.
+        advanceTimeBy(minute - settle - 1)
+        w.health.onReachability(lost = true)
+        advanceTimeBy(1)
+        w.health.onReachability(lost = true)
+        advanceTimeBy(settle)
+        runCurrent()
+        assertEquals(3, w.checks())
     }
 
     @Test
@@ -135,6 +144,21 @@ class HealthMonitorTest {
         assertEquals(1, w.checks())
     }
 
+    @Test
+    fun nothingIsCheckedWhileTheTunnelIsNotShownAsConnected() = runTest {
+        val w = world()
+        w.status = VpnStatus(VpnState.CONNECTING)
+        w.health.onAppShown()
+        runCurrent()
+        assertEquals(0, w.checks())
+
+        // Nor did that count as a check.
+        w.status = VpnStatus(VpnState.CONNECTED, SERVER_A.id, SERVER_A.name)
+        w.health.onAppShown()
+        runCurrent()
+        assertEquals(1, w.checks())
+    }
+
     // ------------------------------------------------------ what a check does
 
     @Test
@@ -152,15 +176,38 @@ class HealthMonitorTest {
         val w = world()
         w.profiles.state = w.profiles.state.copy(selectedId = SERVER_B.id)
         w.tunnel.runOn(SERVER_B)
-        w.runtime.awayState = Failover.Away(home = SERVER_A.id, to = SERVER_B.id, retryAt = 0, backoff = 0)
+        val away = Failover.Away(home = SERVER_A.id, to = SERVER_B.id, retryAt = 0, backoff = 0)
+        w.runtime.awayState = away
         for (reason in listOf(Reason.START, Reason.APP, Reason.SCREEN, Reason.LINK)) {
             w.health.schedule(reason)
             runCurrent()
         }
         assertEquals(emptyList<List<*>>(), w.core.probed)
-        w.health.schedule(Reason.UNLOCK)
-        runCurrent()
-        assertEquals(listOf(listOf(SERVER_A.outbounds)), w.core.probed)
+        for (reason in listOf(Reason.NETWORK, Reason.UNLOCK)) {
+            // Each try that fails puts the next one off.
+            w.runtime.awayState = away
+            w.health.schedule(reason)
+            runCurrent()
+        }
+        assertEquals(listOf(listOf(SERVER_A.outbounds), listOf(SERVER_A.outbounds)), w.core.probed)
+    }
+
+    @Test
+    fun aSubscriptionThatCouldNotBeDownloadedDirectlyIsDownloadedThroughTheTunnelOnceItWorks() = runTest {
+        val w = world()
+        w.subscriptionDue()
+        w.trafficStops()
+        w.health.schedule(Reason.APP)
+        advanceUntilIdle()
+        assertEquals(listOf("s1" to null), w.source.refreshed)
+
+        // The server works again, and the download moved the running server.
+        w.core.delays[XrayCore.TEST_URL] = 50
+        w.source.answer = { Refreshed(applied = true, runningChanged = true) }
+        w.health.schedule(Reason.APP)
+        advanceUntilIdle()
+        assertEquals(listOf("s1" to null, "s1" to w.core), w.source.refreshed)
+        assertEquals(listOf(StartRequest(1, userRequested = false)), w.tunnel.starts)
     }
 
     @Test
@@ -174,6 +221,24 @@ class HealthMonitorTest {
         assertEquals(2, w.core.fetched.size)
         assertFalse(SERVER_A.outbounds in w.core.probed.single())
         assertEquals(SERVER_B.id, w.tunnel.starts.single().switch?.winnerId)
+    }
+
+    @Test
+    fun aStallIsLookedForAgainAtTheNextCheck() = runTest {
+        val w = world()
+        w.health.schedule(Reason.START)
+        runCurrent()
+        w.core.fetchError = stall
+        // Nowhere to go: the tunnel stays on the server whose downloads stall.
+        w.runtime.switchBudget = false
+        w.health.schedule(Reason.START)
+        runCurrent()
+        assertEquals(3, w.core.fetched.size)
+
+        // The download that worked earlier on this network no longer counts.
+        w.health.schedule(Reason.APP)
+        runCurrent()
+        assertEquals(5, w.core.fetched.size)
     }
 
     @Test
@@ -275,6 +340,51 @@ class HealthMonitorTest {
         assertEquals(listOf(networkReset, stuckCoreReset), w.tunnel.resetsDone)
     }
 
+    private class Outdated(val name: String, val searches: Boolean = false, val setUp: FailoverWorld.() -> Unit)
+
+    @Test
+    fun aCheckThatOutlivesItsGenerationChangesNothing() = runTest {
+        val cases = listOf(
+            Outdated("during the traffic test") {
+                core.onMeasure = { epoch.advance() }
+            },
+            Outdated("during a download that works") {
+                core.onFetch = { epoch.advance() }
+            },
+            Outdated("during a download that stalls") {
+                core.fetchError = stall
+                answering(SERVER_B)
+                core.onFetch = { if (core.fetched.size == 2) epoch.advance() }
+            },
+            Outdated("while the failed server is tested again", searches = true) {
+                trafficStops()
+                answering(SERVER_A, SERVER_B)
+                // The control answered, and so does the core by now, but the tunnel changed.
+                core.onProbe = { core.delays[XrayCore.TEST_URL] = 50 }
+                core.onMeasure = { if (core.measured.last() == XrayCore.TEST_URL to TrafficCheck.CONFIRM_TIMEOUT_MS) epoch.advance() }
+            },
+        )
+        for (case in cases) {
+            val w = world()
+            case.setUp(w)
+            w.health.schedule(Reason.START)
+            advanceUntilIdle()
+            assertEquals(case.name, listOfNotNull(Failover.NOTICE_SEARCHING.takeIf { case.searches }), w.notices.shown)
+            assertEquals(case.name, if (case.searches) 1 else 0, w.core.probed.size)
+            assertEquals(case.name, 0, w.notices.failuresCleared)
+            assertEquals(case.name, emptyList<Long>(), w.notices.switchClears)
+            assertEquals(case.name, emptyList<StartRequest>(), w.tunnel.starts)
+            assertEquals(case.name, emptyList<String>(), w.tunnel.resetsDone)
+
+            // Nor did it count as a check that passed.
+            w.core.onMeasure = {}
+            w.core.onFetch = {}
+            w.health.onConnectWhileUp()
+            runCurrent()
+            assertEquals(case.name, 2, w.checks())
+        }
+    }
+
     // --------------------------------------------------------- network change
 
     private class Move(val name: String, val net: NetId, val previous: NetId?, val session: TunnelSession?, val now: Long, val resets: Boolean)
@@ -314,12 +424,21 @@ class HealthMonitorTest {
     }
 
     @Test
-    fun theFirstNetworkIsOnlyChecked() = runTest {
+    fun theFirstNetworkAndTheSameOneBackAreOnlyChecked() = runTest {
         val w = world()
+        advanceTimeBy(3_000)
         w.health.onNetworkChanged(NetId(1), previous = null)
         advanceTimeBy(settle)
         runCurrent()
         assertEquals(1, w.checks())
+
+        // The same network back after a gap: why the server was switched still applies.
+        w.notices.switchClears.clear()
+        w.health.onNetworkChanged(NetId(1), previous = NetId(1))
+        assertEquals(emptyList<Long>(), w.notices.switchClears)
+        advanceTimeBy(settle)
+        runCurrent()
+        assertEquals(2, w.checks())
         assertEquals(emptyList<String>(), w.tunnel.resetsDone)
     }
 

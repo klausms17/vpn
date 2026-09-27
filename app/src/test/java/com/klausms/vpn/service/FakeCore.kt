@@ -34,6 +34,9 @@ internal class FakeCore(delays: Map<String, Long> = emptyMap()) : CoreHandle {
     /** The URL of every [fetchThroughTunnel], in order. */
     val fetched = mutableListOf<String>()
 
+    /** Runs at each [fetchThroughTunnel] before it answers. */
+    var onFetch: () -> Unit = {}
+
     override fun start(config: String, tunFd: Int) = Unit
 
     override fun stop() = Unit
@@ -46,6 +49,7 @@ internal class FakeCore(delays: Map<String, Long> = emptyMap()) : CoreHandle {
 
     override fun fetchThroughTunnel(url: String, userAgent: String, headers: String, timeoutMs: Int) {
         fetched += url
+        onFetch()
         fetchError?.let { throw Exception(it) }
     }
 
