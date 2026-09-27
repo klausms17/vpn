@@ -13,9 +13,11 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
@@ -44,7 +46,16 @@ import com.klausms.vpn.ui.components.PrimaryButton
 import com.klausms.vpn.ui.components.SecondaryButton
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/**
+ * Pasted into the field at most: keys are short, and laying out a huge
+ * text (a copied log) freezes a small phone. A big subscription body goes
+ * through «Вставить из буфера» on the main screen instead.
+ */
+private const val FIELD_PASTE_MAX = 16 * 1024
 
 /** Sheet for pasting keys or a subscription link, or scanning a QR code ([onScan], null without a camera). */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -65,6 +76,7 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit, onScan: (() -> U
     // Survives a rotation; a huge paste is not kept (instance state is small).
     var text by rememberSaveable(stateSaver = CappedText) { mutableStateOf("") }
     var clipboardEmpty by rememberSaveable { mutableStateOf(false) }
+    var clipboardCut by rememberSaveable { mutableStateOf(false) }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -83,6 +95,8 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit, onScan: (() -> U
         Column(
             Modifier
                 .fillMaxWidth()
+                // Small phones: the keyboard must not hide «Добавить».
+                .verticalScroll(rememberScrollState())
                 .imePadding()
                 .navigationBarsPadding()
                 .padding(start = 20.dp, end = 20.dp, bottom = 16.dp),
@@ -121,7 +135,10 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit, onScan: (() -> U
                                     .size(22.dp)
                                     .clip(CircleShape)
                                     .background(kc.tertiary)
-                                    .clickable(onClickLabel = "Очистить", role = Role.Button) { text = "" }
+                                    .clickable(onClickLabel = "Очистить", role = Role.Button) {
+                                        text = ""
+                                        clipboardCut = false
+                                    }
                                     .semantics { contentDescription = "Очистить" },
                                 contentAlignment = Alignment.Center,
                             ) {
@@ -132,17 +149,30 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit, onScan: (() -> U
                 },
             )
             Text(
-                if (clipboardEmpty) "В буфере обмена нет текста" else "Можно вставить несколько ключей, каждый с новой строки",
+                when {
+                    clipboardEmpty -> "В буфере обмена нет текста"
+                    clipboardCut -> "Текст очень длинный, вставлено только начало"
+                    else -> "Можно вставить несколько ключей, каждый с новой строки"
+                },
                 style = IosType.footnote,
-                color = if (clipboardEmpty) kc.orange else kc.secondary,
+                color = if (clipboardEmpty || clipboardCut) kc.orange else kc.secondary,
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
             )
             Spacer(Modifier.height(20.dp))
             // The buttons never swap places: a quick second tap on "paste"
             // must not add the keys unseen.
             val paste: () -> Unit = {
-                val clip = readClipboard(context)
-                if (clip == null) clipboardEmpty = true else { text = clip; clipboardEmpty = false }
+                // Off the main thread: a clip can be a file the system has to read.
+                scope.launch {
+                    val clip = withContext(Dispatchers.IO) { readClipboard(context) }
+                    if (clip == null) {
+                        clipboardEmpty = true
+                    } else {
+                        clipboardEmpty = false
+                        clipboardCut = clip.length > FIELD_PASTE_MAX
+                        text = if (clipboardCut) cutAtLine(clip, FIELD_PASTE_MAX) else clip
+                    }
+                }
             }
             if (text.isBlank()) {
                 PrimaryButton("Вставить из буфера", onClick = paste, icon = R.drawable.ic_clipboard_ios)
@@ -164,6 +194,13 @@ fun AddKeySheet(onDismiss: () -> Unit, onAdd: (String) -> Unit, onScan: (() -> U
             )
         }
     }
+}
+
+/** The start of [text], at most [max] chars, ending at a line break when there is one (no half key). */
+private fun cutAtLine(text: String, max: Int): String {
+    val head = text.take(max)
+    val lastBreak = head.lastIndexOf('\n')
+    return if (lastBreak > 0) head.take(lastBreak) else head
 }
 
 private val CappedText = Saver<String, String>(

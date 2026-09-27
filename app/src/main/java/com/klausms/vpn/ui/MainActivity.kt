@@ -38,11 +38,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.ui.components.BusyPill
 import com.klausms.vpn.ui.components.GlassToast
@@ -55,9 +58,13 @@ import com.klausms.vpn.ui.screens.ScanScreen
 import com.klausms.vpn.ui.screens.SettingsScreen
 import com.klausms.vpn.ui.screens.readClipboard
 import com.klausms.vpn.util.AppLog
+import com.klausms.vpn.util.PhoneSettings
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.KlausTheme
 import com.klausms.vpn.ui.theme.kc
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 class MainActivity : ComponentActivity() {
     companion object {
@@ -69,6 +76,9 @@ class MainActivity : ComponentActivity() {
         const val ACTION_CONNECT = "com.klausms.vpn.ui.CONNECT"
 
         private const val KEY_SHARED_TEXT = "shared_text"
+
+        /** How long a tap waits for the VPN process's own state after the app comes back. */
+        private const val STATUS_WAIT_MS = 2_000L
     }
 
     private val vm: MainViewModel by viewModels()
@@ -113,7 +123,10 @@ class MainActivity : ComponentActivity() {
                 vm.onAppVisible()
             }
 
-            override fun onStop(owner: LifecycleOwner) = vm.vpn.unbind()
+            override fun onStop(owner: LifecycleOwner) {
+                vm.onAppHidden()
+                vm.vpn.unbind()
+            }
         })
         sharedText = savedInstanceState?.getString(KEY_SHARED_TEXT)
         // Handle the launch intent once: not again after a rotation or when
@@ -157,7 +170,12 @@ class MainActivity : ComponentActivity() {
                     val coreVersion by vm.coreVersion.collectAsStateWithLifecycle()
                     LicensesScreen(coreVersion, onBack = back)
                 }
-                "scan" -> ScanScreen(onBack = back, onFound = { text -> back(); vm.import(text) })
+                "scan" -> ScanScreen(
+                    onBack = back,
+                    onFound = { text -> back(); vm.import(text) },
+                    // Reopened after the camera was revoked in Settings: ask again.
+                    onNoPermission = { back(); openScanner() },
+                )
                 else -> HomeScreen(
                     vm = vm,
                     onToggle = ::toggleVpn,
@@ -181,6 +199,16 @@ class MainActivity : ComponentActivity() {
                 onDismiss = { showAdd = false },
                 onAdd = { text -> showAdd = false; vm.import(text) },
                 onScan = if (hasCamera) { { showAdd = false; openScanner() } } else null,
+            )
+        }
+        val backgroundTip by vm.backgroundTip.collectAsStateWithLifecycle()
+        if (backgroundTip) {
+            BackgroundTip(
+                onSetUp = {
+                    vm.backgroundTipDone()
+                    if (top != "settings") push("settings")
+                },
+                onLater = vm::backgroundTipDone,
             )
         }
         if (cameraRefused) {
@@ -228,6 +256,47 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Once, after the first connection, on a phone that may stop the VPN in
+     * the background. A brand with its own autostart switch gets the
+     * Settings screen, where both switches are; elsewhere the system's own
+     * one-tap request opens.
+     */
+    @Composable
+    private fun BackgroundTip(onSetUp: () -> Unit, onLater: () -> Unit) {
+        val context = LocalContext.current
+        val oem = remember { PhoneSettings.oem() }
+        AlertDialog(
+            onDismissRequest = onLater,
+            containerColor = kc.card,
+            title = { Text("Чтобы VPN не выключался", style = IosType.headline, color = kc.label) },
+            text = {
+                Text(
+                    if (oem != null) {
+                        "Телефон может закрывать приложения в фоне, чтобы беречь заряд, и VPN выключится. Разрешите Klaus VPN работу в фоне и автозапуск."
+                    } else {
+                        "Телефон может закрывать приложения в фоне, чтобы беречь заряд, и VPN выключится. Разрешите Klaus VPN работу в фоне."
+                    },
+                    style = IosType.subhead,
+                    color = kc.secondary,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (oem != null) {
+                            onSetUp()
+                        } else {
+                            onLater()
+                            PhoneSettings.openBatterySettings(context)
+                        }
+                    },
+                ) { Text(if (oem != null) "Настроить" else "Разрешить", color = kc.green) }
+            },
+            dismissButton = { TextButton(onClick = onLater) { Text("Позже", color = kc.green) } },
+        )
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         sharedText?.let { outState.putString(KEY_SHARED_TEXT, it) }
@@ -246,10 +315,11 @@ class MainActivity : ComponentActivity() {
             }
             // klausvpn://add/<link> from a subscription page or a messenger.
             Intent.ACTION_VIEW -> DeepLink.payload(intent.dataString)?.let { sharedText = it }
-            ACTION_CONNECT -> {
-                val state = vm.status.value.state
-                if (state != VpnState.CONNECTED && state != VpnState.CONNECTING) toggleVpn()
-            }
+            // Always the connect path, whatever the cached status says: it may
+            // be from before the app went to the background (e.g. "connected"
+            // while the consent was revoked since). Connecting a running
+            // tunnel is a no-op for the service.
+            ACTION_CONNECT -> connect()
         }
     }
 
@@ -279,35 +349,75 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** A tap waiting for the VPN process's own state (see [toggleVpn]). */
+    private var tapWaiting = false
+
     private fun toggleVpn() {
-        when (vm.status.value.state) {
+        val shown = vm.status.value.state
+        if (vm.vpn.fresh.value) {
+            toggle(shown)
+            return
+        }
+        // Just back from the background: the state on screen may be old. Wait
+        // a moment for the real one, then do what the tap meant if it still
+        // needs doing (an "off" tap on a tunnel that is already gone does
+        // nothing).
+        if (tapWaiting || shown == VpnState.DISCONNECTING) return
+        tapWaiting = true
+        lifecycleScope.launch {
+            withTimeoutOrNull(STATUS_WAIT_MS) { vm.vpn.fresh.first { it } }
+            tapWaiting = false
+            // Left the app meanwhile: no dialogs over another app.
+            if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return@launch
+            val now = vm.status.value.state
+            if (isOn(now) == isOn(shown)) toggle(now)
+        }
+    }
+
+    private fun isOn(state: VpnState) = state == VpnState.CONNECTED || state == VpnState.CONNECTING
+
+    private fun toggle(state: VpnState) {
+        when (state) {
             VpnState.CONNECTED, VpnState.CONNECTING -> vm.stopVpn()
             VpnState.DISCONNECTING -> Unit
-            else -> {
-                if (vm.profiles.value.selected == null) {
-                    vm.startVpn() // shows "add a key first"
-                    return
-                }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                    ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
-                    !vm.notificationPermissionAsked()
-                ) {
-                    vm.markNotificationPermissionAsked()
-                    notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    return
-                }
-                connectWithPermission()
-            }
+            else -> connect()
         }
+    }
+
+    private fun connect() {
+        if (vm.profiles.value.selected == null) {
+            vm.startVpn() // shows "add a key first"
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+            !vm.notificationPermissionAsked()
+        ) {
+            vm.markNotificationPermissionAsked()
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+        connectWithPermission()
     }
 
     private fun connectWithPermission() {
         val request = try {
             VpnService.prepare(this)
         } catch (e: Exception) {
+            AppLog.w("vpn prepare", e)
             vm.startVpnDenied()
             return
         }
-        if (request != null) vpnPermission.launch(request) else vm.startVpn()
+        if (request == null) {
+            vm.startVpn()
+            return
+        }
+        // A stripped-down firmware may lack the system's consent dialog.
+        try {
+            vpnPermission.launch(request)
+        } catch (e: Exception) {
+            AppLog.w("vpn consent dialog did not open", e)
+            vm.startVpnDenied()
+        }
     }
 }

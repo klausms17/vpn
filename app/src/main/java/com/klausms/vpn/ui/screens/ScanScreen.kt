@@ -1,11 +1,15 @@
 package com.klausms.vpn.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.util.Size
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.CameraState
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.TorchState
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -64,10 +68,26 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Reads a QR code with a key or a subscription link through the back
  * camera and hands its text to [onFound] once. Everything stays on the
  * phone: the frames are decoded here and never stored. The camera is on
- * only while this screen is shown (the app has the permission by then).
+ * only while this screen is shown. [onNoPermission]: the screen came back
+ * (after the app was closed) without the camera permission, which the
+ * user can take away in Settings meanwhile.
  */
 @Composable
-fun ScanScreen(onBack: () -> Unit, onFound: (String) -> Unit) {
+fun ScanScreen(onBack: () -> Unit, onFound: (String) -> Unit, onNoPermission: () -> Unit = onBack) {
+    val context = LocalContext.current
+    val granted = remember {
+        ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+    }
+    if (!granted) {
+        LaunchedEffect(Unit) { onNoPermission() }
+        Box(Modifier.fillMaxSize().background(Color.Black))
+        return
+    }
+    CameraScanner(onBack, onFound)
+}
+
+@Composable
+private fun CameraScanner(onBack: () -> Unit, onFound: (String) -> Unit) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val found by rememberUpdatedState(onFound)
@@ -136,7 +156,22 @@ fun ScanScreen(onBack: () -> Unit, onFound: (String) -> Unit) {
                     if (selector == null) {
                         failed = true
                     } else {
-                        camera = p.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+                        val cam = p.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+                        camera = cam
+                        // Opening fails later, not in bindToLifecycle (camera
+                        // disabled by policy, taken by another app): say so
+                        // instead of a black screen.
+                        cam.cameraInfo.cameraState.observe(lifecycleOwner) { state ->
+                            val error = state.error
+                            if (error != null && error.type == CameraState.ErrorType.CRITICAL) {
+                                AppLog.w("camera error ${error.code}")
+                                failed = true
+                            } else if (state.type == CameraState.Type.OPEN) {
+                                failed = false
+                            }
+                        }
+                        // The torch goes off when the app leaves the screen.
+                        cam.cameraInfo.torchState.observe(lifecycleOwner) { torch = it == TorchState.ON }
                     }
                 } catch (e: Exception) {
                     AppLog.w("camera did not start", e)
@@ -148,6 +183,10 @@ fun ScanScreen(onBack: () -> Unit, onFound: (String) -> Unit) {
         onDispose {
             disposed = true
             done.set(true)
+            camera?.cameraInfo?.let { info ->
+                info.cameraState.removeObservers(lifecycleOwner)
+                info.torchState.removeObservers(lifecycleOwner)
+            }
             camera = null
             try {
                 provider?.unbindAll()

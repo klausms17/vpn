@@ -345,7 +345,10 @@ private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, now: Long
         label = "status",
     )
     val showTimer = state == VpnState.CONNECTED && since > 0
-    val timerHeight by animateDpAsState(if (showTimer) 54.dp else 0.dp, tween(450), label = "timer")
+    // The timer's own line height, which grows with the system font size:
+    // a fixed height would cut the digits on phones with larger text.
+    val timerFull = with(LocalDensity.current) { IosType.timer.lineHeight.toDp() } + 2.dp
+    val timerHeight by animateDpAsState(if (showTimer) timerFull else 0.dp, tween(450), label = "timer")
     Column(
         // At least the connected height, so the list does not jump between
         // states; taller with big system fonts instead of cutting text.

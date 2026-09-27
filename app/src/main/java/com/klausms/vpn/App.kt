@@ -2,16 +2,29 @@ package com.klausms.vpn
 
 import android.app.ActivityManager
 import android.app.Application
-import android.app.ApplicationExitInfo
+import android.content.Context
 import android.os.Build
+import androidx.core.content.edit
 import com.klausms.vpn.data.AppRepository
+import com.klausms.vpn.service.RuntimeState
 import com.klausms.vpn.util.AppLog
+import com.klausms.vpn.util.ProcessExits
 import com.klausms.vpn.widget.VpnWidget
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import java.io.File
 
 class App : Application() {
     /** Only used by the UI process; the VPN process reads files directly. */
     val repository: AppRepository by lazy { AppRepository(this) }
+
+    /**
+     * UI process: work that must finish even if the screen closes meanwhile
+     * (Back on Android 8–11 ends the activity and its ViewModel), such as
+     * saving an import or applying a changed setting to the tunnel.
+     */
+    val appScope: CoroutineScope by lazy { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
 
     override fun onCreate() {
         super.onCreate()
@@ -27,9 +40,10 @@ class App : Application() {
     }
 
     /**
-     * Why the previous VPN process ended, if it did not end normally
-     * (crash, native crash, killed for memory): a tunnel that went off by
-     * itself then leaves a trace in the log the user can send.
+     * Why the previous VPN process ended: a tunnel that went off by itself
+     * then leaves a trace in the log the user can send. Read before anything
+     * in this process changes should_run, so it still says whether the VPN
+     * was meant to be on.
      */
     private fun logLastExit() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
@@ -37,14 +51,19 @@ class App : Application() {
             val am = getSystemService(ActivityManager::class.java) ?: return
             val last = am.getHistoricalProcessExitReasons(packageName, 0, 10)
                 .firstOrNull { it.processName.endsWith(":vpn") } ?: return
-            val normal = last.reason == ApplicationExitInfo.REASON_EXIT_SELF ||
-                last.reason == ApplicationExitInfo.REASON_USER_REQUESTED ||
-                last.reason == ApplicationExitInfo.REASON_USER_STOPPED ||
-                last.reason == ApplicationExitInfo.REASON_PACKAGE_UPDATED
-            if (!normal) {
-                val ago = (System.currentTimeMillis() - last.timestamp) / 1000
-                AppLog.w("previous vpn process ended ${ago}s ago: reason ${last.reason}, status ${last.status}, ${last.description ?: "no description"}")
-            }
+            // Each end once, even if this process is started again before
+            // another one ends.
+            val prefs = getSharedPreferences("exit_log", Context.MODE_PRIVATE)
+            if (prefs.getLong("last_logged", 0L) == last.timestamp) return
+            prefs.edit { putLong("last_logged", last.timestamp) }
+            val wanted = RuntimeState.shouldRun(this)
+            if (!ProcessExits.worthLogging(last.reason, wanted)) return
+            val ago = (System.currentTimeMillis() - last.timestamp) / 1000
+            AppLog.w(
+                "previous vpn process ended ${ago}s ago" + (if (wanted) " while the VPN was on" else "") +
+                    ": ${ProcessExits.reasonName(last.reason)}, importance ${last.importance}, status ${last.status}, " +
+                    (last.description ?: "no description"),
+            )
         } catch (e: Exception) {
             AppLog.w("exit reasons", e)
         }

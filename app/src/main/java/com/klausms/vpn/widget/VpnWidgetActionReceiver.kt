@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import com.klausms.vpn.service.RuntimeState
 import com.klausms.vpn.service.VpnCommands
+import com.klausms.vpn.service.VpnState
+import com.klausms.vpn.service.VpnStatusHolder
 import com.klausms.vpn.util.AppLog
 
 /**
@@ -27,6 +29,12 @@ class VpnWidgetActionReceiver : BroadcastReceiver() {
                 // process was just restarted and does not know the state
                 // yet: a pending automatic restart must not bring the
                 // tunnel back after the user turned it off.
+                val state = VpnStatusHolder.status.value.state
+                if (state == VpnState.DISCONNECTED || state == VpnState.ERROR) {
+                    // The widget still showed "on": the VPN process had
+                    // ended without redrawing it (killed by the system).
+                    AppLog.w("widget: off tapped on a stale picture, the tunnel was already down")
+                }
                 RuntimeState.setShouldRun(context, false)
                 try {
                     VpnCommands.disconnect(context, "widget")

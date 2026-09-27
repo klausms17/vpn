@@ -62,6 +62,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -498,12 +499,14 @@ fun PrimaryButton(
     Row(
         modifier
             .fillMaxWidth()
-            .height(50.dp)
+            // At least 50 pt; taller with a large system font instead of cutting the label.
+            .heightIn(min = 50.dp)
             .scale(scale)
             .clip(RoundedCornerShape(25.dp))
             .background(if (enabled) color else kc.fill)
             .background(Brush.verticalGradient(0f to Color(0x1AFFFFFF), 0.5f to Color.Transparent))
-            .tap(source, enabled = enabled, onClick = onClick),
+            .tap(source, enabled = enabled, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -511,7 +514,7 @@ fun PrimaryButton(
             IosIcon(icon, if (enabled) Color.White else kc.tertiary, Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
         }
-        Text(text, style = IosType.headline, color = if (enabled) Color.White else kc.tertiary)
+        Text(text, style = IosType.headline, color = if (enabled) Color.White else kc.tertiary, textAlign = TextAlign.Center)
     }
 }
 
@@ -523,11 +526,12 @@ fun SecondaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modi
     Row(
         modifier
             .fillMaxWidth()
-            .height(50.dp)
+            .heightIn(min = 50.dp)
             .scale(scale)
             .clip(RoundedCornerShape(25.dp))
             .background(kc.fill)
-            .tap(source, onClick = onClick),
+            .tap(source, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -535,7 +539,7 @@ fun SecondaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modi
             IosIcon(icon, kc.label, Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
         }
-        Text(text, style = IosType.headline, color = kc.label)
+        Text(text, style = IosType.headline, color = kc.label, textAlign = TextAlign.Center)
     }
 }
 
