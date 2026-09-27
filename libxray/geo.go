@@ -293,7 +293,8 @@ func encodeVarint(v uint64) []byte {
 // whether all of its addresses fall into the geoip category, e.g.
 // "ru-whitelist" to tell if a server stays reachable when mobile internet
 // runs in whitelist-only mode. Returns 1 (yes), 0 (no) or -1 (mixed).
-func HostInGeoIP(path, code, host string, timeoutMs int32) (res int32, err error) {
+// (The result must not be named "res": gomobile's Objective-C code uses it.)
+func HostInGeoIP(path, code, host string, timeoutMs int32) (verdict int32, err error) {
 	defer recoverInto(&err)
 
 	var ips []string
