@@ -4,7 +4,7 @@
 //	    runs the site the REALITY inbound imitates (TLS 1.3 with a
 //	    realistic certificate chain) and a plain web page answering T.
 //	e2e check -sub URL -resolve HOST:IP -cacert FILE -hwid H -url URL -expect T
-//	    fetches the subscription like Klaus VPN does, parses it with the
+//	    fetches the subscription like Kirov VPN does, parses it with the
 //	    app's own core (libxray) and fetches URL through every server in it.
 //	    -save FILE keeps the subscription; -body FILE uses a kept one instead
 //	    of downloading; -expect-fail succeeds only if no server lets the
@@ -34,6 +34,7 @@ import (
 	"github.com/klausms17/vpn/libxray"
 )
 
+// The app's User-Agent keeps its former name on purpose (the panel matches it).
 const userAgent = "KlausVPN/1.0.99 (Android)"
 
 func main() {

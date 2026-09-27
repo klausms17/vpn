@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""klaus-monitor: block reports from friends' Klaus VPN apps -> Telegram.
+"""klaus-monitor: block reports from friends' Kirov VPN apps -> Telegram.
 
 Runs on the panel host next to Remnawave (install-panel.sh starts it in the
 official python:3-alpine image with this file mounted read-only; standard
@@ -306,7 +306,7 @@ def alert_text(host, h, p, reports):
     name = (host.get("remark") or "").strip() or (node_names[0] if node_names else "%s:%d" % (h, p))
     labels = [label + (" (белые списки)" if whitelist else "") for label, whitelist in reports]
     lines = [
-        "Klaus VPN: сервер «%s» не отвечает у %s за последние %s." % (name, people(len(labels)), duration(WINDOW)),
+        "Kirov VPN: сервер «%s» не отвечает у %s за последние %s." % (name, people(len(labels)), duration(WINDOW)),
         "Сети: %s." % network_mix(labels),
     ]
     disable = "klaus-panel disable-node %s" % node_names[0] if node_names else "klaus-panel disable-node …"
@@ -333,7 +333,7 @@ def whitelist_text(host, h, p, reports):
     node_names, state = node_state(host)
     name = (host.get("remark") or "").strip() or (node_names[0] if node_names else "%s:%d" % (h, p))
     lines = [
-        "Klaus VPN: мобильный интернет в режиме белых списков у %s за последние %s: сервер «%s» у них "
+        "Kirov VPN: мобильный интернет в режиме белых списков у %s за последние %s: сервер «%s» у них "
         "не открывается, и зарубежные сайты без VPN у них тоже не открываются." % (people(len(reports)), duration(WINDOW), name),
         "Сети: %s." % network_mix([label for label, _ in reports]),
         "Скорее всего, оператор открывает только сайты из белого списка: тогда не работает ни один "

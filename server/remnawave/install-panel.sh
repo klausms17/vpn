@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Klaus VPN panel installer: Remnawave panel + subscription page behind Caddy
+# Kirov VPN panel installer: Remnawave panel + subscription page behind Caddy
 # (automatic HTTPS), for handing out personal subscription links to friends.
 #
 # Run as root on a fresh Ubuntu 22.04+/Debian 12+ VPS abroad (2 CPU, 4 GB).
@@ -11,7 +11,7 @@
 # Options (environment variables, written AFTER sudo):
 #   PANEL_DOMAIN   admin panel address (required)
 #   SUB_DOMAIN     subscription page address given to friends (required)
-#   APK_URL        https link to the Klaus VPN APK (adds a download button;
+#   APK_URL        https link to the Kirov VPN APK (adds a download button;
 #                  without it the button appears once "klaus-panel
 #                  publish-apk" has put the app on https://SUB_DOMAIN/app/)
 #   GITHUB_TOKEN   read-only GitHub token for the app's releases: the panel
@@ -215,11 +215,12 @@ fi
 
 # Never silently take over a Remnawave setup this script did not create:
 # FORCE=1 does it, keeping its database and secrets (copies of the files stay).
+# Files written before the app was renamed say "Klaus VPN".
 ADOPT=0
 if [ ! -f "$CONF" ] && [ -f "$RW_DIR/docker-compose.yml" ] &&
-  ! grep -q "Written by Klaus VPN install-panel.sh" "$RW_DIR/docker-compose.yml"; then
+  ! grep -Eq "Written by (Kirov|Klaus) VPN install-panel\.sh" "$RW_DIR/docker-compose.yml"; then
   [ "$FORCE" = "1" ] ||
-    die "в $RW_DIR уже есть Remnawave, установленный не этим скриптом. Если его нужно перенастроить под Klaus VPN (пользователи и база сохранятся), запустите: sudo FORCE=1 … bash $0"
+    die "в $RW_DIR уже есть Remnawave, установленный не этим скриптом. Если его нужно перенастроить под Kirov VPN (пользователи и база сохранятся), запустите: sudo FORCE=1 … bash $0"
   ADOPT=1
 fi
 
@@ -371,7 +372,7 @@ if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then TELEGRAM_ENA
 
 say "Записываю настройки в $RW_DIR"
 put_file "$RW_DIR/.env" <<EOF
-# Written by Klaus VPN install-panel.sh; re-running the script rewrites it.
+# Written by Kirov VPN install-panel.sh; re-running the script rewrites it.
 APP_PORT=3000
 METRICS_PORT=3001
 API_INSTANCES=1
@@ -399,7 +400,7 @@ EOF
 # (3.4.x); the subscription page and Caddy are added. Only Caddy is
 # reachable from the internet.
 put_file "$RW_DIR/docker-compose.yml" <<'EOF'
-# Written by Klaus VPN install-panel.sh; re-running the script rewrites it.
+# Written by Kirov VPN install-panel.sh; re-running the script rewrites it.
 name: remnawave
 
 x-common: &common
@@ -572,7 +573,7 @@ tls_line=""
 # No access log, and the error log (a request that failed, e.g. while the
 # page restarts) keeps neither the address nor the link of the friend.
 put_file "$RW_DIR/Caddyfile" <<EOF
-# Written by Klaus VPN install-panel.sh; re-running the script rewrites it.
+# Written by Kirov VPN install-panel.sh; re-running the script rewrites it.
 {
 	log default {
 		format filter {
@@ -599,7 +600,7 @@ $tls_line
 	encode
 	handle / {
 		header Content-Type "text/plain; charset=utf-8"
-		respond "Klaus VPN: с вопросами обращайтесь к тому, кто дал вам ссылку на подписку." 200
+		respond "Kirov VPN: с вопросами обращайтесь к тому, кто дал вам ссылку на подписку." 200
 	}
 	handle /klaus/* {
 		reverse_proxy klaus-monitor:8080
@@ -607,13 +608,14 @@ $tls_line
 	handle_path /app/* {
 		root * /srv/app
 		header Cache-Control "no-cache"
-		# An app may still offer a build that was replaced long ago: its
-		# link leads to the current one.
+		# An app may still offer a build that was replaced long ago, or a
+		# file of the app's former name (KlausVPN): its link leads to the
+		# current one.
 		@gone {
-			path /KlausVPN-*.apk
+			path /KirovVPN-*.apk /KlausVPN*.apk
 			not file
 		}
-		redir @gone /app/KlausVPN.apk 302
+		redir @gone /app/KirovVPN.apk 302
 		@apk path *.apk
 		header @apk Content-Type "application/vnd.android.package-archive"
 		file_server
@@ -729,7 +731,7 @@ done
 ADMIN_JWT=""
 save_admin() { # USER PASSWORD
   mkdir -p "$(dirname "$ADMIN_FILE")"
-  (umask 077 && printf 'Панель Klaus VPN (Remnawave): https://%s\nЛогин: %s\nПароль: %s\n' "$PANEL_DOMAIN" "$1" "$2" > "$ADMIN_FILE")
+  (umask 077 && printf 'Панель Kirov VPN (Remnawave): https://%s\nЛогин: %s\nПароль: %s\n' "$PANEL_DOMAIN" "$1" "$2" > "$ADMIN_FILE")
   chmod 600 "$ADMIN_FILE"
 }
 if [ "$(jq -r '.response.isRegisterAllowed' <<<"$RESP")" = "true" ]; then
@@ -800,7 +802,7 @@ if ! token_ok "$MONITOR_TOKEN" /api/hosts || ! token_ok "$MONITOR_TOKEN" /api/no
 fi
 
 put_file "$RW_DIR/subscription.env" <<EOF
-# Written by Klaus VPN install-panel.sh; re-running the script rewrites it.
+# Written by Kirov VPN install-panel.sh; re-running the script rewrites it.
 APP_PORT=3010
 REMNAWAVE_PANEL_URL=http://remnawave:3000
 REMNAWAVE_API_TOKEN=$SUBPAGE_TOKEN
@@ -890,9 +892,9 @@ if [ "$SKIP_SYSTEM" != "1" ]; then
     units_changed=1
   }
   put_unit klaus-panel-apk.service <<EOF
-# Written by Klaus VPN install-panel.sh
+# Written by Kirov VPN install-panel.sh
 [Unit]
-Description=Klaus VPN: publish a new app build on https://$SUB_DOMAIN/app/
+Description=Kirov VPN: publish a new app build on https://$SUB_DOMAIN/app/
 After=network-online.target docker.service
 Wants=network-online.target
 
@@ -902,9 +904,9 @@ Environment=KLAUS_PANEL_CONF=$CONF
 ExecStart=/usr/local/bin/klaus-panel publish-apk --quiet
 EOF
   put_unit klaus-panel-apk.timer <<'EOF'
-# Written by Klaus VPN install-panel.sh
+# Written by Kirov VPN install-panel.sh
 [Unit]
-Description=Klaus VPN: look for a new app build every hour
+Description=Kirov VPN: look for a new app build every hour
 
 [Timer]
 OnCalendar=hourly

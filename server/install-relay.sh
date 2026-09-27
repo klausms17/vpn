@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Klaus VPN relay for mobile "whitelist" shutdowns.
+# Kirov VPN relay for mobile "whitelist" shutdowns.
 #
 # When mobile internet runs in whitelist-only mode, phones can reach only
 # approved (mostly Russian) IP ranges, so a foreign VPN server is cut off.
@@ -13,7 +13,7 @@
 set -euo pipefail
 
 PORT="${PORT:-443}"
-NAME="${NAME:-KlausVPN RU}"
+NAME="${NAME:-KirovVPN RU}"
 RESET="${RESET:-0}"
 CONF_DIR=/usr/local/etc/xray
 CONF="$CONF_DIR/config.json"

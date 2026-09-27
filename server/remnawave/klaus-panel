@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# klaus-panel: friends and VPN servers of the Klaus VPN Remnawave panel.
+# klaus-panel: friends and VPN servers of the Kirov VPN Remnawave panel.
 #
 # Installed to /usr/local/bin by install-panel.sh. Talks to the panel API on
 # 127.0.0.1:3000 with the token from /opt/remnawave/klaus-panel.env (the
@@ -11,8 +11,11 @@ CONF="${KLAUS_PANEL_CONF:-/opt/remnawave/klaus-panel.env}"
 PROFILE_NAME="KlausVPN"   # config profile shared by all VPN servers
 SQUAD_NAME="KlausVPN"     # internal squad every friend is in
 INBOUND_TAG="VLESS_REALITY"
+# The response rule for the app is found by this name, and it matches the
+# app's User-Agent "KlausVPN/…": both keep the app's former name on purpose.
 RULE_NAME="Klaus VPN"
-APP_NAME="Klaus VPN"
+APP_NAME="Kirov VPN"
+OLD_APP_NAME="Klaus VPN" # the former name: setup replaces the page entry and remark made with it
 NEVER="2099-12-31T00:00:00.000Z" # the panel needs an expiry date
 BACKUP_DIR="${BACKUP_DIR:-/root/remnawave-backups}"
 # A Telegram API address given on the command line wins over the saved one
@@ -25,7 +28,7 @@ die() { printf '\033[1;31mОшибка:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-klaus-panel — управление панелью Klaus VPN
+klaus-panel — управление панелью Kirov VPN
 
 Знакомые:
   add-user ИМЯ [--devices N]   новая подписка: ссылка, QR-код и ссылка для приложения
@@ -272,7 +275,7 @@ setup_squad() {
 setup_subscription_settings() {
   api_ok GET /api/subscription-settings
   local body
-  body="$(jq -c --arg support "${SUPPORT_URL:-}" --arg rule "$RULE_NAME" --arg sub "$SUB_DOMAIN" '.response
+  body="$(jq -c --arg support "${SUPPORT_URL:-}" --arg rule "$RULE_NAME" --arg sub "$SUB_DOMAIN" --arg old "$OLD_APP_NAME" '.response
     | {
         # English defaults of the panel; replaced only while untouched.
         seed: {
@@ -289,13 +292,14 @@ setup_subscription_settings() {
           disabledUsers: ["Подписка отключена", "Напишите тому, кто дал вам ссылку"],
           emptyHosts: ["Серверов пока нет", "Обновите подписку позже"],
           HWIDMaxDevicesExceeded: ["Достигнут лимит устройств"],
-          HWIDNotSupported: ["Обновите приложение Klaus VPN"]
+          HWIDNotSupported: ["Обновите приложение Kirov VPN"]
         },
         rule: {
           name: $rule,
-          description: "Klaus VPN for Android: base64 list of links",
+          description: "Kirov VPN for Android: base64 list of links",
           enabled: true,
           operator: "AND",
+          # The User-Agent of the app keeps its former name on purpose.
           conditions: [{headerName: "user-agent", operator: "REGEX", value: "^KlausVPN/", caseSensitive: true}],
           responseType: "XRAY_BASE64",
           responseModifications: {ignoreServeJsonAtBaseSubscription: true}
@@ -313,11 +317,13 @@ setup_subscription_settings() {
         # block reports to klaus-report-url and looks for updates at
         # klaus-app-url.
         customResponseHeaders: (($c.customResponseHeaders // {})
-          + {"profile-title": "Klaus VPN", "profile-update-interval": "1",
+          + {"profile-title": "Kirov VPN", "profile-update-interval": "1",
              "klaus-report-url": "https://\($sub)/klaus/report",
              "klaus-app-url": "https://\($sub)/app/version.json"}
           | if $support != "" then .["support-url"] = $support else del(.["support-url"]) end),
-        customRemarks: (if $c.customRemarks == .seed then .ru else $c.customRemarks end),
+        # Ours from before the app was renamed count as untouched too.
+        customRemarks: (if $c.customRemarks == .seed or $c.customRemarks == (.ru | .HWIDNotSupported = ["Обновите приложение \($old)"])
+          then .ru else $c.customRemarks end),
         # Devices are recorded even while the limit is off (the panel
         # stores every valid x-hwid); "klaus-panel hwid-limit N" turns the
         # limit on later. Turning it on now would cut off app versions that
@@ -341,8 +347,8 @@ setup_subpage() {
   api_ok GET "/api/subscription-page-configs/$uuid"
   # The app published on the subscription address, unless APK_URL says
   # otherwise.
-  if [ -z "$apk" ] && [ -f "$APP_DIR/KlausVPN.apk" ]; then apk="https://$SUB_DOMAIN/app/KlausVPN.apk"; fi
-  cfg="$(jq -c --arg apk "$apk" --arg support "${SUPPORT_URL:-}" --arg sub "$SUB_DOMAIN" --arg app "$APP_NAME" '.response.config
+  if [ -z "$apk" ] && [ -f "$APP_DIR/KirovVPN.apk" ]; then apk="https://$SUB_DOMAIN/app/KirovVPN.apk"; fi
+  cfg="$(jq -c --arg apk "$apk" --arg support "${SUPPORT_URL:-}" --arg sub "$SUB_DOMAIN" --arg app "$APP_NAME" --arg old "$OLD_APP_NAME" '.response.config
     | .locales as $locales
     # Every text needs every language of the page: Russian for ru,
     # English for the rest.
@@ -358,11 +364,11 @@ setup_subpage() {
           svgIconKey: "DownloadIcon", svgIconColor: "cyan",
           title: t("Установите приложение"; "Install the app"),
           description: (if $apk != "" then
-              t("Скачайте Klaus VPN и откройте файл. Если телефон спросит, разрешите установку из этого источника." + $tip_ru;
-                "Download Klaus VPN and open the file. If asked, allow installing from this source." + $tip_en)
+              t("Скачайте Kirov VPN и откройте файл. Если телефон спросит, разрешите установку из этого источника." + $tip_ru;
+                "Download Kirov VPN and open the file. If asked, allow installing from this source." + $tip_en)
             else
-              t("Попросите файл Klaus VPN у того, кто дал вам эту ссылку, и установите его." + $tip_ru;
-                "Ask the person who gave you this link for the Klaus VPN file and install it." + $tip_en)
+              t("Попросите файл Kirov VPN у того, кто дал вам эту ссылку, и установите его." + $tip_ru;
+                "Ask the person who gave you this link for the Kirov VPN file and install it." + $tip_en)
             end),
           buttons: (if $apk != "" then
               [{type: "external", link: $apk, text: t("Скачать приложение"; "Download the app"), svgIconKey: "DownloadIcon"}]
@@ -371,11 +377,11 @@ setup_subpage() {
         {
           svgIconKey: "CloudDownload", svgIconColor: "cyan",
           title: t("Добавьте подписку"; "Add the subscription"),
-          description: t("Нажмите кнопку: откроется Klaus VPN и предложит добавить подписку. Если ничего не произошло, скопируйте ссылку и вставьте её в приложении (кнопка «+»).";
-            "Tap the button: Klaus VPN opens and offers to add the subscription. If nothing happens, copy the link and paste it in the app (the + button)."),
+          description: t("Нажмите кнопку: откроется Kirov VPN и предложит добавить подписку. Если ничего не произошло, скопируйте ссылку и вставьте её в приложении (кнопка «+»).";
+            "Tap the button: Kirov VPN opens and offers to add the subscription. If nothing happens, copy the link and paste it in the app (the + button)."),
           buttons: [
             {type: "subscriptionLink", link: "klausvpn://add/{{SUBSCRIPTION_LINK}}",
-              text: t("Добавить в Klaus VPN"; "Add to Klaus VPN"), svgIconKey: "Plus"},
+              text: t("Добавить в Kirov VPN"; "Add to Kirov VPN"), svgIconKey: "Plus"},
             {type: "copyButton", link: "{{SUBSCRIPTION_LINK}}",
               text: t("Скопировать ссылку"; "Copy the link"), svgIconKey: "Copy"}
           ]
@@ -399,8 +405,8 @@ setup_subpage() {
     | .baseSettings.metaTitle = $app
     | .baseSettings.metaDescription = $app
     | .platforms.android //= {displayName: t("Android"; "Android"), svgIconKey: "Android", apps: []}
-    # The other apps stay available, Klaus VPN comes first and is preselected.
-    | .platforms.android.apps = [$klaus] + (.platforms.android.apps | map(select(.name != $app) | .featured = false))
+    # The other apps stay available, Kirov VPN comes first and is preselected.
+    | .platforms.android.apps = [$klaus] + (.platforms.android.apps | map(select(.name != $app and .name != $old) | .featured = false))
   ' <<<"$RESP")"
   # Unchanged settings: no restart (friends' refreshes would fail meanwhile).
   [ "$(jq -S -c '.response.config' <<<"$RESP")" != "$(jq -S -c . <<<"$cfg")" ] || return 0
@@ -419,6 +425,15 @@ refresh_version_json() {
     write_file "$APP_DIR/version.json"
 }
 
+# A build published before the app was renamed gets the new fixed name
+# too: the page keeps its download button until publish-apk brings a new
+# build (which then removes the old names).
+link_former_apk() {
+  if [ -f "$APP_DIR/KlausVPN.apk" ] && [ ! -e "$APP_DIR/KirovVPN.apk" ]; then
+    ln "$APP_DIR/KlausVPN.apk" "$APP_DIR/KirovVPN.apk"
+  fi
+}
+
 cmd_setup() {
   : "${REALITY_SNI:?}" "${REALITY_PORT:?}" "${SUB_DOMAIN:?}"
   command -v openssl >/dev/null || die "нужна программа openssl"
@@ -426,6 +441,7 @@ cmd_setup() {
   setup_squad
   setup_subscription_settings
   refresh_version_json
+  link_former_apk
   setup_subpage
   write_monitor_env
   say "Настройки панели применены"
@@ -441,7 +457,7 @@ show_link() { # USER_JSON
   echo
   echo "  $link"
   echo
-  echo "Ссылка сразу для Klaus VPN (откроет приложение, если оно установлено):"
+  echo "Ссылка сразу для Kirov VPN (откроет приложение, если оно установлено):"
   echo
   echo "  klausvpn://add/$link"
   echo
@@ -658,7 +674,7 @@ cmd_hwid_limit() {
   missing="$(jq -r --slurpfile dev "$TMPD/devices.json" '($dev[0] | map(.userId)) as $ids
     | [.[] | select(.status == "ACTIVE") | select(.id as $i | $ids | index($i) | not) | .username] | join(", ")' "$TMPD/users.json")"
   echo "Лимит устройств на человека: $n (кроме тех, кому задан свой через --devices)."
-  echo "Включайте, только когда у всех стоит версия Klaus VPN, которая сообщает панели"
+  echo "Включайте, только когда у всех стоит версия Kirov VPN, которая сообщает панели"
   echo "устройство, и сборки подписаны постоянным ключом (раздел «Подпись приложения»)."
   if [ -n "$missing" ]; then
     warn "у этих подписок ещё нет ни одного устройства — они сразу перестанут получать серверы: $missing"
@@ -687,13 +703,13 @@ cmd_backup() {
   for f in .env subscription.env klaus-panel.env klaus-monitor.env docker-compose.yml Caddyfile; do
     if [ -f "$RW_DIR/$f" ]; then cp -p "$RW_DIR/$f" "$tmp/"; fi
   done
-  # The published app: version.json and the APK it names (KlausVPN.apk is
+  # The published app: version.json and the APK it names (KirovVPN.apk is
   # the same file, one more name for it: cp -a keeps them one file).
   if [ -f "$APP_DIR/version.json" ]; then
     local apk files=("$APP_DIR/version.json")
     apk="$(jq -r '.apk // "" | split("/") | last' "$APP_DIR/version.json")"
-    if [[ "$apk" =~ ^KlausVPN-[0-9A-Za-z._-]+\.apk$ ]] && [ -f "$APP_DIR/$apk" ]; then files+=("$APP_DIR/$apk"); fi
-    if [ -f "$APP_DIR/KlausVPN.apk" ]; then files+=("$APP_DIR/KlausVPN.apk"); fi
+    if [[ "$apk" =~ ^KirovVPN-[0-9A-Za-z._-]+\.apk$ ]] && [ -f "$APP_DIR/$apk" ]; then files+=("$APP_DIR/$apk"); fi
+    if [ -f "$APP_DIR/KirovVPN.apk" ]; then files+=("$APP_DIR/KirovVPN.apk"); fi
     mkdir -p "$tmp/app"
     cp -a "${files[@]}" "$tmp/app/"
   fi
@@ -814,7 +830,7 @@ cmd_telegram_setup() {
     [ "$i" -eq 60 ] && die "панель не запустилась после перезапуска: docker logs remnawave"
     sleep 3
   done
-  tg_send "Klaus VPN: оповещения включены.
+  tg_send "Kirov VPN: оповещения включены.
 Сюда придёт сообщение, если VPN-сервер потеряет связь с панелью или если у знакомых он перестанет открываться (похоже на блокировку)."
   say "Готово: проверочное сообщение отправлено в Telegram"
 }
@@ -823,14 +839,14 @@ cmd_telegram_test() {
   { [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; } ||
     die "оповещения ещё не настроены: klaus-panel telegram-setup ТОКЕН"
   TG_TOKEN="$TELEGRAM_BOT_TOKEN"
-  tg_send "Klaus VPN: проверка оповещений. Всё работает."
+  tg_send "Kirov VPN: проверка оповещений. Всё работает."
   say "Проверочное сообщение отправлено"
 }
 
 # ---------------------------------------------------------------- app
 # New builds of the app from the GitHub releases (private repository: a
-# read-only token) go to https://SUB_DOMAIN/app/: KlausVPN.apk,
-# KlausVPN-<version>.apk and version.json, which the app checks for updates.
+# read-only token) go to https://SUB_DOMAIN/app/: KirovVPN.apk,
+# KirovVPN-<version>.apk and version.json, which the app checks for updates.
 # Only from RELEASE_TAG, "stable" by default: CI makes it on purpose, never
 # on every push like the build-<branch> test builds.
 gh_get() { # URL FILE [ACCEPT] [SECONDS]; sets GH_CODE. The token goes to curl
@@ -911,12 +927,12 @@ cmd_publish_apk() {
     [ "$quiet" = "1" ] && return 0
     die "сборка в релизе $tag подписана временным ключом: приложения знакомых не смогут на неё обновиться. Добавьте постоянный ключ подписи (инструкция, раздел 9) и дождитесь новой сборки. Выложить всё равно: ALLOW_TEMP_KEY=1 klaus-panel publish-apk"
   fi
-  apk="$(jq -r 'first(.assets[]? | select(.name | test("^KlausVPN-[0-9A-Za-z._-]+\\.apk$")) | .name) // empty' "$TMPD/release.json")"
+  apk="$(jq -r 'first(.assets[]? | select(.name | test("^KirovVPN-[0-9A-Za-z._-]+\\.apk$")) | .name) // empty' "$TMPD/release.json")"
   apk_url="$(jq -r --arg n "$apk" 'first(.assets[]? | select(.name == $n) | .url) // empty' "$TMPD/release.json")"
   sums_url="$(jq -r 'first(.assets[]? | select(.name == "SHA256SUMS.txt") | .url) // empty' "$TMPD/release.json")"
-  { [ -n "$apk" ] && [ -n "$apk_url" ]; } || die "в релизе $tag нет файла KlausVPN-….apk"
+  { [ -n "$apk" ] && [ -n "$apk_url" ]; } || die "в релизе $tag нет файла KirovVPN-….apk"
   [ -n "$sums_url" ] || die "в релизе $tag нет SHA256SUMS.txt: без контрольной суммы файл не публикуется"
-  ver="${apk#KlausVPN-}"
+  ver="${apk#KirovVPN-}"
   ver="${ver%.apk}"
   # CI names builds 1.0.<run number>: the last number is the versionCode.
   [[ "$ver" =~ ([0-9]+)$ ]] || die "из имени $apk не понять номер версии"
@@ -933,10 +949,10 @@ cmd_publish_apk() {
     cur_apk="$(jq -r '.apk // "" | split("/") | last' "$APP_DIR/version.json")"
     [[ "$cur_code" =~ ^[0-9]+$ ]] || cur_code=0
   fi
-  if [ "$cur_sha" = "$sha" ] && [ -f "$APP_DIR/$apk" ] && [ -f "$APP_DIR/KlausVPN.apk" ]; then
+  if [ "$cur_sha" = "$sha" ] && [ -f "$APP_DIR/$apk" ] && [ -f "$APP_DIR/KirovVPN.apk" ]; then
     # A run that could not reach the panel left the page without its button.
     page_button
-    note "Версия $ver уже опубликована: https://$SUB_DOMAIN/app/KlausVPN.apk"
+    note "Версия $ver уже опубликована: https://$SUB_DOMAIN/app/KirovVPN.apk"
     return 0
   fi
   if [ "$cur_code" -gt "$code" ]; then
@@ -959,8 +975,8 @@ cmd_publish_apk() {
   # never names a file that is not there yet.
   chmod 644 "$staging/$apk"
   mv -f "$staging/$apk" "$APP_DIR/$apk"
-  ln -f "$APP_DIR/$apk" "$staging/KlausVPN.apk"
-  mv -f "$staging/KlausVPN.apk" "$APP_DIR/KlausVPN.apk"
+  ln -f "$APP_DIR/$apk" "$staging/KirovVPN.apk"
+  mv -f "$staging/KirovVPN.apk" "$APP_DIR/KirovVPN.apk"
   jq -n --argjson c "$code" --arg n "$ver" --arg a "https://$SUB_DOMAIN/app/$apk" --arg s "$sha" \
     '{versionCode: $c, versionName: $n, apk: $a, sha256: $s}' > "$staging/version.json"
   chmod 644 "$staging/version.json"
@@ -969,12 +985,14 @@ cmd_publish_apk() {
   # An app shows the update it found for up to 12 hours before it checks
   # again, so a replaced build stays 13 hours (its file's time says when
   # it was replaced), then goes.
-  if [[ "$cur_apk" =~ ^KlausVPN-[0-9A-Za-z._-]+\.apk$ ]] && [ "$cur_apk" != "$apk" ] && [ -f "$APP_DIR/$cur_apk" ]; then
+  if [[ "$cur_apk" =~ ^KirovVPN-[0-9A-Za-z._-]+\.apk$ ]] && [ "$cur_apk" != "$apk" ] && [ -f "$APP_DIR/$cur_apk" ]; then
     touch "$APP_DIR/$cur_apk"
   fi
-  find "$APP_DIR" -maxdepth 1 -type f -name 'KlausVPN-*.apk' ! -name "$apk" -mmin +780 -delete
+  # Files of the app's former name (KlausVPN*.apk) go too, once 13 hours
+  # old; their links lead to the current build.
+  find "$APP_DIR" -maxdepth 1 -type f \( -name 'KirovVPN-*.apk' ! -name "$apk" -o -name 'KlausVPN*.apk' \) -mmin +780 -delete
   page_button
-  note "Опубликована версия $ver: https://$SUB_DOMAIN/app/KlausVPN.apk (приложения знакомых предложат обновиться)"
+  note "Опубликована версия $ver: https://$SUB_DOMAIN/app/KirovVPN.apk (приложения знакомых предложат обновиться)"
 }
 
 # ---------------------------------------------------------------- main

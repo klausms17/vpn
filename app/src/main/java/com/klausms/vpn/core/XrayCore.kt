@@ -71,6 +71,8 @@ object XrayCore {
     /**
      * Panels choose the response format by it. Never add the phone model or
      * browser words: "Mozilla", "Edge" etc. would get the web page instead.
+     * It keeps the app's former name on purpose: our panel recognises the
+     * app by "KlausVPN/" (klaus-panel's response rule).
      */
     val USER_AGENT = "KlausVPN/${BuildConfig.VERSION_NAME} (Android)"
 

@@ -9,12 +9,12 @@ import org.junit.Test
 class AppUpdateTest {
     private val json = """
         {"versionCode": 27, "versionName": "1.0.27",
-         "apk": "https://sub.example.com/app/KlausVPN-1.0.27.apk", "sha256": "ab12"}
+         "apk": "https://sub.example.com/app/KirovVPN-1.0.27.apk", "sha256": "ab12"}
     """.trimIndent()
 
     @Test
     fun readsThePanelsVersionJson() {
-        assertEquals(AppUpdate(27, "1.0.27", "https://sub.example.com/app/KlausVPN-1.0.27.apk"), AppUpdate.parse(json))
+        assertEquals(AppUpdate(27, "1.0.27", "https://sub.example.com/app/KirovVPN-1.0.27.apk"), AppUpdate.parse(json))
     }
 
     @Test
@@ -60,15 +60,15 @@ class AppUpdateTest {
     @Test
     fun onlyHttpsApkLinks() {
         fun apk(url: String) = AppUpdate.parse("""{"versionCode": 27, "versionName": "1.0.27", "apk": "$url"}""")
-        assertNull(apk("http://sub.example.com/app/KlausVPN.apk"))
-        assertNull(apk("ftp://sub.example.com/app/KlausVPN.apk"))
-        assertNull(apk("file:///sdcard/KlausVPN.apk"))
+        assertNull(apk("http://sub.example.com/app/KirovVPN.apk"))
+        assertNull(apk("ftp://sub.example.com/app/KirovVPN.apk"))
+        assertNull(apk("file:///sdcard/KirovVPN.apk"))
         assertNull(apk("javascript:alert(1)"))
         assertNull(apk("https://"))
-        assertNull(apk("https:///KlausVPN.apk"))
-        assertNull(apk("https://user@evil.example.com/KlausVPN.apk"))
-        assertNull(apk("https://sub.example.com/app/Klaus VPN.apk"))
-        assertEquals("HTTPS://sub.example.com:8443/app/KlausVPN.apk", apk("HTTPS://sub.example.com:8443/app/KlausVPN.apk")?.apkUrl)
+        assertNull(apk("https:///KirovVPN.apk"))
+        assertNull(apk("https://user@evil.example.com/KirovVPN.apk"))
+        assertNull(apk("https://sub.example.com/app/Kirov VPN.apk"))
+        assertEquals("HTTPS://sub.example.com:8443/app/KirovVPN.apk", apk("HTTPS://sub.example.com:8443/app/KirovVPN.apk")?.apkUrl)
     }
 
     @Test
@@ -83,7 +83,7 @@ class AppUpdateTest {
 
     @Test
     fun savedAnswerReadsBack() {
-        val latest = AppUpdate(31, "1.0.31", "https://sub.example.com/app/KlausVPN-1.0.31.apk")
+        val latest = AppUpdate(31, "1.0.31", "https://sub.example.com/app/KirovVPN-1.0.31.apk")
         assertEquals(latest, AppUpdate.parse(latest.toJson()))
     }
 

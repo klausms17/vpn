@@ -25,7 +25,7 @@
 # and then
 #   (a) the app's User-Agent gets a base64 list with a vless REALITY link
 #       and the klaus-report-url / klaus-app-url headers,
-#   (b) a browser gets the page; its Klaus VPN button is klausvpn://add/…,
+#   (b) a browser gets the page; its Kirov VPN button is klausvpn://add/…,
 #   (c) the device from X-Hwid is recorded in the panel,
 #   (d) the app's own Go core (libxray, via test/e2e) parses the
 #       subscription and fetches a page through the node,
@@ -36,7 +36,9 @@
 #   connections 30 minutes (the profile's policy), the APK is published
 #   with a verified checksum (a wrong one is refused, a missing release is
 #   quiet for the timer) on https://SUB/app/ with version.json and the
-#   page's download button (and its Samsung and Huawei tip), block reports (unknown friend refused, one
+#   page's download button (and its Samsung and Huawei tip), the page
+#   entry, remark and published build of the app's former name taken
+#   over by setup, block reports (unknown friend refused, one
 #   friend twice is no alert, two friends in the mobile whitelist regime
 #   are one note that never says "disable", two friends are exactly one
 #   Russian alert, then quiet; rate limit; no IPs or ids in the logs),
@@ -72,7 +74,7 @@ WEB_IP=11.11.11.11
 WEB="$WEB_IP:18080"
 TOKEN="klaus-e2e-$RANDOM$RANDOM"
 HWID=5f2a9c1e7b3d4e6f8a0b1c2d3e4f5a6b
-UA_APP='KlausVPN/1.0.99 (Android)'
+UA_APP='KlausVPN/1.0.99 (Android)' # the app's User-Agent keeps its former name on purpose
 UA_BROWSER='Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36'
 IMAGES="remnawave/backend:3 postgres:18.4 valkey/valkey:9-alpine remnawave/subscription-page:latest caddy:2 remnawave/node:latest python:3-alpine"
 MOCK_PORT=18090 # mock Telegram and GitHub APIs
@@ -157,12 +159,13 @@ mock() { # PATH [curl args]: the mock APIs' own test endpoints
 sent_count() { # TEXT_PREFIX -> how many Telegram messages start with it
   mock /_mock/tg/sent | jq --arg p "$1" '[.[] | select(.text | startswith($p))] | length'
 }
-api() { # PATH -> body (read-only calls with the CLI token)
-  local tok
+api() { # PATH [curl args] -> body (calls with the CLI token)
+  local tok path="$1"
+  shift
   # shellcheck disable=SC1090
   tok="$(. "$CONF" && printf '%s' "$API_TOKEN")"
   curl -sS --noproxy '*' -H 'X-Forwarded-For: 127.0.0.1' -H 'X-Forwarded-Proto: https' \
-    -H @<(printf 'Authorization: Bearer %s\n' "$tok") "http://127.0.0.1:3000$1"
+    -H @<(printf 'Authorization: Bearer %s\n' "$tok") "$@" "http://127.0.0.1:3000$path"
 }
 sub_get() { # UA URL [curl args] -> body; headers in $WORK/last.headers
   local ua="$1" url="$2"
@@ -223,8 +226,8 @@ SERVE_PID=$!
 retry 10 curl -fsS --noproxy '*' -o /dev/null "http://$WEB/" 2>/dev/null || fail "test page did not start"
 pass "test page answers"
 
-step "Mock Telegram and GitHub APIs on :$MOCK_PORT (a fake release with KlausVPN-$APK_VERSION.apk)"
-APK="$WORK/KlausVPN-$APK_VERSION.apk"
+step "Mock Telegram and GitHub APIs on :$MOCK_PORT (a fake release with KirovVPN-$APK_VERSION.apk)"
+APK="$WORK/KirovVPN-$APK_VERSION.apk"
 head -c 3000000 /dev/urandom > "$APK"
 python3 "$HERE/mock-apis.py" --port "$MOCK_PORT" --tg-token "$TG_BOT_TOKEN" --gh-token "$GH_TEST_TOKEN" \
   --tag "$RELEASE" --bad-tag klaus-bad-sum --temp-tag klaus-temp-key --apk "$APK" > "$WORK/mock.log" 2>&1 &
@@ -236,7 +239,7 @@ step "install-panel.sh (fresh)"
 CONF="$WORK/opt/klaus-panel.env"
 install_panel "$WORK/opt" "$WORK/admin.txt" PANEL_DOMAIN="$PANEL_DOMAIN" SUB_DOMAIN="$SUB_DOMAIN" \
   REALITY_SNI=www.example.com REALITY_TARGET="$TARGET" REALITY_PORT="$VPN_PORT" \
-  APK_URL=https://example.com/KlausVPN.apk 2>&1 | tee "$WORK/install-1.log"
+  APK_URL=https://example.com/KirovVPN.apk 2>&1 | tee "$WORK/install-1.log"
 grep -q "Готово! Панель работает" "$WORK/install-1.log" || fail "install-panel.sh failed"
 [ "$(stat -c %a "$WORK/admin.txt")" = "600" ] || fail "admin credentials are not 600"
 grep -Eq '^Пароль: [A-Za-z0-9]{24,}$' "$WORK/admin.txt" || fail "admin password"
@@ -277,7 +280,7 @@ grep -q "без кода" "$WORK/tg-setup.log" || fail "the message without the 
 grep -q "($TG_CHAT)" "$WORK/tg-setup.log" || fail "chat not taken from getUpdates"
 if grep -q "$STRANGER" "$WORK/tg-setup.log" "$WORK/opt/klaus-panel.env" "$WORK/opt/.env"; then fail "a stranger's chat was taken"; fi
 mock /_mock/tg/sent | jq -c '.[] | {chat_id, text: .text[0:60]}'
-[ "$(mock /_mock/tg/sent | jq --arg c "$TG_CHAT" '[.[] | select(.chat_id == $c and (.text | startswith("Klaus VPN: оповещения включены")))] | length')" = "1" ] ||
+[ "$(mock /_mock/tg/sent | jq --arg c "$TG_CHAT" '[.[] | select(.chat_id == $c and (.text | startswith("Kirov VPN: оповещения включены")))] | length')" = "1" ] ||
   fail "no test message to chat $TG_CHAT"
 grep -E '^(IS_TELEGRAM_NOTIFICATIONS_ENABLED|TELEGRAM_BOT_API_ROOT|TELEGRAM_NOTIFY_NODES)=' "$WORK/opt/.env"
 grep -qx "IS_TELEGRAM_NOTIFICATIONS_ENABLED=true" "$WORK/opt/.env" || fail "panel notifications not enabled"
@@ -287,7 +290,7 @@ grep -qx "TELEGRAM_CHAT_ID=$TG_CHAT" "$WORK/opt/klaus-monitor.env" || fail "moni
 [ "$(docker exec klaus-monitor printenv TELEGRAM_CHAT_ID)" = "$TG_CHAT" ] || fail "monitor not recreated with the chat"
 [ "$(docker exec remnawave printenv TELEGRAM_NOTIFY_NODES)" = "$TG_CHAT" ] || fail "panel not recreated with the chat"
 kp telegram-test
-[ "$(sent_count "Klaus VPN: проверка оповещений")" = "1" ] || fail "telegram-test"
+[ "$(sent_count "Kirov VPN: проверка оповещений")" = "1" ] || fail "telegram-test"
 pass "old and code-less messages ignored, chat $TG_CHAT taken from /start CODE, test messages sent, panel and monitor recreated with it"
 
 step "install-panel.sh again (must change nothing)"
@@ -435,7 +438,7 @@ grep -iE '^(HTTP|content-type|profile-title|profile-update-interval|subscription
 base64 -d "$WORK/a.body" > "$WORK/a.links" || fail "body is not base64"
 cat "$WORK/a.links"; echo
 grep -q "^HTTP/[0-9.]* 200" "$WORK/last.headers" || fail "status"
-grep -qi '^profile-title: Klaus VPN' "$WORK/last.headers" || fail "profile-title"
+grep -qi '^profile-title: Kirov VPN' "$WORK/last.headers" || fail "profile-title"
 grep -iE '^klaus-(report|app)-url' "$WORK/last.headers"
 grep -qi "^klaus-report-url: https://$SUB_DOMAIN/klaus/report" "$WORK/last.headers" || fail "klaus-report-url"
 grep -qi "^klaus-app-url: https://$SUB_DOMAIN/app/version.json" "$WORK/last.headers" || fail "klaus-app-url"
@@ -445,7 +448,7 @@ grep -Eq "^vless://[0-9a-f-]+@127\.0\.0\.1:$VPN_PORT\?.*security=reality.*pbk=.*
   fail "no vless reality link named Германия"
 pass "base64 list with a vless REALITY link; report and app URLs in the headers"
 
-step "(b) a browser gets the page with the Klaus VPN button"
+step "(b) a browser gets the page with the Kirov VPN button"
 sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' -c "$WORK/cookies" > "$WORK/b.html"
 grep -q "^HTTP/[0-9.]* 200" "$WORK/last.headers" || fail "no HTML page"
 grep -qi '^content-type: text/html' "$WORK/last.headers" || fail "no HTML page"
@@ -454,18 +457,18 @@ grep -o '<title>[^<]*</title>' "$WORK/b.html"
 sub_get "$UA_BROWSER" "https://$SUB_DOMAIN/assets/.app-config-v2.json" -b "$WORK/cookies" > "$WORK/b.config.json"
 jq -r '.platforms.android.apps[0] | "first Android app: \(.name) (featured: \(.featured))",
   (.blocks[].buttons[] | "  \(.type): \(.link)  «\(.text.ru)»")' "$WORK/b.config.json"
-jq -e '.platforms.android.apps[0].name == "Klaus VPN" and
+jq -e '.platforms.android.apps[0].name == "Kirov VPN" and
   ([.platforms.android.apps[0].blocks[].buttons[] | select(.type == "subscriptionLink" and .link == "klausvpn://add/{{SUBSCRIPTION_LINK}}")] | length == 1) and
-  ([.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external" and .link == "https://example.com/KlausVPN.apk")] | length == 1) and
-  ([.platforms.android.apps[].name] | index("Happ") != null)' "$WORK/b.config.json" >/dev/null || fail "Klaus VPN button"
+  ([.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external" and .link == "https://example.com/KirovVPN.apk")] | length == 1) and
+  ([.platforms.android.apps[].name] | index("Happ") != null)' "$WORK/b.config.json" >/dev/null || fail "Kirov VPN button"
 jq -r '"support button: \(.brandingSettings.supportUrl)"' "$WORK/b.config.json"
 jq -e --arg p "https://$SUB_DOMAIN/" '.brandingSettings.supportUrl == $p' "$WORK/b.config.json" >/dev/null || fail "page support link"
 if grep -q 'dummy\.docs\.rw' "$WORK/b.html" "$WORK/b.config.json"; then fail "placeholder support link on the page"; fi
 echo "the page turns the button into: klausvpn://add/$SUB"
-pass "HTML page; Klaus VPN first with klausvpn://add/{{SUBSCRIPTION_LINK}} and the APK button, default apps kept"
+pass "HTML page; Kirov VPN first with klausvpn://add/{{SUBSCRIPTION_LINK}} and the APK button, default apps kept"
 
 step "publish-apk: from the GitHub release to https://$SUB_DOMAIN/app/ (checksum verified)"
-page_apk_buttons() { # -> the Klaus VPN block's download buttons in the panel's page settings
+page_apk_buttons() { # -> the Kirov VPN block's download buttons in the panel's page settings
   local u
   u="$(api /api/subscription-page-configs | jq -r 'first((.response.configs[] | select(.uuid == "00000000-0000-0000-0000-000000000000")), .response.configs[0]) | .uuid')"
   api "/api/subscription-page-configs/$u" > "$WORK/page-config.json"
@@ -518,27 +521,54 @@ if compgen -G "$WORK/opt/app/*" >/dev/null; then fail "the timer published a tem
 # Builds replaced earlier: one 14 hours ago goes, one 2 hours ago stays
 # (an app may still offer it).
 mkdir -p "$WORK/opt/app"
-echo old > "$WORK/opt/app/KlausVPN-1.0.10.apk"
-echo recent > "$WORK/opt/app/KlausVPN-1.0.11.apk"
-touch -d '14 hours ago' "$WORK/opt/app/KlausVPN-1.0.10.apk"
-touch -d '2 hours ago' "$WORK/opt/app/KlausVPN-1.0.11.apk"
+echo old > "$WORK/opt/app/KirovVPN-1.0.10.apk"
+echo recent > "$WORK/opt/app/KirovVPN-1.0.11.apk"
+touch -d '14 hours ago' "$WORK/opt/app/KirovVPN-1.0.10.apk"
+touch -d '2 hours ago' "$WORK/opt/app/KirovVPN-1.0.11.apk"
+# A panel set up before the app was renamed: the page entry and remark, and
+# the build published, under the former name. Its setup takes them over.
+page_apk_buttons >/dev/null
+api /api/subscription-page-configs -X PATCH -H 'Content-Type: application/json' --data-binary @<(jq -c \
+  '.response | {uuid, config: (.config | .platforms.android.apps[0].name = "Klaus VPN")}' "$WORK/page-config.json") |
+  jq -e '.response != null' >/dev/null || fail "test setup: the former page entry"
+api /api/subscription-settings -X PATCH -H 'Content-Type: application/json' --data-binary @<(api /api/subscription-settings | jq -c \
+  '.response | {uuid, customRemarks: (.customRemarks | .HWIDNotSupported = ["Обновите приложение Klaus VPN"])}') |
+  jq -e '.response != null' >/dev/null || fail "test setup: the former remark"
+echo former > "$WORK/opt/app/KlausVPN-1.0.9.apk"
+ln "$WORK/opt/app/KlausVPN-1.0.9.apk" "$WORK/opt/app/KlausVPN.apk"
+touch -d '14 hours ago' "$WORK/opt/app/KlausVPN-1.0.9.apk"
+jq -n --arg a "https://$SUB_DOMAIN/app/KlausVPN-1.0.9.apk" '{versionCode: 9, versionName: "1.0.9", apk: $a, sha256: "0"}' \
+  > "$WORK/opt/app/version.json"
+kp setup > "$WORK/setup-former.log"
+[ "$WORK/opt/app/KirovVPN.apk" -ef "$WORK/opt/app/KlausVPN.apk" ] || fail "the former build did not get the new name"
+echo "download buttons with the former build: $(page_apk_buttons)"
+[ "$(page_apk_buttons)" = "[{\"link\":\"https://$SUB_DOMAIN/app/KirovVPN.apk\",\"text\":\"Скачать приложение\"}]" ] ||
+  fail "no download button for the former build"
+jq -e '[.response.config.platforms.android.apps[].name] | .[0] == "Kirov VPN" and index("Klaus VPN") == null' \
+  "$WORK/page-config.json" >/dev/null || fail "the former page entry was kept"
+api /api/subscription-settings | jq -e '.response.customRemarks.HWIDNotSupported == ["Обновите приложение Kirov VPN"]' >/dev/null ||
+  fail "the former remark was kept"
 kp publish-apk | tee "$WORK/publish-1.log"
 grep -q "Опубликована версия $APK_VERSION" "$WORK/publish-1.log" || fail "publish-apk"
 ls "$WORK/opt/app"
-[ ! -e "$WORK/opt/app/KlausVPN-1.0.10.apk" ] || fail "a build replaced 14 hours ago was kept"
-[ -e "$WORK/opt/app/KlausVPN-1.0.11.apk" ] || fail "a build replaced 2 hours ago was deleted"
-rm -f "$WORK/opt/app/KlausVPN-1.0.11.apk"
-# An app that still offers a deleted build gets the current one.
-code="$(sub_code app/KlausVPN-1.0.10.apk -D "$WORK/gone.headers")"
-echo "https://$SUB_DOMAIN/app/KlausVPN-1.0.10.apk (deleted) -> $code $(grep -i '^location:' "$WORK/gone.headers" | tr -d '\r')"
-[ "$code" = "302" ] && grep -qi '^location: /app/KlausVPN.apk' "$WORK/gone.headers" || fail "no redirect from a deleted build"
+[ ! -e "$WORK/opt/app/KirovVPN-1.0.10.apk" ] || fail "a build replaced 14 hours ago was kept"
+[ -e "$WORK/opt/app/KirovVPN-1.0.11.apk" ] || fail "a build replaced 2 hours ago was deleted"
+rm -f "$WORK/opt/app/KirovVPN-1.0.11.apk"
+if compgen -G "$WORK/opt/app/KlausVPN*" >/dev/null; then fail "files of the former name were kept"; fi
+# An app that still offers a deleted build, or a link of the former name,
+# gets the current one.
+for f in KirovVPN-1.0.10.apk KlausVPN.apk KlausVPN-1.0.9.apk; do
+  code="$(sub_code "app/$f" -D "$WORK/gone.headers")"
+  echo "https://$SUB_DOMAIN/app/$f (deleted) -> $code $(grep -i '^location:' "$WORK/gone.headers" | tr -d '\r')"
+  [ "$code" = "302" ] && grep -qi '^location: /app/KirovVPN.apk' "$WORK/gone.headers" || fail "no redirect from the deleted $f"
+done
 code="$(sub_code app/version.json)"
 cat "$WORK/last.body"; echo
 [ "$code" = "200" ] || fail "version.json not served"
 jq -e --arg sub "$SUB_DOMAIN" --arg v "$APK_VERSION" --arg sha "$(sha256sum "$APK" | cut -d' ' -f1)" \
-  '.versionCode == 99 and .versionName == $v and .apk == "https://\($sub)/app/KlausVPN-\($v).apk" and .sha256 == $sha' \
+  '.versionCode == 99 and .versionName == $v and .apk == "https://\($sub)/app/KirovVPN-\($v).apk" and .sha256 == $sha' \
   "$WORK/last.body" >/dev/null || fail "version.json content"
-for f in KlausVPN.apk "KlausVPN-$APK_VERSION.apk"; do
+for f in KirovVPN.apk "KirovVPN-$APK_VERSION.apk"; do
   code="$(sub_code "app/$f" -D "$WORK/apk.headers")"
   echo "https://$SUB_DOMAIN/app/$f -> $code, $(grep -i '^content-type' "$WORK/apk.headers" | tr -d '\r'), sha256 $(sha256sum < "$WORK/last.body" | cut -c1-16)…"
   [ "$code" = "200" ] || fail "$f not served"
@@ -551,16 +581,16 @@ retry 30 page_up || fail "subscription page did not come back"
 kp publish-apk | tee "$WORK/publish-2.log"
 grep -q "уже опубликована" "$WORK/publish-2.log" || fail "the same build downloaded again"
 echo "download buttons now: $(page_apk_buttons)"
-[ "$(page_apk_buttons)" = "[{\"link\":\"https://$SUB_DOMAIN/app/KlausVPN.apk\",\"text\":\"Скачать приложение\"}]" ] ||
+[ "$(page_apk_buttons)" = "[{\"link\":\"https://$SUB_DOMAIN/app/KirovVPN.apk\",\"text\":\"Скачать приложение\"}]" ] ||
   fail "no download button for the published APK"
 install_tip || fail "no install tip for Samsung and Huawei next to the download button"
 # What a friend's browser gets.
 sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' -c "$WORK/cookies2" -o /dev/null
 sub_get "$UA_BROWSER" "https://$SUB_DOMAIN/assets/.app-config-v2.json" -b "$WORK/cookies2" > "$WORK/b2.config.json"
-jq -e --arg a "https://$SUB_DOMAIN/app/KlausVPN.apk" \
+jq -e --arg a "https://$SUB_DOMAIN/app/KirovVPN.apk" \
   '[.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external" and .link == $a)] | length == 1' \
   "$WORK/b2.config.json" >/dev/null || fail "the page does not show the download button"
-pass "old default moved to the $RELEASE release; a missing release is quiet for the timer, an unseen repository is not; wrong checksum and temporary key refused; replaced builds kept 13 h, then a redirect to the current one; KlausVPN.apk, KlausVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»; the Samsung and Huawei install tip with and without it"
+pass "old default moved to the $RELEASE release; a missing release is quiet for the timer, an unseen repository is not; wrong checksum and temporary key refused; the page entry, remark and build of the former name taken over; replaced builds kept 13 h, then a redirect to the current one (also from the former name); KirovVPN.apk, KirovVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»; the Samsung and Huawei install tip with and without it"
 
 step "(c) the device is recorded (the limit itself is off)"
 USER_ID="$(api "/api/users/by-username/friend_1" | jq -r '.response.id')"
@@ -625,7 +655,7 @@ SHORT2="${SUB2##*/}"
 kp add-user friend_5 > "$WORK/add-user-5.log"
 SUB5="$(grep -o "https://$SUB_DOMAIN/[A-Za-z0-9_-]*" "$WORK/add-user-5.log" | head -n 1)"
 SHORT5="${SUB5##*/}"
-ALERT="Klaus VPN: сервер"
+ALERT="Kirov VPN: сервер"
 # The monitor's token finds one subscription by its id, never lists them.
 MON_TOKEN="$(sed -n 's/^PANEL_TOKEN=//p' "$WORK/opt/klaus-monitor.env")"
 code="$(curl -sS --noproxy '*' -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 127.0.0.1' -H 'X-Forwarded-Proto: https' \
@@ -640,7 +670,7 @@ echo "malformed report -> $code"
 [ "$code" = "400" ] || fail "a malformed report was accepted"
 # The mobile whitelist regime: the apps moved to a server inside the
 # operator's whitelist (w=1). Not a block: a note, never "disable it".
-NOTE="Klaus VPN: мобильный интернет в режиме белых списков"
+NOTE="Kirov VPN: мобильный интернет в режиме белых списков"
 code="$(report "$SHORT1" mobile "МТС" 1)"
 echo "friend_1 (МТС, whitelist) report -> $code"
 [ "$code" = "200" ] || fail "report refused"
@@ -757,7 +787,7 @@ retry 10 "$WORK/e2e" check -sub "$SUB" -resolve "$SUB_DOMAIN:127.0.0.1" -cacert 
   -hwid "$HWID" -url "http://$WEB/" -expect "$TOKEN" || fail "old link after restore"
 code="$(sub_code app/version.json)"
 { [ "$code" = "200" ] && jq -e '.versionCode == 99' "$WORK/last.body" >/dev/null; } || fail "published app not restored"
-sub_code app/KlausVPN.apk >/dev/null
+sub_code app/KirovVPN.apk >/dev/null
 cmp -s "$WORK/last.body" "$APK" || fail "restored APK differs"
 grep -qx "TELEGRAM_NOTIFY_NODES=$TG_CHAT" "$WORK/opt2/.env" || fail "Telegram settings not restored"
 monitor_up() { [ "$(sub_code klaus/health)" = "200" ]; }

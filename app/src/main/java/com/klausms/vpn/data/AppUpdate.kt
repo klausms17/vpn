@@ -9,7 +9,7 @@ import kotlinx.serialization.json.put
 /**
  * A build of the app the owner published on the panel host, as described
  * by its version.json: {"versionCode": 27, "versionName": "1.0.27",
- * "apk": "https://…/KlausVPN-1.0.27.apk", "sha256": "…"}. The APK is
+ * "apk": "https://…/KirovVPN-1.0.27.apk", "sha256": "…"}. The APK is
  * opened in the browser; Android's installer checks the signature itself,
  * so the hash is not needed here.
  */
