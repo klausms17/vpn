@@ -36,9 +36,11 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -539,6 +541,44 @@ fun SignalBars(level: Int, color: Color, modifier: Modifier = Modifier) {
             )
         }
     }
+}
+
+/**
+ * The app's alert dialog: a headline title, a secondary [text] or a custom
+ * [content] below it, and green text buttons; the confirm button is red
+ * when [destructive]. The dismiss button and a tap outside both call
+ * [onDismiss]; [onConfirm] closes the dialog itself if it should.
+ */
+@Composable
+fun IosAlert(
+    title: String,
+    onDismiss: () -> Unit,
+    confirm: String,
+    onConfirm: () -> Unit,
+    text: String? = null,
+    dismiss: String = "Отмена",
+    destructive: Boolean = false,
+    confirmEnabled: Boolean = true,
+    content: (@Composable () -> Unit)? = null,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = kc.card,
+        title = { Text(title, style = IosType.headline, color = kc.label) },
+        text = when {
+            content != null -> content
+            text != null -> {
+                { Text(text, style = IosType.subhead, color = kc.secondary) }
+            }
+            else -> null
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm, enabled = confirmEnabled) {
+                Text(confirm, color = if (destructive) kc.red else kc.green)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(dismiss, color = kc.green) } },
+    )
 }
 
 /** A small spinner with a caption, for long operations. */

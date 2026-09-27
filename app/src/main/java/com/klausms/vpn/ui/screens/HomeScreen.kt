@@ -1,6 +1,5 @@
 package com.klausms.vpn.ui.screens
 
-import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import androidx.compose.animation.AnimatedVisibility
@@ -54,8 +53,10 @@ import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.klausms.vpn.R
 import com.klausms.vpn.data.AppUpdate
+import com.klausms.vpn.data.PingGrade
 import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
+import com.klausms.vpn.data.pingGrade
 import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.service.VpnStatus
 import com.klausms.vpn.ui.MainViewModel
@@ -88,7 +89,7 @@ fun HomeScreen(
     onToggle: () -> Unit,
     onAdd: () -> Unit,
     onOpenSettings: () -> Unit,
-    onPaste: () -> Boolean = { false },
+    onPaste: suspend () -> Boolean = { false },
     onScan: (() -> Unit)? = null,
 ) {
     val profiles by vm.profiles.collectAsStateWithLifecycle()
@@ -146,7 +147,7 @@ fun HomeContent(
     onUpdate: (AppUpdate) -> Unit = {},
     onDismissUpdate: () -> Unit = {},
     /** Imports the clipboard; false when it holds no text. */
-    onPaste: () -> Boolean = { false },
+    onPaste: suspend () -> Boolean = { false },
     /** Opens the QR scanner; null without a camera. */
     onScan: (() -> Unit)? = null,
 ) {
@@ -170,7 +171,6 @@ fun HomeContent(
         server?.id?.let(onPing)
     }
 
-    val now = rememberSecondsTicker(state == VpnState.CONNECTED && status.connectedSince > 0)
     var renameTarget by remember { mutableStateOf<StoredProfile?>(null) }
 
     // The map and glow follow the connect button while it scrolls away and
@@ -224,7 +224,6 @@ fun HomeContent(
                         state = state,
                         hero = hero,
                         since = status.connectedSince,
-                        now = now,
                         message = status.message,
                         place = Countries.name(code) ?: serverName?.let { Countries.stripFlags(it) },
                     )
@@ -324,17 +323,18 @@ private fun UpdateCard(update: AppUpdate?, onUpdate: (AppUpdate) -> Unit, onLate
     }
 }
 
-/** Opens [url] in the browser; false when the phone has none. */
+/** Opens [url] in the browser; false when it cannot, usually because the phone has none. */
 private fun openInBrowser(context: Context, url: String): Boolean = try {
     context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri()).addCategory(Intent.CATEGORY_BROWSABLE))
     true
-} catch (e: ActivityNotFoundException) {
-    AppLog.w("nothing opens the update link", e)
+} catch (e: Exception) {
+    // The class only: the exception's text repeats the intent, with the panel's host.
+    AppLog.w("the update link did not open: ${e.javaClass.simpleName}")
     false
 }
 
 @Composable
-private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, now: Long, message: String?, place: String?) {
+private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, message: String?, place: String?) {
     val statusColor by animateColorAsState(
         when (state) {
             VpnState.CONNECTED -> kc.green
@@ -368,14 +368,7 @@ private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, now: Long
             color = statusColor,
         )
         Box(Modifier.height(timerHeight)) {
-            if (showTimer) {
-                Text(
-                    formatDuration(((now - since) / 1000).coerceAtLeast(0)),
-                    style = IosType.timer,
-                    color = kc.label,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
-            }
+            if (showTimer) SessionTimer(since)
         }
         // While connected the message is a notice, e.g. that the server was switched.
         val notice = message?.takeIf { state == VpnState.CONNECTED && it.isNotBlank() }
@@ -406,10 +399,26 @@ private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, now: Long
     }
 }
 
+/**
+ * The time connected, ticking once a second. Its own composable, so each
+ * tick redraws only this text, not the whole screen and the server list.
+ */
 @Composable
-fun pingLevel(ms: Long) = when {
-    ms < 150 -> 4 to kc.green
-    ms < 400 -> 3 to kc.green
-    ms < 1000 -> 2 to kc.orange
-    else -> 1 to kc.red
+private fun SessionTimer(since: Long) {
+    val now = rememberSecondsTicker(active = true)
+    Text(
+        formatDuration(((now - since) / 1000).coerceAtLeast(0)),
+        style = IosType.timer,
+        color = kc.label,
+        modifier = Modifier.padding(top = 2.dp),
+    )
+}
+
+/** Lit bars (of four) and their colour for a delay of [ms]; the widget draws the same grades its own way. */
+@Composable
+fun pingLevel(ms: Long) = when (pingGrade(ms)) {
+    PingGrade.GREAT -> 4 to kc.green
+    PingGrade.GOOD -> 3 to kc.green
+    PingGrade.FAIR -> 2 to kc.orange
+    PingGrade.POOR -> 1 to kc.red
 }

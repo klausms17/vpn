@@ -73,7 +73,7 @@ class VpnTileService : TileService() {
     // The Intent overload is the only option below Android 14.
     @SuppressLint("StartActivityAndCollapseDeprecated")
     private fun openApp() {
-        val intent = Intent(this, MainActivity::class.java)
+        val intent = Intent().setClassName(this, MainActivity.CONNECT_ALIAS)
             .setAction(MainActivity.ACTION_CONNECT)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {

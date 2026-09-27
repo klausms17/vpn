@@ -7,9 +7,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,6 +24,7 @@ import com.klausms.vpn.data.AppSettings
 import com.klausms.vpn.ui.MainViewModel
 import com.klausms.vpn.ui.components.IconTile
 import com.klausms.vpn.ui.components.InsetGroup
+import com.klausms.vpn.ui.components.IosAlert
 import com.klausms.vpn.ui.components.IosSwitch
 import com.klausms.vpn.ui.components.ListRow
 import com.klausms.vpn.ui.components.RowDivider
@@ -34,7 +32,6 @@ import com.klausms.vpn.ui.components.SectionFooter
 import com.klausms.vpn.ui.components.SectionHeader
 import com.klausms.vpn.ui.components.NavBar
 import com.klausms.vpn.ui.components.navBarClearance
-import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
 import com.klausms.vpn.util.PhoneSettings
 import java.text.SimpleDateFormat
@@ -230,19 +227,12 @@ fun SettingsContent(
     }
 
     if (confirmGeo) {
-        AlertDialog(
-            onDismissRequest = { confirmGeo = false },
-            containerColor = kc.card,
-            title = { Text("Обновить списки?", style = IosType.headline, color = kc.label) },
-            text = {
-                Text(
-                    "Будет скачано около 90 МБ (лучше по Wi-Fi). Приложение оставит только нужное, проверит файлы и применит их.",
-                    style = IosType.subhead,
-                    color = kc.secondary,
-                )
-            },
-            confirmButton = { TextButton(onClick = { confirmGeo = false; onUpdateGeo() }) { Text("Обновить", color = kc.green) } },
-            dismissButton = { TextButton(onClick = { confirmGeo = false }) { Text("Отмена", color = kc.green) } },
+        IosAlert(
+            title = "Обновить списки?",
+            text = "Будет скачано около 90 МБ (лучше по Wi-Fi). Приложение оставит только нужное, проверит файлы и применит их.",
+            onDismiss = { confirmGeo = false },
+            confirm = "Обновить",
+            onConfirm = { confirmGeo = false; onUpdateGeo() },
         )
     }
 }

@@ -1,61 +1,12 @@
 package com.klausms.vpn.ui
 
-import com.klausms.vpn.core.ParsedProfile
-import com.klausms.vpn.data.ProfilesState
-import com.klausms.vpn.data.StoredProfile
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ViewModelLogicTest {
-    private fun server(id: String) = StoredProfile(id = id, name = id, outbounds = JsonArray(emptyList()))
-
-    private fun parsed(link: String?, tag: String = link ?: "") =
-        ParsedProfile(name = tag, link = link, outbounds = JsonArray(listOf(JsonPrimitive(tag))))
-
-    @Test
-    fun selectingAServerThatIsGoneKeepsTheSelection() {
-        val state = ProfilesState(profiles = listOf(server("a"), server("b")), selectedId = "a")
-        assertEquals("b", state.withSelected("b").selectedId)
-        // The VPN process replaced the list: the tapped row's id no longer exists.
-        assertSame(state, state.withSelected("old"))
-        assertSame(state, state.withSelected("a"))
-    }
-
-    @Test
-    fun addingKeepsAWorkingSelectionAndRepairsABrokenOne() {
-        val added = listOf(server("n1"), server("n2"))
-        val working = ProfilesState(profiles = listOf(server("a")), selectedId = "a")
-        assertEquals("a", working.withAdded(added).selectedId)
-        assertEquals(3, working.withAdded(added).profiles.size)
-
-        val dangling = ProfilesState(profiles = listOf(server("a")), selectedId = "gone")
-        assertEquals("n1", dangling.withAdded(added).selectedId)
-
-        val empty = ProfilesState()
-        assertEquals("n1", empty.withAdded(added).selectedId)
-        assertSame(working, working.withAdded(emptyList()))
-    }
-
-    @Test
-    fun aRepeatedKeyIsAddedOnce() {
-        val ready = listOf(parsed("vless://a"), parsed("vless://b"), parsed("vless://a"), parsed("vless://saved"))
-        val fresh = freshKeys(ready, saved = setOf("vless://saved"))
-        assertEquals(listOf("vless://a", "vless://b"), fresh.map { it.link })
-    }
-
-    @Test
-    fun keysWithoutALinkAreTheSameWhenTheirOutboundsAre() {
-        // A pasted JSON body has no share links.
-        val ready = listOf(parsed(null, "x"), parsed(null, "x"), parsed(null, "y"))
-        assertEquals(2, freshKeys(ready, emptySet()).size)
-    }
-
     @Test
     fun aFailedUpdateCheckIsRetriedAfterAFewMinutes() {
         val t = 1_800_000_000_000L

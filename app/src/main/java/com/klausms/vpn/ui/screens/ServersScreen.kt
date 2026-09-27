@@ -22,15 +22,14 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -53,6 +52,7 @@ import com.klausms.vpn.data.Subscription
 import com.klausms.vpn.ui.PingResult
 import com.klausms.vpn.ui.components.CircleFlag
 import com.klausms.vpn.ui.components.Countries
+import com.klausms.vpn.ui.components.IosAlert
 import com.klausms.vpn.ui.components.IosIcon
 import com.klausms.vpn.ui.components.PrimaryButton
 import com.klausms.vpn.ui.components.RowDivider
@@ -67,6 +67,7 @@ import com.klausms.vpn.ui.components.tap
 import com.klausms.vpn.ui.theme.IosType
 import com.klausms.vpn.ui.theme.kc
 import com.klausms.vpn.util.formatBytes
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -96,7 +97,7 @@ fun LazyListScope.serverSections(
     onRename: (StoredProfile) -> Unit,
     onAdd: () -> Unit,
     /** Imports what is in the clipboard; false when it holds no text. */
-    onPaste: () -> Boolean = { false },
+    onPaste: suspend () -> Boolean = { false },
     /** Opens the QR scanner; null without a camera. */
     onScan: (() -> Unit)? = null,
 ) {
@@ -182,8 +183,9 @@ private fun ServersTitle(showPingAll: Boolean, onPingAll: () -> Unit) {
  * goes in with one tap, or from a QR code; typing is the last resort.
  */
 @Composable
-private fun EmptyServers(onAdd: () -> Unit, onPaste: () -> Boolean, onScan: (() -> Unit)?) {
+private fun EmptyServers(onAdd: () -> Unit, onPaste: suspend () -> Boolean, onScan: (() -> Unit)?) {
     var clipboardEmpty by rememberSaveable { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     Column(
         Modifier
             .padding(horizontal = 20.dp, vertical = 8.dp)
@@ -206,7 +208,7 @@ private fun EmptyServers(onAdd: () -> Unit, onPaste: () -> Boolean, onScan: (() 
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(16.dp))
-        PrimaryButton("Вставить из буфера", onClick = { clipboardEmpty = !onPaste() }, icon = R.drawable.ic_clipboard_ios)
+        PrimaryButton("Вставить из буфера", onClick = { scope.launch { clipboardEmpty = !onPaste() } }, icon = R.drawable.ic_clipboard_ios)
         if (clipboardEmpty) {
             Text(
                 "В буфере обмена нет текста: сначала скопируйте ключ или ссылку",
@@ -299,12 +301,12 @@ private fun ServerRow(
         }
     }
     if (confirmDelete) {
-        AlertDialog(
-            onDismissRequest = { confirmDelete = false },
-            containerColor = kc.card,
-            title = { Text("Удалить «${Countries.stripFlags(profile.name)}»?", style = IosType.headline, color = kc.label) },
-            confirmButton = { TextButton(onClick = { confirmDelete = false; actions.delete(profile.id) }) { Text("Удалить", color = kc.red) } },
-            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Отмена", color = kc.green) } },
+        IosAlert(
+            title = "Удалить «${Countries.stripFlags(profile.name)}»?",
+            onDismiss = { confirmDelete = false },
+            confirm = "Удалить",
+            onConfirm = { confirmDelete = false; actions.delete(profile.id) },
+            destructive = true,
         )
     }
 }
@@ -326,7 +328,7 @@ private val FLAG_TEXT_START = 60.dp
 private fun RowPing(ping: PingResult?) {
     when (ping) {
         is PingResult.Ok -> {
-            // Same colours as the VPN card and the widget.
+            // Graded like the widget (pingGrade), drawn in the app's own bars and colours.
             val (level, color) = pingLevel(ping.ms)
             SignalBars(level, color)
             Text(
@@ -419,12 +421,12 @@ private fun SubscriptionHeader(sub: Subscription, onRefresh: () -> Unit, onDelet
         }
     }
     if (confirmDelete) {
-        AlertDialog(
-            onDismissRequest = { confirmDelete = false },
-            containerColor = kc.card,
-            title = { Text("Удалить подписку «${sub.name}» со всеми серверами?", style = IosType.headline, color = kc.label) },
-            confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Удалить", color = kc.red) } },
-            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Отмена", color = kc.green) } },
+        IosAlert(
+            title = "Удалить подписку «${sub.name}» со всеми серверами?",
+            onDismiss = { confirmDelete = false },
+            confirm = "Удалить",
+            onConfirm = { confirmDelete = false; onDelete() },
+            destructive = true,
         )
     }
 }
@@ -482,11 +484,13 @@ private fun parseUserInfo(raw: String?): Usage? {
 @Composable
 internal fun RenameDialog(current: String, onDismiss: () -> Unit, onRename: (String) -> Unit) {
     var text by rememberSaveable { mutableStateOf(current) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = kc.card,
-        title = { Text("Название сервера", style = IosType.headline, color = kc.label) },
-        text = {
+    IosAlert(
+        title = "Название сервера",
+        onDismiss = onDismiss,
+        confirm = "Готово",
+        onConfirm = { onRename(text.trim()) },
+        confirmEnabled = text.isNotBlank(),
+        content = {
             BasicTextField(
                 value = text,
                 onValueChange = { text = it.take(80) },
@@ -500,9 +504,5 @@ internal fun RenameDialog(current: String, onDismiss: () -> Unit, onRename: (Str
                     .padding(horizontal = 12.dp, vertical = 11.dp),
             )
         },
-        confirmButton = {
-            TextButton(onClick = { onRename(text.trim()) }, enabled = text.isNotBlank()) { Text("Готово", color = kc.green) }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена", color = kc.green) } },
     )
 }
