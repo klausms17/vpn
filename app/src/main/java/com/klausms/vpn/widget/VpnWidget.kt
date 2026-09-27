@@ -20,7 +20,9 @@ import com.klausms.vpn.R
 import com.klausms.vpn.core.XrayCore
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.Stores
+import com.klausms.vpn.service.LiveCore
 import com.klausms.vpn.service.RuntimeState
+import com.klausms.vpn.service.TrafficCheck
 import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.service.VpnStatusHolder
 import com.klausms.vpn.service.XrayVpnService
@@ -155,7 +157,7 @@ object VpnWidget {
         // While a tunnel core runs, always measure through it (the path the
         // apps' traffic takes). A second, temporary core in this process
         // would take over Xray's process-wide logger from the tunnel.
-        val live = XrayVpnService.liveController
+        val live = LiveCore.current
         val profile = status.shownServer(Stores.profiles(context).read()) ?: return
         val prefs = prefs(context)
 
@@ -179,7 +181,7 @@ object VpnWidget {
         val ms = try {
             // Through the tunnel: Cloudflare when Google does not answer, as
             // the service's own check, so a working server never shows "no answer".
-            live?.let { XrayVpnService.measureThrough(it, PING_TIMEOUT_MS) }
+            live?.let { TrafficCheck.delay(it, PING_TIMEOUT_MS) }
                 ?: XrayCore.measureDelay(profile.outbounds, PING_TIMEOUT_MS)
         } catch (e: Exception) {
             AppLog.i("widget ping: ${e.message}")

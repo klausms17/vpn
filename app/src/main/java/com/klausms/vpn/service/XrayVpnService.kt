@@ -102,10 +102,6 @@ class XrayVpnService : VpnService() {
         private const val MAX_START_RETRIES = 2
         private const val MIN_UPTIME_FOR_RESET_MS = 3_000L
 
-        // The traffic check: a second site confirms before a server counts as dead.
-        private const val VERIFY_TIMEOUT_MS = 6_000
-        private const val CONFIRM_TIMEOUT_MS = 4_000
-
         /** Unlocking the phone checks at most this often. */
         private const val UNLOCK_CHECK_MS = 10 * 60_000L
 
@@ -153,25 +149,6 @@ class XrayVpnService : VpnService() {
         /** Hosts looked up in the mobile whitelist per search, and how long to wait for them. */
         private const val WHITELIST_HOSTS = 32
         private const val WHITELIST_WAIT_MS = 3_000L
-
-        /** The running core, for the widget's ping (same process). */
-        @Volatile
-        internal var liveController: CoreHandle? = null
-            private set
-
-        /**
-         * Delay through the running core [c] in ms: Google first, then
-         * Cloudflare, since some servers cannot reach Google but carry
-         * everything else. Blocking; throws when neither answers.
-         */
-        internal fun measureThrough(c: CoreHandle, timeoutMs: Int): Long {
-            val ms = try {
-                c.measureDelay(XrayCore.TEST_URL, timeoutMs)
-            } catch (_: Exception) {
-                -1L
-            }
-            return if (ms >= 0) ms else c.measureDelay(XrayCore.TEST_URL_ALT, CONFIRM_TIMEOUT_MS)
-        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -556,7 +533,7 @@ class XrayVpnService : VpnService() {
                 if (oldTun != null && oldTun !== newTun) closeQuietly(oldTun)
             }
             config = newConfig
-            liveController = core
+            LiveCore.current = core
             runningProfile = profile
             epoch.advance()
             manualPick = when {
@@ -609,7 +586,7 @@ class XrayVpnService : VpnService() {
             // New settings or another server for a tunnel that works: until
             // the new interface replaced it, the old tunnel still carries the
             // traffic. It keeps running; one more try a little later.
-            if (restarting && !swapped && config != null && liveController != null) {
+            if (restarting && !swapped && config != null && LiveCore.current != null) {
                 val running = runningProfile
                 setStatus(
                     VpnStatus(
@@ -759,7 +736,7 @@ class XrayVpnService : VpnService() {
      */
     private fun haltCore() {
         resetJob?.cancel()
-        liveController = null
+        LiveCore.current = null
         runningProfile = null
         epoch.advance()
         try {
@@ -954,7 +931,7 @@ class XrayVpnService : VpnService() {
                     } catch (e: Exception) {
                         AppLog.e("core restart failed", e)
                         // No core runs now: the restart must not count on the old one.
-                        liveController = null
+                        LiveCore.current = null
                         runningProfile = null
                         config = null
                         epoch.advance()
@@ -996,14 +973,11 @@ class XrayVpnService : VpnService() {
     private suspend fun verify(e: Long, reason: Reason) {
         // The log grows for as long as the tunnel runs; checks come often enough to keep it small.
         XrayLog.trim(coreLog)
-        val c = liveController ?: return
+        val c = LiveCore.current ?: return
         val running = runningProfile ?: return
         if (!epoch.isCurrent(e) || VpnStatusHolder.status.value.state != VpnState.CONNECTED) return
         lastVerifyAt = clock.elapsed()
-        // One site failing is not enough: some servers cannot reach Google
-        // but carry everything else.
-        val ok = answers(c, XrayCore.TEST_URL, VERIFY_TIMEOUT_MS) ||
-            answers(c, XrayCore.TEST_URL_ALT, CONFIRM_TIMEOUT_MS)
+        val ok = TrafficCheck.passes(c, TrafficCheck.VERIFY_TIMEOUT_MS, TrafficCheck.CONFIRM_TIMEOUT_MS)
         if (!epoch.isCurrent(e)) return
         if (!ok) {
             AppLog.w("no traffic through the server (${reason.name.lowercase()})")
@@ -1030,13 +1004,6 @@ class XrayVpnService : VpnService() {
         }
         // Moments when connections start over anyway.
         if (reason == Reason.NETWORK || reason == Reason.UNLOCK) returnHomeIfItAnswers(e, c, running)
-    }
-
-    /** Whether [url] answers through the running tunnel. Blocking. */
-    private fun answers(c: CoreHandle, url: String, timeoutMs: Int): Boolean = try {
-        c.measureDelay(url, timeoutMs) >= 0
-    } catch (_: Exception) {
-        false
     }
 
     /**
@@ -1177,7 +1144,7 @@ class XrayVpnService : VpnService() {
      * Google first, as the probe that answered, then Cloudflare.
      */
     private suspend fun recoveredInPlace(e: Long, c: CoreHandle): Boolean {
-        if (answers(c, XrayCore.TEST_URL, CONFIRM_TIMEOUT_MS) || answers(c, XrayCore.TEST_URL_ALT, CONFIRM_TIMEOUT_MS)) {
+        if (TrafficCheck.passes(c, TrafficCheck.CONFIRM_TIMEOUT_MS, TrafficCheck.CONFIRM_TIMEOUT_MS)) {
             if (!epoch.isCurrent(e)) return true
             AppLog.i("the server answers again: the connection was lost for a moment")
             lastVerifiedOkAt = clock.elapsed()
@@ -1325,7 +1292,7 @@ class XrayVpnService : VpnService() {
         scope.launch(Dispatchers.IO) {
             try {
                 val listed = whitelist || winner != null && looksLikeWhitelist(failed, winner)
-                blockReporter.report(failed, sub, network, allDown, listed) { liveController }
+                blockReporter.report(failed, sub, network, allDown, listed) { LiveCore.current }
             } catch (ex: Exception) {
                 if (ex is CancellationException) throw ex
                 AppLog.w("block report failed", ex)
