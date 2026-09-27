@@ -166,13 +166,13 @@ jobs:
       - name: Collect APKs
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/release/app-release.apk "dist/KlausVPN-${VERSION_NAME}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "dist/KirovVPN-${VERSION_NAME}.apk"
           (cd dist && sha256sum *.apk > SHA256SUMS.txt)
           ls -la dist
 
       - uses: actions/upload-artifact@v7
         with:
-          name: KlausVPN-${{ env.VERSION_NAME }}
+          name: KirovVPN-${{ env.VERSION_NAME }}
           path: dist/
 
       - uses: actions/upload-artifact@v7
@@ -196,9 +196,9 @@ jobs:
           gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
           notes="Сборка ${VERSION_NAME} из ветки ${BRANCH} (${GITHUB_SHA::7}).
 
-          Скачайте KlausVPN-${VERSION_NAME}.apk — один файл для любого телефона
+          Скачайте KirovVPN-${VERSION_NAME}.apk — один файл для любого телефона
           с Android 8 и новее."
-          title="Klaus VPN ${VERSION_NAME} (${BRANCH})"
+          title="Kirov VPN ${VERSION_NAME} (${BRANCH})"
           if [ -z "${SIGNING_KEYSTORE_PATH:-}" ]; then
             # Without the release key every build has a different signature:
             # installing the next one over it needs an uninstall first.
@@ -227,9 +227,9 @@ jobs:
         run: |
           notes="Стабильная сборка ${VERSION_NAME} (${SOURCE}, ${GITHUB_SHA::7}): её раздаёт знакомым панель.
 
-          Скачайте KlausVPN-${VERSION_NAME}.apk — один файл для любого телефона
+          Скачайте KirovVPN-${VERSION_NAME}.apk — один файл для любого телефона
           с Android 8 и новее."
-          title="Klaus VPN ${VERSION_NAME} (stable)"
+          title="Kirov VPN ${VERSION_NAME} (stable)"
           if [ -z "${SIGNING_KEYSTORE_PATH:-}" ]; then
             # klaus-panel publish-apk refuses builds marked like this: they
             # cannot be installed over the app friends have.
