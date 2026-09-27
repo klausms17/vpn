@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -15,7 +14,6 @@ import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
-import android.os.RemoteCallbackList
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.klausms.vpn.core.BuildOptions
@@ -41,7 +39,6 @@ import com.klausms.vpn.util.AndroidClock
 import com.klausms.vpn.util.AppLog
 import com.klausms.vpn.util.Clock
 import com.klausms.vpn.util.PhoneSettings
-import com.klausms.vpn.widget.VpnWidget
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -157,6 +154,8 @@ class XrayVpnService : VpnService() {
 
     private lateinit var profiles: ProfilesAccess
 
+    private lateinit var publisher: StatusPublisher
+
     @OptIn(ExperimentalCoroutinesApi::class)
     private val worker = Dispatchers.IO.limitedParallelism(1)
 
@@ -254,8 +253,6 @@ class XrayVpnService : VpnService() {
     // A reconnect asked for with EXTRA_PICKED; merged reconnects keep it.
     private val pickPending = AtomicBoolean()
 
-    private val notices = NoticeBoard()
-
     @Volatile
     private var refreshJob: Deferred<Refreshed>? = null
 
@@ -286,13 +283,10 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    private val callbacks = RemoteCallbackList<IVpnCallback>()
-
     private val binder = object : IVpnController.Stub() {
         override fun registerCallback(callback: IVpnCallback?) {
             callback ?: return
-            callbacks.register(callback)
-            scope.launch { sendStatus(callback, VpnStatusHolder.status.value) }
+            publisher.register(callback)
             // The app came on screen: show the truth about the connection.
             if (clock.elapsed() - lastVerifyAt >= APP_CHECK_MS) scheduleVerify(Reason.APP)
             // Should run, but nothing started it: after an update on phones
@@ -306,7 +300,7 @@ class XrayVpnService : VpnService() {
 
         override fun unregisterCallback(callback: IVpnCallback?) {
             callback ?: return
-            callbacks.unregister(callback)
+            publisher.unregister(callback)
         }
     }
 
@@ -316,6 +310,7 @@ class XrayVpnService : VpnService() {
         coreLog = XrayLog.file(this)
         direct = XrayDirectNet(this)
         profiles = DiskProfiles(this)
+        publisher = StatusPublisher(this, scope, epoch, clock) { lockdownConflict }
         Notifications.ensureChannels(this)
     }
 
@@ -333,7 +328,7 @@ class XrayVpnService : VpnService() {
             }
             ACTION_RECONNECT -> {
                 // A running tunnel keeps working while new settings apply.
-                enterForegroundUnlessUp("Переподключение…")
+                publisher.enterForegroundUnlessUp("Переподключение…")
                 lastReconnectId = startId
                 if (intent.getBooleanExtra(EXTRA_PICKED, false)) pickPending.set(true)
                 AppLog.i("reconnect asked (#$startId)")
@@ -384,7 +379,7 @@ class XrayVpnService : VpnService() {
                 }
                 // Also sent to a tunnel that is up (the app connects whatever
                 // its cached status says): it stays up and says so.
-                enterForegroundUnlessUp("Подключение…")
+                publisher.enterForegroundUnlessUp("Подключение…")
                 // Only the app, the tile and the widget ask for a start just
                 // now. Restarts, resumes and Always-on bring back a tunnel
                 // that should run: they never call prepare() (it would take
@@ -394,7 +389,7 @@ class XrayVpnService : VpnService() {
                 enqueue {
                     when {
                         config != null -> {
-                            publishConnected()
+                            publisher.publishConnected()
                             // "Connect" while connected: maybe it does not work.
                             if (clock.elapsed() - lastVerifiedOkAt >= APP_CHECK_MS) scheduleVerify(Reason.APP)
                         }
@@ -418,13 +413,12 @@ class XrayVpnService : VpnService() {
         networkMonitor?.stop()
         networkMonitor = null
         unregisterScreen()
-        // Never leave the widget, tile or app showing a tunnel that is gone.
-        val state = VpnStatusHolder.status.value.state
-        if (state != VpnState.DISCONNECTED && state != VpnState.ERROR) setStatus(VpnStatus(VpnState.DISCONNECTED))
+        // Before the scope goes: the status still reaches the app.
+        publisher.markDisconnected()
         scope.cancel()
         // Synchronous: the process may be killed right after this.
         stopCore()
-        callbacks.kill()
+        publisher.kill()
         super.onDestroy()
     }
 
@@ -469,9 +463,9 @@ class XrayVpnService : VpnService() {
         // New settings for a running tunnel: it keeps working meanwhile, so
         // it still shows as on (a tap on a "connecting" button would cancel).
         if (restarting && before.state == VpnState.CONNECTED) {
-            setStatus(before.copy(message = "Применяем изменения…"))
+            publisher.setStatus(before.copy(message = "Применяем изменения…"))
         } else {
-            setStatus(VpnStatus(VpnState.CONNECTING, profileName = before.profileName))
+            publisher.setStatus(VpnStatus(VpnState.CONNECTING, profileName = before.profileName))
         }
         try {
             val saved = profiles.snapshot()
@@ -479,7 +473,7 @@ class XrayVpnService : VpnService() {
                 ?: saved.selected
                 ?: throw VpnStartException("Не выбран сервер. Добавьте ключ в приложении.")
             val settings = Stores.settings(this).read()
-            if (VpnStatusHolder.status.value.state == VpnState.CONNECTING) setStatus(VpnStatus(VpnState.CONNECTING, profile.id, profile.name))
+            if (VpnStatusHolder.status.value.state == VpnState.CONNECTING) publisher.setStatus(VpnStatus(VpnState.CONNECTING, profile.id, profile.name))
 
             GeoFiles.ensureInstalled(this)
             XrayCore.init(this)
@@ -544,14 +538,9 @@ class XrayVpnService : VpnService() {
             } else {
                 forgetAwayUnless(profile.id, picked)
             }
-            // The session timer goes on when only the settings changed.
-            val since = before.connectedSince.takeIf { restarting && it > 0 && before.profileId == profile.id }
-                ?: clock.wall()
-            notices.switched(notice, clock.elapsed())
-            setStatus(VpnStatus(VpnState.CONNECTED, profile.id, profile.name, message = notice ?: notices.base, connectedSince = since))
-            Notifications.clearError(this)
+            publisher.connected(profile, notice, before, restarting)
             AppLog.i("tunnel up: ${profile.protocol}/${profile.network}/${profile.security}; ${PhoneSettings.vpnSummary(this)}")
-            publishConnected()
+            publisher.publishConnected()
             scheduleVerify(Reason.START)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -561,7 +550,7 @@ class XrayVpnService : VpnService() {
                 AppLog.i("another VPN is active, not restarting")
                 stopCore()
                 runtime.setShouldRun(false)
-                setStatus(VpnStatus(VpnState.DISCONNECTED))
+                publisher.setStatus(VpnStatus(VpnState.DISCONNECTED))
                 withContext(Dispatchers.Main) { stopIfLatest(startId) }
                 return
             }
@@ -577,14 +566,14 @@ class XrayVpnService : VpnService() {
             // traffic. It keeps running; one more try a little later.
             if (restarting && !swapped && config != null && LiveCore.current != null) {
                 val running = runningProfile
-                setStatus(
+                publisher.setStatus(
                     VpnStatus(
                         VpnState.CONNECTED, running?.id, running?.name,
                         message = "Не удалось применить изменения: $message",
                         connectedSince = before.connectedSince.takeIf { it > 0 } ?: clock.wall(),
                     ),
                 )
-                publishConnected()
+                publisher.publishConnected()
                 if (attempt < MAX_START_RETRIES) again(attempt + 1)
                 return
             }
@@ -593,15 +582,15 @@ class XrayVpnService : VpnService() {
             // meanwhile, so apps wait instead of going around the VPN.
             if ((restarting || !userRequested) && attempt < MAX_START_RETRIES && runtime.shouldRun()) {
                 haltCore()
-                setStatus(VpnStatus(VpnState.CONNECTING, profileName = before.profileName, message = "Переподключение…"))
-                withContext(Dispatchers.Main) { enterForeground("Переподключение…", null) }
+                publisher.setStatus(VpnStatus(VpnState.CONNECTING, profileName = before.profileName, message = "Переподключение…"))
+                withContext(Dispatchers.Main) { publisher.enterForeground("Переподключение…", null) }
                 again(attempt + 1)
                 return
             }
             stopCore()
             runtime.setShouldRun(false)
-            setStatus(VpnStatus(VpnState.ERROR, message = message))
-            if (!isAppVisible()) Notifications.showError(this, message)
+            publisher.setStatus(VpnStatus(VpnState.ERROR, message = message))
+            if (!publisher.isAppVisible()) Notifications.showError(this, message)
             withContext(Dispatchers.Main) { stopIfLatest(startId) }
         }
     }
@@ -697,17 +686,17 @@ class XrayVpnService : VpnService() {
     /** [message]: why, when it was not the user (shown under "Отключено"). */
     private fun disconnect(userInitiated: Boolean, startId: Int, message: String? = null) {
         if (userInitiated) runtime.setShouldRun(false)
-        setStatus(VpnStatus(VpnState.DISCONNECTING, profileName = VpnStatusHolder.status.value.profileName))
+        publisher.setStatus(VpnStatus(VpnState.DISCONNECTING, profileName = VpnStatusHolder.status.value.profileName))
         enqueue {
             // A start that was still running has just finished; say again
             // that the tunnel is going down.
             if (VpnStatusHolder.status.value.state != VpnState.DISCONNECTING) {
-                setStatus(VpnStatus(VpnState.DISCONNECTING, profileName = VpnStatusHolder.status.value.profileName))
+                publisher.setStatus(VpnStatus(VpnState.DISCONNECTING, profileName = VpnStatusHolder.status.value.profileName))
             }
             stopCore()
             // A start that finished just before this set it again.
             if (userInitiated) runtime.setShouldRun(false)
-            setStatus(VpnStatus(VpnState.DISCONNECTED, message = message))
+            publisher.setStatus(VpnStatus(VpnState.DISCONNECTED, message = message))
             AppLog.i("tunnel down")
             withContext(Dispatchers.Main) { stopIfLatest(startId) }
         }
@@ -753,7 +742,7 @@ class XrayVpnService : VpnService() {
         networkMonitor?.stop()
         networkMonitor = null
         lastNetwork = null
-        notices.base = null
+        publisher.clearBase()
         unregisterScreen()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
     }
@@ -766,7 +755,7 @@ class XrayVpnService : VpnService() {
             this,
             onChanged = { network -> onUnderlyingNetworkChanged(network) },
             onReachability = { lost -> onReachabilityChanged(lost) },
-            onPrivateDns = { host -> onPrivateDnsChanged(host) },
+            onPrivateDns = { host -> publisher.onPrivateDnsChanged(host) },
         )
         monitor.start()
         lastNetwork = monitor.network
@@ -838,22 +827,6 @@ class XrayVpnService : VpnService() {
         scheduleVerify(Reason.LINK, NETWORK_SETTLE_MS)
     }
 
-    /**
-     * A strict «Частный DNS» (a host name) also takes over the DNS of VPN
-     * apps on Android 10+: the phone's lookups then go around the core's
-     * DNS rules, and fail with the server. Only the user can change it, so
-     * say so. The host may name a personal account: never logged.
-     */
-    private fun onPrivateDnsChanged(host: String?) {
-        val hint = if (host.isNullOrBlank()) null else Failover.NOTICE_PRIVATE_DNS
-        val old = notices.base
-        if (hint == old) return
-        if (hint != null) AppLog.w("strict private DNS is on: lookups bypass the tunnel's DNS rules")
-        notices.base = hint
-        val e = epoch.current
-        scope.launch { setNotice(hint, e, replacing = setOf(null, old)) }
-    }
-
     private fun onUnderlyingNetworkChanged(network: Network?) {
         // Lets Android attribute the tunnel to Wi-Fi/mobile (metered state,
         // "no internet" detection) correctly.
@@ -865,11 +838,11 @@ class XrayVpnService : VpnService() {
         val e = epoch.current
         if (network == null) {
             // Nothing to search with: do not claim to be searching.
-            scope.launch { setNotice(notices.base, e, replacing = setOf(Failover.NOTICE_SEARCHING)) }
+            scope.launch { publisher.show(publisher.base, e, replacing = setOf(Failover.NOTICE_SEARCHING)) }
             return
         }
         // Another network: why the server was switched no longer applies.
-        if (network != previous) clearSwitchNotice(e, minAgeMs = 0)
+        if (network != previous) publisher.clearSwitch(e, minAgeMs = 0)
         // No reset for the first network since the tunnel came up (Always-on
         // at boot), the same one back after a gap or right after connecting:
         // still worth a check.
@@ -985,8 +958,8 @@ class XrayVpnService : VpnService() {
         }
         if (!epoch.isCurrent(e)) return
         lastVerifiedOkAt = clock.elapsed()
-        clearFailureNotice(e)
-        clearSwitchNotice(e, minAgeMs = SWITCH_NOTICE_MS)
+        publisher.clearFailure(e)
+        publisher.clearSwitch(e, minAgeMs = SWITCH_NOTICE_MS)
         owedRefresh?.let { id ->
             owedRefresh = null
             refreshThroughTunnel(id, c, running)
@@ -1049,23 +1022,23 @@ class XrayVpnService : VpnService() {
         // Hotel or metro Wi-Fi before its login page: no server can answer yet.
         if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL) == true) {
             AppLog.i("the Wi-Fi asks to sign in, not looking for another server")
-            setNotice(Failover.NOTICE_SIGN_IN, e)
+            publisher.show(Failover.NOTICE_SIGN_IN, e)
             return
         }
         if (failed.id == manualPick && failedRecently(failed.id)) {
-            setNotice(Failover.NOTICE_PICK_ANOTHER, e)
+            publisher.show(Failover.NOTICE_PICK_ANOTHER, e)
             return
         }
         val network = activeNetwork()
         // Nothing answered on this network moments ago: say so again, search later.
         val last = fruitlessNotice(network)
         if (last != null) {
-            setNotice(last, e)
+            publisher.show(last, e)
             return
         }
         if (!runtime.allowFailover(take = false)) {
             AppLog.w("automatic server switches used up for now")
-            setNotice(Failover.NOTICE_PICK_ANOTHER, e)
+            publisher.show(Failover.NOTICE_PICK_ANOTHER, e)
             return
         }
         val now = clock.elapsed()
@@ -1079,10 +1052,10 @@ class XrayVpnService : VpnService() {
             // Probing servers and downloading the list is what costs.
             if (!runtime.allowSearch()) {
                 AppLog.w("automatic searches used up for now")
-                setNotice(Failover.NOTICE_PICK_ANOTHER, e)
+                publisher.show(Failover.NOTICE_PICK_ANOTHER, e)
                 return
             }
-            setNotice(Failover.NOTICE_SEARCHING, e)
+            publisher.show(Failover.NOTICE_SEARCHING, e)
             AppLog.i("trying ${first.size} other servers")
         }
         val refresh = sub?.let { startFailoverRefresh(it) }
@@ -1137,7 +1110,7 @@ class XrayVpnService : VpnService() {
             if (!epoch.isCurrent(e)) return true
             AppLog.i("the server answers again: the connection was lost for a moment")
             lastVerifiedOkAt = clock.elapsed()
-            clearFailureNotice(e)
+            publisher.clearFailure(e)
             return true
         }
         val now = clock.elapsed()
@@ -1174,7 +1147,7 @@ class XrayVpnService : VpnService() {
             if (report) reportBlocked(failed, state, allDown = true, whitelist = whitelist)
         }
         markFruitless(network, notice)
-        setNotice(notice, e)
+        publisher.show(notice, e)
     }
 
     /** The notice of a search that found nothing on [network] in the last minutes, or null. */
@@ -1222,11 +1195,11 @@ class XrayVpnService : VpnService() {
             if (winner == null || !Failover.selectionFollowsFailed(saved, failed.id)) {
                 // The user's choice wins; their reconnect follows.
                 AppLog.i("server switch dropped: another server was chosen")
-                clearFailureNotice(e)
+                publisher.clearFailure(e)
                 return
             }
             if (!runtime.allowFailover()) {
-                if (!returning) setNotice(Failover.NOTICE_PICK_ANOTHER, e)
+                if (!returning) publisher.show(Failover.NOTICE_PICK_ANOTHER, e)
                 return
             }
             val notice = if (returning || winner.id == failed.id) null else Failover.switchedNotice(winner.name, failed.name)
@@ -1304,7 +1277,7 @@ class XrayVpnService : VpnService() {
         try {
             val saved = profiles.updateProfiles { s -> Failover.selectInstead(s, failedId, winnerId, expected) }
             if (saved.selectedId == winnerId) {
-                notifyProfilesChanged()
+                publisher.profilesChanged()
                 return true
             }
             AppLog.i("another server was chosen meanwhile, selection kept")
@@ -1467,7 +1440,7 @@ class XrayVpnService : VpnService() {
         AppLog.w("subscription refresh failed: ${e.userMessage()}")
         Refreshed(applied = null, runningChanged = false)
     } finally {
-        notifyProfilesChanged()
+        publisher.profilesChanged()
     }
 
     // ---------------------------------------------------------------- network
@@ -1491,124 +1464,4 @@ class XrayVpnService : VpnService() {
         (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED))
 
     private fun onMobileData(): Boolean = underlying()?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true
-
-    /**
-     * Shows [notice] (null clears it) while connected, unless the tunnel
-     * changed since [e]; with [replacing], only in place of one of those
-     * (null in it: also when no notice is shown). On the main thread with a
-     * compare-and-set, so it never overwrites a newer status.
-     */
-    private suspend fun setNotice(notice: String?, e: Long, replacing: Set<String?>? = null) {
-        try {
-            withContext(Dispatchers.Main) {
-                if (!epoch.isCurrent(e)) return@withContext
-                val s = VpnStatusHolder.status.value
-                if (s.state != VpnState.CONNECTED || !NoticeBoard.shouldReplace(s.message, notice, replacing)) return@withContext
-                if (!VpnStatusHolder.compareAndSet(s, s.copy(message = notice))) return@withContext
-                publishStatus()
-                publishConnected()
-            }
-        } catch (ex: Exception) {
-            if (ex is CancellationException) throw ex
-            AppLog.w("notice update failed", ex)
-        }
-    }
-
-    /** Traffic gets through (again): "not answering" is no longer true. A switch notice stays. */
-    private suspend fun clearFailureNotice(e: Long) = setNotice(notices.base, e, replacing = Failover.FAILURE_NOTICES)
-
-    /**
-     * Takes the "switched to another server" notice away once it is
-     * [minAgeMs] old; otherwise it would stay for as long as the tunnel runs.
-     */
-    private fun clearSwitchNotice(e: Long, minAgeMs: Long) {
-        val notice = notices.switchNoticeToClear(VpnStatusHolder.status.value.message, clock.elapsed(), minAgeMs) ?: return
-        scope.launch { setNotice(notices.base, e, replacing = setOf(notice)) }
-    }
-
-    // ---------------------------------------------------------------- status
-
-    private fun enterForeground(title: String, text: String?) {
-        val n = Notifications.status(this, title, text, withDisconnect = true, networkSettings = text == Failover.NOTICE_PRIVATE_DNS)
-        try {
-            ServiceCompat.startForeground(
-                this, Notifications.ID_STATUS, n,
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0,
-            )
-        } catch (e: Exception) {
-            // Can only happen for a system restart in the background; the
-            // tunnel still works, it just has no notification.
-            AppLog.w("startForeground refused", e)
-        }
-    }
-
-    /** Foreground at once, as a start command requires: "connected" while the tunnel is up, else [title]. */
-    private fun enterForegroundUnlessUp(title: String) {
-        val s = VpnStatusHolder.status.value
-        if (s.state == VpnState.CONNECTED) enterForeground("Подключено", connectedText(s)) else enterForeground(title, null)
-    }
-
-    private suspend fun publishConnected() {
-        val s = VpnStatusHolder.status.value
-        if (s.state != VpnState.CONNECTED) return
-        withContext(Dispatchers.Main) { enterForeground("Подключено", connectedText(s)) }
-    }
-
-    private fun connectedText(s: VpnStatus): String? = when {
-        lockdownConflict ->
-            "Включено «Блокировать соединения без VPN»: приложения без VPN (банки, Госуслуги) останутся без интернета"
-        // A notice such as "switched to another server".
-        !s.message.isNullOrBlank() -> s.message
-        else -> s.profileName
-    }
-
-    /** The saved servers or the selection changed here: the app (if open) and the widget reload them. */
-    private fun notifyProfilesChanged() {
-        VpnWidget.update(this)
-        scope.launch {
-            val n = callbacks.beginBroadcast()
-            try {
-                for (i in 0 until n) {
-                    try {
-                        callbacks.getBroadcastItem(i).onProfilesChanged()
-                    } catch (_: Exception) {
-                        // Dead callbacks are removed by RemoteCallbackList.
-                    }
-                }
-            } finally {
-                callbacks.finishBroadcast()
-            }
-        }
-    }
-
-    private fun setStatus(status: VpnStatus) {
-        VpnStatusHolder.set(status)
-        publishStatus()
-    }
-
-    /** Shows the status in the widget and the app, if open. */
-    private fun publishStatus() {
-        VpnWidget.update(this)
-        scope.launch {
-            // The newest status, read when it is sent: a send posted from the
-            // worker must never arrive after a newer one sent on the main thread.
-            val status = VpnStatusHolder.status.value
-            val n = callbacks.beginBroadcast()
-            try {
-                for (i in 0 until n) sendStatus(callbacks.getBroadcastItem(i), status)
-            } finally {
-                callbacks.finishBroadcast()
-            }
-        }
-    }
-
-    private fun sendStatus(cb: IVpnCallback, s: VpnStatus) {
-        try {
-            cb.onStatus(s.state.code, s.profileId, s.profileName, s.message, s.connectedSince)
-        } catch (_: Exception) {
-            // Dead callbacks are removed by RemoteCallbackList.
-        }
-    }
-
-    private fun isAppVisible(): Boolean = callbacks.registeredCallbackCount > 0
 }
