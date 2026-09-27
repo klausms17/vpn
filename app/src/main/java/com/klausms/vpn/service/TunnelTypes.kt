@@ -1,5 +1,8 @@
 package com.klausms.vpn.service
 
+import com.klausms.vpn.core.CoreHandle
+import com.klausms.vpn.data.StoredProfile
+
 /** A start failed; the message is for the user. */
 internal class VpnStartException(message: String) : Exception(message)
 
@@ -25,9 +28,27 @@ internal class Refreshed(val applied: Boolean?, val runningChanged: Boolean)
 internal value class NetId(val handle: Long)
 
 /**
- * What the phone's default network offers right now. [hasNetwork]: it
- * carries traffic, not paused for a moment (mobile data in a lift or a
- * tunnel: the same one comes back). [captive]: a Wi-Fi that asks to sign
- * in first. [cellular]: mobile data.
+ * What the phone's default network offers right now. [hasNetwork]: it is
+ * not paused for a moment (mobile data in a lift or a tunnel: the same one
+ * comes back). [captive]: a Wi-Fi that asks to sign in first.
+ * [cellular]: mobile data.
  */
 internal data class NetState(val hasNetwork: Boolean, val captive: Boolean, val cellular: Boolean)
+
+/**
+ * The tunnel that runs: [core] runs [config] for [profile], connected (or
+ * last reset in place) at [connectedAt], elapsed time. [lockdownConflict]:
+ * "Block connections without VPN" leaves the apps kept outside this tunnel
+ * without network. Immutable; the service holds the current one, and none
+ * while no core runs.
+ */
+internal data class TunnelSession(
+    val profile: StoredProfile,
+    val config: String,
+    val core: CoreHandle,
+    val connectedAt: Long,
+    val lockdownConflict: Boolean,
+) {
+    // The config carries the server's keys: never into a log or a crash report.
+    override fun toString(): String = "TunnelSession(connectedAt=$connectedAt, lockdownConflict=$lockdownConflict)"
+}

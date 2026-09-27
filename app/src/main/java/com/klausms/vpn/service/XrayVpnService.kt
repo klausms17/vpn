@@ -171,14 +171,11 @@ class XrayVpnService : VpnService() {
     @Volatile
     private var tun: ParcelFileDescriptor? = null
 
+    // The tunnel that runs, null while no core does. Set when a start
+    // succeeds and renewed by an in-place reset, on [worker] under
+    // [serial]; cleared there or by onDestroy. Read from any thread.
     @Volatile
-    private var config: String? = null
-
-    @Volatile
-    private var connectedAtElapsed = 0L
-
-    @Volatile
-    private var lockdownConflict = false
+    private var session: TunnelSession? = null
 
     @Volatile
     private var resetJob: Job? = null
@@ -194,11 +191,6 @@ class XrayVpnService : VpnService() {
 
     // The tunnel's generation, and the one traffic check running.
     private val epoch = Epoch()
-
-    @Volatile
-    private var runningProfile: StoredProfile? = null
-
-    private val runningProfileId: String? get() = runningProfile?.id
 
     // elapsedRealtime of the last check started, and of the last one that got through.
     @Volatile
@@ -287,7 +279,7 @@ class XrayVpnService : VpnService() {
             // that hold the update broadcast back (MIUI). With the app on
             // screen it may start now; a start already on its way makes
             // this one do nothing.
-            if (config == null && VpnStatusHolder.status.value.state == VpnState.DISCONNECTED) {
+            if (session == null && VpnStatusHolder.status.value.state == VpnState.DISCONNECTED) {
                 VpnCommands.resume(this@XrayVpnService)
             }
         }
@@ -305,7 +297,7 @@ class XrayVpnService : VpnService() {
         direct = XrayDirectNet(this)
         profiles = DiskProfiles(this)
         netInfo = SystemNetworkInfo(this)
-        publisher = StatusPublisher(this, scope, epoch, clock) { lockdownConflict }
+        publisher = StatusPublisher(this, scope, epoch, clock) { session?.lockdownConflict == true }
         watcher = NetworkWatcher(
             this, scope, SCREEN_CHECK_MS,
             setUnderlying = { network -> setUnderlyingNetworks(network?.let { arrayOf(it) }) },
@@ -338,7 +330,7 @@ class XrayVpnService : VpnService() {
                         startId != lastReconnectId -> Unit
                         // A late "apply new settings" must not switch on a
                         // VPN the user has turned off meanwhile.
-                        config == null && !runtime.shouldRun() -> {
+                        session == null && !runtime.shouldRun() -> {
                             pickPending.set(false)
                             withContext(Dispatchers.Main) { stopIfLatest(startId) }
                         }
@@ -388,7 +380,7 @@ class XrayVpnService : VpnService() {
                 val picked = intent?.getBooleanExtra(EXTRA_PICKED, false) == true
                 enqueue {
                     when {
-                        config != null -> {
+                        session != null -> {
                             publisher.publishConnected()
                             // "Connect" while connected: maybe it does not work.
                             if (clock.elapsed() - lastVerifiedOkAt >= APP_CHECK_MS) scheduleVerify(Reason.APP)
@@ -453,7 +445,7 @@ class XrayVpnService : VpnService() {
     ) {
         // Also while a failed start waits to be retried with the interface
         // held: that is a tunnel that should run, not a first start.
-        val restarting = config != null || tun != null
+        val restarting = session != null || tun != null
         val generation = ++startGeneration
         val before = VpnStatusHolder.status.value
         // From here on the new interface has replaced the old one.
@@ -493,7 +485,7 @@ class XrayVpnService : VpnService() {
             // Bring the new interface up before the old one goes away:
             // Android then switches over without a moment of traffic
             // flowing outside the VPN.
-            val newTun = establishTun(profile, settings, userRequested)
+            val (newTun, lockdownConflict) = establishTun(profile, settings, userRequested)
             swapped = true
             val oldTun = tun
             resetJob?.cancel()
@@ -514,9 +506,8 @@ class XrayVpnService : VpnService() {
             } finally {
                 if (oldTun != null && oldTun !== newTun) closeQuietly(oldTun)
             }
-            config = newConfig
+            session = TunnelSession(profile, newConfig, core, connectedAt = clock.elapsed(), lockdownConflict)
             LiveCore.current = core
-            runningProfile = profile
             epoch.advance()
             manualPick = when {
                 // An automatic switch.
@@ -527,7 +518,6 @@ class XrayVpnService : VpnService() {
                 manualPick == profile.id -> manualPick
                 else -> null
             }
-            connectedAtElapsed = clock.elapsed()
             runtime.setShouldRun(true)
             withContext(Dispatchers.Main) { watcher.start() }
             // Only a server whose core came up becomes the selection.
@@ -562,11 +552,11 @@ class XrayVpnService : VpnService() {
             // New settings or another server for a tunnel that works: until
             // the new interface replaced it, the old tunnel still carries the
             // traffic. It keeps running; one more try a little later.
-            if (restarting && !swapped && config != null && LiveCore.current != null) {
-                val running = runningProfile
+            val running = session?.profile
+            if (restarting && !swapped && running != null) {
                 publisher.setStatus(
                     VpnStatus(
-                        VpnState.CONNECTED, running?.id, running?.name,
+                        VpnState.CONNECTED, running.id, running.name,
                         message = "Не удалось применить изменения: $message",
                         connectedSince = before.connectedSince.takeIf { it > 0 } ?: clock.wall(),
                     ),
@@ -609,7 +599,12 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    private fun establishTun(profile: StoredProfile, settings: AppSettings, userRequested: Boolean): ParcelFileDescriptor {
+    /**
+     * Brings up the new interface for [profile]. Returns it, and whether
+     * "Block connections without VPN" leaves the apps kept outside it
+     * without network.
+     */
+    private fun establishTun(profile: StoredProfile, settings: AppSettings, userRequested: Boolean): Pair<ParcelFileDescriptor, Boolean> {
         // prepare() is not a query: with an earlier consent it takes the VPN
         // over from whichever app runs one. Only do that when asked to.
         if (userRequested && prepare(this) != null) {
@@ -642,7 +637,7 @@ class XrayVpnService : VpnService() {
         val bypassing = applyPerAppRules(builder, settings)
         // "Block connections without VPN" cuts off every app kept outside
         // the tunnel (banks, Gosuslugi): say so instead of failing silently.
-        lockdownConflict = bypassing && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isLockdownEnabled
+        val lockdownConflict = bypassing && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isLockdownEnabled
         if (lockdownConflict) AppLog.w("lockdown is on while some apps bypass the VPN: they will have no network")
         watcher.network?.let { builder.setUnderlyingNetworks(arrayOf(it)) }
         val pfd = builder.establish()
@@ -652,7 +647,7 @@ class XrayVpnService : VpnService() {
                 throw AnotherVpnException()
             }
         runtime.setVpnConsented(true)
-        return pfd
+        return pfd to lockdownConflict
     }
 
     /** Returns whether some other app ends up outside the tunnel. */
@@ -712,15 +707,14 @@ class XrayVpnService : VpnService() {
      */
     private fun haltCore() {
         resetJob?.cancel()
+        session = null
         LiveCore.current = null
-        runningProfile = null
         epoch.advance()
         try {
             core.stop()
         } catch (e: Exception) {
             AppLog.w("core stop", e)
         }
-        config = null
     }
 
     private fun closeTun() {
@@ -772,8 +766,9 @@ class XrayVpnService : VpnService() {
         // No reset for the first network since the tunnel came up (Always-on
         // at boot), the same one back after a gap or right after connecting:
         // still worth a check.
-        val reset = previous != null && network != previous &&
-            clock.elapsed() - connectedAtElapsed >= MIN_UPTIME_FOR_RESET_MS
+        val running = session
+        val reset = previous != null && network != previous && running != null &&
+            clock.elapsed() - running.connectedAt >= MIN_UPTIME_FOR_RESET_MS
         if (!reset) {
             scheduleVerify(Reason.NETWORK, NETWORK_SETTLE_MS)
             return
@@ -803,7 +798,7 @@ class XrayVpnService : VpnService() {
                 if (delayMs > 0) delay(delayMs)
                 serial.withLock {
                     if (expectedEpoch != null && !epoch.isCurrent(expectedEpoch)) return@withLock
-                    val cfg = config ?: return@withLock
+                    val running = session ?: return@withLock
                     val fd = tun ?: return@withLock
                     AppLog.i(why)
                     try {
@@ -812,16 +807,16 @@ class XrayVpnService : VpnService() {
                         // A tunnel that only ever resets never goes through
                         // startTunnel: its log is kept small here too.
                         XrayLog.trim(coreLog)
-                        core.start(cfg, fd.fd)
-                        connectedAtElapsed = clock.elapsed()
+                        core.start(running.config, fd.fd)
+                        // The same profile object: restartOnSaved() compares it by identity.
+                        session = running.copy(connectedAt = clock.elapsed())
                         epoch.advance()
                         scheduleVerify(Reason.NETWORK)
                     } catch (e: Exception) {
                         AppLog.e("core restart failed", e)
                         // No core runs now: the restart must not count on the old one.
+                        session = null
                         LiveCore.current = null
-                        runningProfile = null
-                        config = null
                         epoch.advance()
                         enqueue { if (runtime.shouldRun()) startTunnel(startId, userRequested = false) }
                     }
@@ -843,7 +838,7 @@ class XrayVpnService : VpnService() {
      * time; [delayMs] lets a new network settle.
      */
     private fun scheduleVerify(reason: Reason, delayMs: Long = 0) {
-        if (config == null) return
+        if (session == null) return
         epoch.startCheck { e ->
             scope.launch(Dispatchers.IO) {
                 try {
@@ -861,8 +856,9 @@ class XrayVpnService : VpnService() {
     private suspend fun verify(e: Long, reason: Reason) {
         // The log grows for as long as the tunnel runs; checks come often enough to keep it small.
         XrayLog.trim(coreLog)
-        val c = LiveCore.current ?: return
-        val running = runningProfile ?: return
+        val current = session ?: return
+        val c = current.core
+        val running = current.profile
         if (!epoch.isCurrent(e) || VpnStatusHolder.status.value.state != VpnState.CONNECTED) return
         lastVerifyAt = clock.elapsed()
         val ok = TrafficCheck.passes(c, TrafficCheck.VERIFY_TIMEOUT_MS, TrafficCheck.CONFIRM_TIMEOUT_MS)
@@ -1095,7 +1091,7 @@ class XrayVpnService : VpnService() {
      */
     private fun restartOnSaved(running: StoredProfile) {
         enqueue {
-            if (config == null || !runtime.shouldRun() || runningProfile !== running) return@enqueue
+            if (session?.profile !== running || !runtime.shouldRun()) return@enqueue
             AppLog.i("the running server changed in the subscription, restarting")
             startTunnel(lastStartId, userRequested = false)
         }
@@ -1110,7 +1106,7 @@ class XrayVpnService : VpnService() {
      */
     private suspend fun switchTo(e: Long, failed: StoredProfile, winnerId: String, returning: Boolean = false, report: Boolean = true) {
         try {
-            if (!epoch.isCurrent(e) || config == null || !runtime.shouldRun() ||
+            if (!epoch.isCurrent(e) || session == null || !runtime.shouldRun() ||
                 VpnStatusHolder.status.value.state != VpnState.CONNECTED
             ) {
                 AppLog.i("server switch dropped: the tunnel changed meanwhile")
@@ -1139,7 +1135,7 @@ class XrayVpnService : VpnService() {
             )
             // Only a switch that happened marks the failed server: one dropped
             // on the way (a reconnect came first) proves nothing about it.
-            if (!returning && winner.id != failed.id && runningProfile?.id == winner.id) {
+            if (!returning && winner.id != failed.id && session?.profile?.id == winner.id) {
                 recentlyFailed[failed.id] = clock.elapsed()
                 // Up on another server: the phone is online, so the failed
                 // one does not answer from this network.
@@ -1171,7 +1167,7 @@ class XrayVpnService : VpnService() {
         scope.launch(Dispatchers.IO) {
             try {
                 val listed = whitelist || winner != null && looksLikeWhitelist(failed, winner)
-                blockReporter.report(failed, sub, network, allDown, listed) { LiveCore.current }
+                blockReporter.report(failed, sub, network, allDown, listed) { session?.core }
             } catch (ex: Exception) {
                 if (ex is CancellationException) throw ex
                 AppLog.w("block report failed", ex)
@@ -1359,7 +1355,7 @@ class XrayVpnService : VpnService() {
      * stay when the panel sends none. The app, if open, reloads. Never throws.
      */
     private suspend fun refreshSubscription(subId: String, downloader: Downloader): Refreshed = try {
-        val outcome = SubscriptionUpdater(this, profiles).refresh(subId, downloader, runningId = runningProfileId)
+        val outcome = SubscriptionUpdater(this, profiles).refresh(subId, downloader, runningId = session?.profile?.id)
         Refreshed(applied = outcome?.applied ?: false, runningChanged = outcome?.runningChanged == true)
     } catch (e: Exception) {
         if (e is CancellationException) throw e
