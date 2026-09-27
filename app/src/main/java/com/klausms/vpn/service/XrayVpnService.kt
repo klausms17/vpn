@@ -259,6 +259,9 @@ class XrayVpnService : VpnService() {
 
     @Volatile
     private var verifyJob: Job? = null
+
+    // Guards verifyJob. Also makes "a new epoch" and "check the epoch, then
+    // replace the pending core restart" atomic with each other.
     private val verifyLock = Any()
 
     // One probe at a time: a probe's temporary core holds megabytes until it
@@ -924,39 +927,48 @@ class XrayVpnService : VpnService() {
      * Restarts the running core on the same server and settings: every
      * connection is reset at once. [expectedEpoch]: only if nothing changed
      * since. The TUN interface stays, so no traffic leaves the VPN meanwhile.
+     * Returns whether the restart was queued (false: [expectedEpoch] is
+     * outdated, and a pending restart is left alone).
      */
-    private fun restartCore(why: String, delayMs: Long = 0, expectedEpoch: Long? = null) {
-        resetJob?.cancel()
+    private fun restartCore(why: String, delayMs: Long = 0, expectedEpoch: Long? = null): Boolean {
         val startId = lastStartId
-        resetJob = scope.launch(worker) {
-            if (delayMs > 0) delay(delayMs)
-            serial.withLock {
-                if (expectedEpoch != null && epoch.get() != expectedEpoch) return@withLock
-                val cfg = config ?: return@withLock
-                val fd = tun ?: return@withLock
-                val c = controller ?: return@withLock
-                AppLog.i(why)
-                try {
-                    newEpoch()
-                    c.stop()
-                    // A tunnel that only ever resets never goes through
-                    // startTunnel: its log is kept small here too.
-                    XrayLog.trim(File(File(filesDir, "logs"), "xray.log"))
-                    c.start(cfg, fd.fd)
-                    connectedAtElapsed = SystemClock.elapsedRealtime()
-                    newEpoch()
-                    scheduleVerify(Reason.NETWORK)
-                } catch (e: Exception) {
-                    AppLog.e("core restart failed", e)
-                    // No core runs now: the restart must not count on the old one.
-                    liveController = null
-                    runningProfile = null
-                    config = null
-                    newEpoch()
-                    enqueue { if (RuntimeState.shouldRun(this@XrayVpnService)) startTunnel(startId, userRequested = false) }
+        // Under the lock newEpoch() takes: an outdated check (its blocking
+        // test cannot be cancelled) must not cancel the reset a network
+        // change has just queued.
+        synchronized(verifyLock) {
+            if (expectedEpoch != null && epoch.get() != expectedEpoch) return false
+            resetJob?.cancel()
+            resetJob = scope.launch(worker) {
+                if (delayMs > 0) delay(delayMs)
+                serial.withLock {
+                    if (expectedEpoch != null && epoch.get() != expectedEpoch) return@withLock
+                    val cfg = config ?: return@withLock
+                    val fd = tun ?: return@withLock
+                    val c = controller ?: return@withLock
+                    AppLog.i(why)
+                    try {
+                        newEpoch()
+                        c.stop()
+                        // A tunnel that only ever resets never goes through
+                        // startTunnel: its log is kept small here too.
+                        XrayLog.trim(File(File(filesDir, "logs"), "xray.log"))
+                        c.start(cfg, fd.fd)
+                        connectedAtElapsed = SystemClock.elapsedRealtime()
+                        newEpoch()
+                        scheduleVerify(Reason.NETWORK)
+                    } catch (e: Exception) {
+                        AppLog.e("core restart failed", e)
+                        // No core runs now: the restart must not count on the old one.
+                        liveController = null
+                        runningProfile = null
+                        config = null
+                        newEpoch()
+                        enqueue { if (RuntimeState.shouldRun(this@XrayVpnService)) startTunnel(startId, userRequested = false) }
+                    }
                 }
             }
         }
+        return true
     }
 
     // --------------------------------------------------------------- failover
@@ -1189,8 +1201,10 @@ class XrayVpnService : VpnService() {
         }
         val now = SystemClock.elapsedRealtime()
         if (now - lastCoreRestartAt < CORE_RESTART_GAP_MS) return false
-        lastCoreRestartAt = now
-        restartCore("the server answers, but not through the running core: restarting it", expectedEpoch = e)
+        // Not queued: the tunnel changed meanwhile, and the gap stays for a real stuck core.
+        if (restartCore("the server answers, but not through the running core: restarting it", expectedEpoch = e)) {
+            lastCoreRestartAt = now
+        }
         return true
     }
 
