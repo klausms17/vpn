@@ -57,9 +57,9 @@ class JsonFileStore<T>(
         return try {
             AppJson.decodeFromString(serializer, text)
         } catch (e: Exception) {
-            val message = "Не удалось прочитать ${file.name}: файл повреждён"
-            // SerializationException is one too: the whole file was read, and it is not valid.
-            throw if (e is IllegalArgumentException) CorruptFileException(message, e) else IllegalStateException(message, e)
+            // The whole file was read (an I/O error is thrown above, as it is),
+            // so whatever the decoder throws, the content is what is unusable.
+            throw CorruptFileException("Не удалось прочитать ${file.name}: файл повреждён", e)
         }
     }
 

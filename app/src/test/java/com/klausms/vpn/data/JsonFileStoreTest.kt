@@ -1,6 +1,8 @@
 package com.klausms.vpn.data
 
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encoding.Decoder
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -90,6 +92,18 @@ class JsonFileStoreTest {
         // The first ones are the likeliest to hold the user's own keys.
         assertEquals(setOf("broken 0", "broken 1", "broken 2"), corruptCopies().map { File(dir, it).readText() }.toSet())
         assertEquals(Counter(value = 4), store().read())
+    }
+
+    @Test
+    fun anyDecodingFailureIsSetAside() {
+        // Not a SerializationException: e.g. a check() in a model. Still the content, not the disk.
+        val picky = object : KSerializer<Counter> by Counter.serializer() {
+            override fun deserialize(decoder: Decoder): Counter = error("unexpected value")
+        }
+        file.writeText("{\"value\": 1}")
+        val store = JsonFileStore(file, picky, log = { logged += it }) { Counter() }
+        assertEquals(Counter(value = 5), store.update { it.copy(value = 5) })
+        assertEquals("{\"value\": 1}", File(dir, corruptCopies().single()).readText())
     }
 
     @Test
