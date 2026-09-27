@@ -150,7 +150,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         // The VPN process changed the servers (failover, subscription refresh).
-        viewModelScope.launch { vpn.profilesChanged.collect { repo.reload() } }
+        viewModelScope.launch {
+            vpn.profilesChanged.collect {
+                repo.reload()
+                ui.checkWhitelist(profiles.value.profiles)
+            }
+        }
         viewModelScope.launch {
             status.first { it.state == VpnState.CONNECTED }
             val show = withContext(Dispatchers.IO) {
