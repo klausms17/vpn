@@ -50,6 +50,7 @@ internal object Failover {
     const val NOTICE_PICK_ANOTHER = "Сервер не отвечает — выберите другой сервер"
     const val NOTICE_ALL_BLOCKED = "Серверы не открываются из этой сети — похоже на блокировку"
     const val NOTICE_BLOCKED = "Сервер не открывается из этой сети — похоже на блокировку"
+    const val NOTICE_WHITELIST = "Похоже, мобильный интернет ограничен белым списком сайтов — подключитесь к Wi-Fi"
     const val NOTICE_SIGN_IN = "Wi-Fi требует входа: войдите в сеть"
 
     /** Not a failure: shown while the phone's strict «Частный DNS» takes DNS away from the VPN's rules. */
@@ -58,10 +59,24 @@ internal object Failover {
     /** Notices that say the server does not answer; a check that gets through clears them. */
     val FAILURE_NOTICES = setOf(
         NOTICE_SEARCHING, NOTICE_NONE_ANSWER, NOTICE_NO_OTHER, NOTICE_PICK_ANOTHER,
-        NOTICE_ALL_BLOCKED, NOTICE_BLOCKED, NOTICE_SIGN_IN,
+        NOTICE_ALL_BLOCKED, NOTICE_BLOCKED, NOTICE_WHITELIST, NOTICE_SIGN_IN,
     )
 
     fun switchedNotice(to: String, from: String) = "Переключились на «$to»: «$from» не отвечал"
+
+    /**
+     * What the tunnel says when no server answers. [online]: a Russian site
+     * opens outside the tunnel; [whitelist]: on mobile data a foreign one
+     * does not (the operator lets through only its whitelist, so no block
+     * of the servers is to blame); [probed]: other servers tried.
+     */
+    fun nothingAnswersNotice(online: Boolean, whitelist: Boolean, probed: Int): String = when {
+        online && whitelist -> NOTICE_WHITELIST
+        online && probed == 0 -> NOTICE_BLOCKED
+        online -> NOTICE_ALL_BLOCKED
+        probed == 0 -> NOTICE_NO_OTHER
+        else -> NOTICE_NONE_ANSWER
+    }
 
     // Remnawave's fake entries carrying a message ("subscription expired").
     private const val ZERO_UUID = "00000000-0000-0000-0000-000000000000"

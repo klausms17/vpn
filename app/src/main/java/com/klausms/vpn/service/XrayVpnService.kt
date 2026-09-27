@@ -1211,21 +1211,26 @@ class XrayVpnService : VpnService() {
     /**
      * No other server answers either (or there is none). A Russian site
      * opened directly, outside the tunnel, tells a block from a phone
-     * without internet: only a block is reported to the owner, and only
-     * with [report] (false: [failed] itself answered a new connection).
+     * without internet, and on mobile data a foreign site that does not
+     * open directly either tells the operator's whitelist from a block.
+     * Only a phone that is online reports [failed] to the owner (marked as
+     * the whitelist when it is), and only with [report] (false: [failed]
+     * itself answered a new connection).
      */
     private suspend fun nothingAnswers(e: Long, failed: StoredProfile, state: ProfilesState, probed: Int, network: Network?, report: Boolean) {
         val online = opensDirectly(DIRECT_URL)
+        val whitelist = online && onMobileData() && !opensDirectly(XrayCore.TEST_URL)
         if (epoch.get() != e) return
-        val notice = when {
-            online && probed == 0 -> Failover.NOTICE_BLOCKED
-            online -> Failover.NOTICE_ALL_BLOCKED
-            probed == 0 -> Failover.NOTICE_NO_OTHER
-            else -> Failover.NOTICE_NONE_ANSWER
-        }
+        val notice = Failover.nothingAnswersNotice(online, whitelist, probed)
         if (online) {
-            AppLog.w("the phone is online, but no server answers from this network")
-            if (report) reportBlocked(failed, state, allDown = true)
+            AppLog.w(
+                if (whitelist) {
+                    "no server answers, and mobile data seems limited to the operator's whitelist"
+                } else {
+                    "the phone is online, but no server answers from this network"
+                },
+            )
+            if (report) reportBlocked(failed, state, allDown = true, whitelist = whitelist)
         }
         markFruitless(network, notice)
         setNotice(notice, e)
@@ -1319,16 +1324,23 @@ class XrayVpnService : VpnService() {
      * Tells the owner's panel that [failed] stopped answering here, if its
      * subscription asked for that (see [BlockReporter]). In the background:
      * the switch never waits for it, and nothing it does can fail the tunnel.
-     * [winner]: the server the tunnel switched to.
+     * [winner]: the server the tunnel switched to. [whitelist]: the mobile
+     * whitelist is already known to explain the failure.
      */
-    private fun reportBlocked(failed: StoredProfile, state: ProfilesState, allDown: Boolean = false, winner: StoredProfile? = null) {
+    private fun reportBlocked(
+        failed: StoredProfile,
+        state: ProfilesState,
+        allDown: Boolean = false,
+        winner: StoredProfile? = null,
+        whitelist: Boolean = false,
+    ) {
         val sub = state.subscriptions.firstOrNull { it.id == failed.subscriptionId } ?: return
         if (sub.reportUrl == null) return
         val network = networkMonitor?.network ?: lastNetwork
         scope.launch(Dispatchers.IO) {
             try {
-                val whitelist = winner != null && looksLikeWhitelist(failed, winner)
-                blockReporter.report(failed, sub, network, allDown, whitelist) { liveController }
+                val listed = whitelist || winner != null && looksLikeWhitelist(failed, winner)
+                blockReporter.report(failed, sub, network, allDown, listed) { liveController }
             } catch (ex: Exception) {
                 if (ex is CancellationException) throw ex
                 AppLog.w("block report failed", ex)

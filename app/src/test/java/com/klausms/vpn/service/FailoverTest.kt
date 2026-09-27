@@ -331,8 +331,26 @@ class FailoverTest {
         // Blocked, sign-in and the like are cleared by a check that gets through too.
         assertTrue(Failover.NOTICE_ALL_BLOCKED in Failover.FAILURE_NOTICES)
         assertTrue(Failover.NOTICE_BLOCKED in Failover.FAILURE_NOTICES)
+        assertTrue(Failover.NOTICE_WHITELIST in Failover.FAILURE_NOTICES)
         assertTrue(Failover.NOTICE_SIGN_IN in Failover.FAILURE_NOTICES)
         // The Private DNS hint is no failure: it stays while the setting does.
         assertFalse(Failover.NOTICE_PRIVATE_DNS in Failover.FAILURE_NOTICES)
+    }
+
+    @Test
+    fun whenNoServerAnswersTheNoticeTellsWhy() {
+        fun notice(online: Boolean, whitelist: Boolean = false, probed: Int = 3) =
+            Failover.nothingAnswersNotice(online, whitelist, probed)
+        assertEquals(Failover.NOTICE_ALL_BLOCKED, notice(online = true))
+        assertEquals(Failover.NOTICE_BLOCKED, notice(online = true, probed = 0))
+        assertEquals(Failover.NOTICE_NONE_ANSWER, notice(online = false))
+        assertEquals(Failover.NOTICE_NO_OTHER, notice(online = false, probed = 0))
+        // Mobile data with only the operator's whitelist open: not a block, whatever was probed.
+        assertEquals(Failover.NOTICE_WHITELIST, notice(online = true, whitelist = true))
+        assertEquals(Failover.NOTICE_WHITELIST, notice(online = true, whitelist = true, probed = 0))
+        assertFalse("похоже на блокировку" in Failover.NOTICE_WHITELIST)
+        assertTrue("Wi-Fi" in Failover.NOTICE_WHITELIST)
+        // Offline, the whitelist cannot be told from anything else.
+        assertEquals(Failover.NOTICE_NONE_ANSWER, notice(online = false, whitelist = true))
     }
 }

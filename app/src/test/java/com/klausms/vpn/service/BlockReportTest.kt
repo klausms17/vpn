@@ -87,7 +87,9 @@ class BlockReportTest {
             whitelist = true,
         )
         val q = "https://sub.example.com/klaus/report?s=id&h=nl.example.com&p=443&k=vless&n=mobile&o=MTS%20RUS&v=1.0"
+        // Switched to a server on the whitelist.
         assertEquals("$q&w=1", url(allDown = false))
+        // No server answered, and on mobile data only the whitelist opens: both marks.
         assertEquals("$q&a=1&w=1", url(allDown = true))
     }
 
