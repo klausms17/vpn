@@ -127,6 +127,8 @@ class XrayVpnService : VpnService() {
 
     private lateinit var refresher: SubscriptionRefresher
 
+    private lateinit var reports: BlockReportDispatcher
+
     // The newest command's startId. A job only stops the service if no newer
     // command arrived meanwhile, so a quick "off, on" never loses the "on".
     @Volatile
@@ -173,8 +175,6 @@ class XrayVpnService : VpnService() {
 
     // A reconnect asked for with EXTRA_PICKED; merged reconnects keep it.
     private val pickPending = AtomicBoolean()
-
-    private val blockReporter by lazy { BlockReporter(this) }
 
     // What the watcher hears, on the main thread.
     private val networkEvents = object : NetworkWatcher.Listener {
@@ -266,6 +266,13 @@ class XrayVpnService : VpnService() {
             scope, Dispatchers.IO, clock, UpdaterSubscriptionSource(this, profiles),
             session = { engine.session },
             profilesChanged = publisher::profilesChanged,
+        )
+        reports = BlockReportDispatcher(
+            this, scope, Dispatchers.IO, netInfo,
+            underlying = { watcher.network },
+            mobileWhitelist = mobileWhitelist,
+            direct = direct,
+            core = { engine.session?.core },
         )
         Notifications.ensureChannels(this)
     }
@@ -677,7 +684,7 @@ class XrayVpnService : VpnService() {
                     "the phone is online, but no server answers from this network"
                 },
             )
-            if (report) reportBlocked(failed, state, allDown = true, whitelist = whitelist)
+            if (report) reports.report(failed, state, allDown = true, whitelist = whitelist)
         }
         markFruitless(network, notice)
         publisher.show(notice, e)
@@ -749,56 +756,12 @@ class XrayVpnService : VpnService() {
                 memory.markFailed(failed.id)
                 // Up on another server: the phone is online, so the failed
                 // one does not answer from this network.
-                if (report) reportBlocked(failed, saved, winner = winner)
+                if (report) reports.report(failed, saved, winner = winner)
             }
         } catch (ex: Exception) {
             if (ex is CancellationException) throw ex
             AppLog.w("server switch failed", ex)
         }
-    }
-
-    /**
-     * Tells the owner's panel that [failed] stopped answering here, if its
-     * subscription asked for that (see [BlockReporter]). In the background:
-     * the switch never waits for it, and nothing it does can fail the tunnel.
-     * [winner]: the server the tunnel switched to. [whitelist]: the mobile
-     * whitelist is already known to explain the failure.
-     */
-    private fun reportBlocked(
-        failed: StoredProfile,
-        state: ProfilesState,
-        allDown: Boolean = false,
-        winner: StoredProfile? = null,
-        whitelist: Boolean = false,
-    ) {
-        val sub = state.subscriptions.firstOrNull { it.id == failed.subscriptionId } ?: return
-        if (sub.reportUrl == null) return
-        val network = watcher.network
-        scope.launch(Dispatchers.IO) {
-            try {
-                val listed = whitelist || winner != null && looksLikeWhitelist(failed, winner)
-                blockReporter.report(failed, sub, network, allDown, listed) { engine.session?.core }
-            } catch (ex: Exception) {
-                if (ex is CancellationException) throw ex
-                AppLog.w("block report failed", ex)
-            }
-        }
-    }
-
-    /**
-     * Whether the switch from [failed] to [winner] looks like the mobile
-     * operator letting through only its whitelist, not a block of [failed]:
-     * on mobile data, [winner] is on the whitelist and [failed] is not, and
-     * outside the tunnel a foreign site does not open while a Russian one
-     * does (a block of [failed] alone would leave the foreign site open).
-     */
-    private suspend fun looksLikeWhitelist(failed: StoredProfile, winner: StoredProfile): Boolean {
-        if (!onMobileData()) return false
-        val winnerHost = Failover.host(winner)
-        val failedHost = Failover.host(failed)
-        val listed = mobileWhitelist.listed(listOf(winnerHost, failedHost).distinct())
-        return winnerHost in listed && failedHost !in listed &&
-            !direct.opens(XrayCore.TEST_URL) && direct.opens(DirectNet.DIRECT_URL)
     }
 
     /**
