@@ -50,7 +50,7 @@ internal object Failover {
     const val NOTICE_PICK_ANOTHER = "Сервер не отвечает — выберите другой сервер"
     const val NOTICE_ALL_BLOCKED = "Серверы не открываются из этой сети — похоже на блокировку"
     const val NOTICE_BLOCKED = "Сервер не открывается из этой сети — похоже на блокировку"
-    const val NOTICE_WHITELIST = "Похоже, мобильный интернет ограничен белым списком сайтов — подключитесь к Wi-Fi"
+    const val NOTICE_WHITELIST = "Мобильный интернет в режиме белых списков — нужен Wi-Fi"
     const val NOTICE_SIGN_IN = "Wi-Fi требует входа: войдите в сеть"
 
     /** Not a failure: shown while the phone's strict «Частный DNS» takes DNS away from the VPN's rules. */
@@ -204,7 +204,8 @@ internal object Failover {
      * Whether a download failed because data stopped coming after it had
      * begun: the answer's headers arrived, then the body timed out (the Go
      * core's wording). Some operators freeze connections to foreign servers
-     * that way after the first ~16 KB. Anything else proves nothing.
+     * that way after the first ~16 KB. Anything else proves nothing. The Go
+     * test TestDownloadStallErrorText (libxray/fetch_test.go) pins that wording.
      */
     fun isStall(error: String?): Boolean = error?.contains("while reading body") == true
 

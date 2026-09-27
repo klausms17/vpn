@@ -10,11 +10,12 @@ library only), behind Caddy at https://<SUB_DOMAIN>/klaus/:
       that stopped answering (so the phone itself has internet): s is the
       friend's subscription id, h/p/k the failed server, n the network type
       (wifi|mobile|other), o the mobile operator, v the app version. w=1:
-      on mobile data the app moved from a server outside the operator's
-      whitelist to one inside it, and a foreign site did not open directly
-      either (the "whitelist" regime, not a block). a=1: no server answered
-      at all while a Russian site opened directly; it counts like any other
-      report.
+      on mobile data a foreign site did not open directly either while a
+      Russian one did (the "whitelist" regime, not a block); the app then
+      either moved to a server inside the operator's whitelist or, with
+      a=1, found no server that answers. a=1: no server answered at all
+      while a Russian site opened directly; without w=1 it counts like any
+      other report.
   GET /klaus/health
 
 When REPORT_THRESHOLD different subscriptions report the same server within
@@ -333,7 +334,7 @@ def whitelist_text(host, h, p, reports):
     name = (host.get("remark") or "").strip() or (node_names[0] if node_names else "%s:%d" % (h, p))
     lines = [
         "Klaus VPN: мобильный интернет в режиме белых списков у %s за последние %s: сервер «%s» у них "
-        "не открывается, приложение перешло на сервер из белого списка." % (people(len(reports)), duration(WINDOW), name),
+        "не открывается, и зарубежные сайты без VPN у них тоже не открываются." % (people(len(reports)), duration(WINDOW), name),
         "Сети: %s." % network_mix([label for label, _ in reports]),
         "Скорее всего, оператор открывает только сайты из белого списка: тогда не работает ни один "
         "зарубежный сервер, и отключать или менять этот не нужно. Если на сервер пожалуются и из других "
