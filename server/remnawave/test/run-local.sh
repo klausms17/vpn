@@ -11,7 +11,7 @@
 #                     with a new SUB_DOMAIN and SUPPORT_URL and back
 #   klaus-panel       add-node (panel -> node over the Docker bridge, friends
 #                     -> node on 127.0.0.1), add-user, disable/enable,
-#                     hwid-limit, backup
+#                     tidy-users, hwid-limit, backup
 #   install-node.sh   remnanode on the host network, run again with only
 #                     PANEL_IP (as after a panel move)
 #   telegram-setup    against a mock Telegram API (test/mock-apis.py): the
@@ -29,8 +29,10 @@
 #   (c) the device from X-Hwid is recorded in the panel,
 #   (d) the app's own Go core (libxray, via test/e2e) parses the
 #       subscription and fetches a page through the node,
-#   plus: a disabled friend is refused by the node, a disabled node leaves
-#   the subscription, the device limit works, a domain change reaches Caddy,
+#   plus: a disabled friend is refused by the node, a friend made as the
+#   panel's web form makes one (no squad, end date tomorrow) gets the
+#   servers and no end date from tidy-users while older and hand-set users
+#   stay, a disabled node leaves the subscription, the device limit works, a domain change reaches Caddy,
 #   the support link follows SUPPORT_URL (never the panel's placeholder),
 #   the node keeps its custom port on a re-run, the node's Xray keeps idle
 #   connections 30 minutes (the profile's policy), the APK is published
@@ -623,6 +625,50 @@ kp add-user friend_3 >/dev/null
 kp delete-user friend_3 --yes
 if grep -q '"username":"friend_3"' <<<"$(api /api/users/by-username/friend_3)"; then fail "delete-user"; fi
 pass "link shows the same link, unknown names are reported, delete-user works"
+
+step "tidy-users: a friend added in the web form gets the servers and no end date"
+web_user() { # NAME EXPIRE_AT SQUADS_JSON -> subscription link; the body the panel's web form sends
+  api /api/users -X POST -H 'Content-Type: application/json' --data-binary "$(jq -nc --arg n "$1" --arg e "$2" --argjson s "$3" \
+    '{username: $n, status: "ACTIVE", expireAt: $e, trafficLimitBytes: 0, trafficLimitStrategy: "NO_RESET", activeInternalSquads: $s}')" |
+    jq -r '.response.subscriptionUrl // empty'
+}
+web_state() { # NAME -> {squads, end}
+  api "/api/users/by-username/$1" | jq -c '.response | {squads: [.activeInternalSquads[].name], end: (.expireAt | sub("\\.[0-9]+Z$"; ""))}'
+}
+squad_named() { api /api/internal-squads | jq -r --arg n "$1" 'first(.response.internalSquads[] | select(.name == $n) | .uuid)'; }
+KLAUS_SQUAD="$(squad_named KlausVPN)"
+PANEL_SQUAD="$(squad_named Default-Squad)"
+TOMORROW="$(date -u -d '+1 day' +%Y-%m-%dT%H:%M:%S.000Z)"
+MONTH="$(date -u -d '+30 days' +%Y-%m-%dT%H:%M:%S)"
+WEB_SUB="$(web_user web_friend "$TOMORROW" '[]')"
+[ -n "$WEB_SUB" ] || fail "the panel did not make a user as its web form does"
+web_user web_panel_squad "$MONTH.000Z" "[\"$PANEL_SQUAD\"]" >/dev/null
+web_user web_chosen "$MONTH.000Z" "[\"$KLAUS_SQUAD\"]" >/dev/null
+web_user web_old "$TOMORROW" '[]' >/dev/null
+docker exec remnawave-db psql -q -U "$(sed -n 's/^POSTGRES_USER=//p' "$WORK/opt/.env")" \
+  -d "$(sed -n 's/^POSTGRES_DB=//p' "$WORK/opt/.env")" \
+  -c "UPDATE users SET created_at = now() - interval '3 days' WHERE username = 'web_old'" || fail "web_old not moved back"
+if grep -q "@127.0.0.1:$VPN_PORT" <<<"$(sub_get "$UA_APP" "$WEB_SUB" | base64 -d)"; then
+  fail "a user from the web form has servers without tidy-users"
+fi
+kp tidy-users | tee "$WORK/tidy.log"
+grep -qx "web_friend: добавлены серверы (группа KlausVPN), подписка теперь бессрочная" "$WORK/tidy.log" || fail "web_friend not fixed"
+grep -qx "web_panel_squad: добавлены серверы (группа KlausVPN)" "$WORK/tidy.log" || fail "web_panel_squad not fixed"
+[ "$(wc -l < "$WORK/tidy.log")" = "2" ] || fail "tidy-users touched more users"
+for u in web_friend web_panel_squad web_chosen web_old friend_1; do echo "$u $(web_state "$u")"; done
+[ "$(web_state web_friend)" = '{"squads":["KlausVPN"],"end":"2099-12-31T00:00:00"}' ] || fail "web_friend state"
+[ "$(web_state web_panel_squad)" = "{\"squads\":[\"KlausVPN\"],\"end\":\"$MONTH\"}" ] || fail "web_panel_squad state"
+[ "$(web_state web_chosen)" = "{\"squads\":[\"KlausVPN\"],\"end\":\"$MONTH\"}" ] || fail "a chosen date or squad was changed"
+[ "$(web_state web_old | jq -c .squads)" = "[]" ] || fail "a user older than two days was changed"
+[ "$(web_state friend_1 | jq -r .end)" = "2099-12-31T00:00:00" ] || fail "friend_1 changed"
+grep -q "@127.0.0.1:$VPN_PORT" <<<"$(sub_get "$UA_APP" "$WEB_SUB" | base64 -d)" || fail "no server in web_friend's subscription"
+retry 10 "$WORK/e2e" check -sub "$WEB_SUB" -resolve "$SUB_DOMAIN:127.0.0.1" -cacert "$WORK/caddy-root.crt" \
+  -hwid cccccccccccccccccccccccccccccccc -url "http://$WEB/" -expect "$TOKEN" >/dev/null || fail "web_friend's traffic"
+kp tidy-users | tee "$WORK/tidy-2.log"
+grep -q "Исправлять нечего" "$WORK/tidy-2.log" || fail "second run"
+[ -z "$(kp tidy-users --quiet)" ] || fail "the timer's run is not quiet"
+for u in web_friend web_panel_squad web_chosen web_old; do kp delete-user "$u" --yes >/dev/null; done
+pass "web form defaults (no squad, tomorrow; the panel's own squad) fixed, traffic flows; a chosen date and squad, older users and CLI users untouched; the timer's run is quiet"
 
 step "disable-node / enable-node"
 kp disable-node test-node

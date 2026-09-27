@@ -10,6 +10,7 @@ umask 077
 CONF="${KLAUS_PANEL_CONF:-/opt/remnawave/klaus-panel.env}"
 PROFILE_NAME="KlausVPN"   # config profile shared by all VPN servers
 SQUAD_NAME="KlausVPN"     # internal squad every friend is in
+PANEL_SQUAD="Default-Squad" # the panel's own squad, for its own profile's servers
 INBOUND_TAG="VLESS_REALITY"
 # The response rule for the app is found by this name, and it matches the
 # app's User-Agent "KlausVPN/…": both keep the app's former name on purpose.
@@ -38,6 +39,8 @@ klaus-panel — управление панелью Kirov VPN
   disable-user ИМЯ             временно отключить (ссылка перестанет работать)
   enable-user ИМЯ              включить обратно
   delete-user ИМЯ [--yes]      удалить совсем
+  tidy-users                   добавленным в веб-панели за последние двое суток: дать
+                               серверы и снять срок «до завтра» (раз в 20 секунд само)
 
 VPN-серверы:
   add-node ИМЯ IP [СТРАНА] [--title НАЗВАНИЕ] [--host АДРЕС] [--node-port 2222]
@@ -550,6 +553,64 @@ user_action() { # ACTION NAME
   esac
 }
 
+# The panel's web form starts a new user with no squad and an end date of
+# tomorrow: without a fix the friend gets no servers, and the link stops
+# working the next day. The timer runs this every 20 seconds. Only users
+# made in the last two days are looked at, so a change made on purpose
+# later stays.
+TIDY_WINDOW=$((48 * 3600))
+cmd_tidy_users() {
+  local quiet=0 start=0 from failed=0 u body name what
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --quiet) quiet=1; shift ;;
+      *) die "непонятный параметр: $1" ;;
+    esac
+  done
+  from=$(($(date +%s) - TIDY_WINDOW))
+  tmpdir
+  : > "$TMPD/tidy"
+  # Newest first, a page at a time, while the page is still inside the window.
+  while :; do
+    api GET "/api/users?start=$start&size=100&sorting=%5B%7B%22id%22%3A%22id%22%2C%22desc%22%3Atrue%7D%5D"
+    # A panel that is restarting: the timer tries again in 20 seconds.
+    if [ "$quiet" = "1" ] && [[ "$HTTP_CODE" =~ ^(000|5..)$ ]]; then return 0; fi
+    check_resp GET /api/users
+    # Default-Squad is the panel's own: its servers are none of ours.
+    jq -c --argjson from "$from" --arg panel_squad "$PANEL_SQUAD" '
+      def t: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+      .response.users[] | select((.createdAt | t) >= $from)
+      | {id, username,
+         squad: ([.activeInternalSquads[]? | select(.name != $panel_squad)] | length == 0),
+         end: ((.expireAt | t) - (.createdAt | t) < 36 * 3600)}
+      | select(.squad or .end)' <<<"$RESP" >> "$TMPD/tidy"
+    jq -e --argjson from "$from" '.response.users | length == 100
+      and (last.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) >= $from' <<<"$RESP" >/dev/null || break
+    start=$((start + 100))
+  done
+  if [ ! -s "$TMPD/tidy" ]; then
+    if [ "$quiet" != "1" ]; then say "Исправлять нечего: у всех, кого добавили за двое суток, есть серверы и нет срока «до завтра»"; fi
+    return 0
+  fi
+  if grep -q '"squad":true' "$TMPD/tidy"; then squad_uuid; fi
+  while read -r u; do
+    body="$(jq -c --arg s "${SQUAD_UUID:-}" --arg never "$NEVER" '{id}
+      + (if .squad then {activeInternalSquads: [$s]} else {} end)
+      + (if .end then {expireAt: $never} else {} end)' <<<"$u")"
+    name="$(jq -r '.username' <<<"$u")"
+    what="$(jq -r --arg g "$SQUAD_NAME" '[if .squad then "добавлены серверы (группа \($g))" else empty end,
+      if .end then "подписка теперь бессрочная" else empty end] | join(", ")' <<<"$u")"
+    api PATCH /api/users "$body"
+    if [[ "$HTTP_CODE" =~ ^2 ]]; then
+      echo "$name: $what"
+    else
+      failed=1
+      warn "$name: панель не приняла исправление (ответ $HTTP_CODE)"
+    fi
+  done < "$TMPD/tidy"
+  [ "$failed" = "0" ]
+}
+
 # ---------------------------------------------------------------- nodes
 valid_address() { [[ "$1" =~ ^[A-Za-z0-9.:-]+$ ]]; }
 
@@ -1017,6 +1078,7 @@ case "$cmd" in
   disable-user) user_action disable "$@" ;;
   enable-user) user_action enable "$@" ;;
   delete-user) user_action delete "$@" ;;
+  tidy-users) cmd_tidy_users "$@" ;;
   add-node) cmd_add_node "$@" ;;
   list-nodes) cmd_list_nodes ;;
   disable-node) node_action disable "$@" ;;

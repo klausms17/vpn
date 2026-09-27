@@ -916,8 +916,38 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+  # Friends added in the panel's web form get the servers and lose the
+  # form's end date of tomorrow ("klaus-panel tidy-users"). It runs every
+  # 20 seconds, so the journal keeps only what it fixed and its errors.
+  put_unit klaus-panel-users.service <<EOF
+# Written by Kirov VPN install-panel.sh
+[Unit]
+Description=Kirov VPN: friends added in the web panel get the servers and no end date
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=KLAUS_PANEL_CONF=$CONF
+ExecStart=/usr/local/bin/klaus-panel tidy-users --quiet
+SyslogLevel=notice
+LogLevelMax=notice
+EOF
+  put_unit klaus-panel-users.timer <<'EOF'
+# Written by Kirov VPN install-panel.sh
+[Unit]
+Description=Kirov VPN: look for friends added in the web panel every 20 seconds
+
+[Timer]
+OnActiveSec=20s
+OnUnitActiveSec=20s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+EOF
   if [ "$units_changed" = "1" ]; then systemctl daemon-reload; fi
   systemctl enable --now klaus-panel-apk.timer >/dev/null 2>&1 || warn "не удалось включить таймер klaus-panel-apk.timer"
+  systemctl enable --now klaus-panel-users.timer >/dev/null 2>&1 || warn "не удалось включить таймер klaus-panel-users.timer"
   if command -v ufw >/dev/null && grep -q "Status: active" <<<"$(ufw status)"; then
     say "Открываю порты 80 и 443 в ufw"
     ufw allow 80/tcp >/dev/null
@@ -949,6 +979,8 @@ echo "Дальше:"
 echo "  1. Купите VPS для VPN-сервера и выполните:  klaus-panel add-node Имя IP-адрес DE"
 echo "     команда покажет, что запустить на этом VPS;"
 echo "  2. Для каждого знакомого:  klaus-panel add-user Имя"
+echo "     или в панели: «Пользователи» → «Создать пользователя», достаточно имени"
+echo "     (серверы и бессрочный срок панель поставит сама)"
 if [ -z "$TELEGRAM_CHAT_ID" ]; then
   echo "  3. Оповещения в Telegram о сбоях и блокировках:  klaus-panel telegram-setup ТОКЕН-БОТА"
 else

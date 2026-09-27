@@ -54,6 +54,10 @@ and give step-by-step instructions for anything he must do himself.
     nodes, publish-apk, telegram-setup); `klaus-monitor.py` turns block
     reports from the app into Telegram alerts; `test/` holds the Docker
     end-to-end test and the monitor unit tests.
+  - The owner may add friends in the panel's web form instead of the CLI.
+    That form starts with no squad and an end date of tomorrow, so a
+    systemd timer runs `klaus-panel tidy-users` every 20 seconds: users
+    made in the last two days get the `KlausVPN` squad and no end date.
 - `scripts/`: `build-libxray.sh` (AAR), `build-libxray-ios.sh`,
   `fetch-geo.sh`, `prepare-geo.sh`.
 - `docs/README.ru.md`: the owner's full guide in Russian: install, servers,
@@ -126,9 +130,13 @@ and give step-by-step instructions for anything he must do himself.
   passes its checks (geo files in the extension, no bitcode). The app is
   still the skeleton: paste a key, connect, disconnect.
 - **Panel:** the scripts are written and pass the Docker e2e, but they are
-  not installed on real servers yet.
-- All work so far is on the branch `claude/compassionate-mayer-6jph8m`.
-  `main` is behind it.
+  not installed on real servers yet. Friends can be added in the web form
+  too (see `tidy-users` above), so the owner needs no custom admin UI.
+- The work of `claude/compassionate-mayer-6jph8m` goes to `main` through a
+  PR from `claude/pensive-gates-mddsan`. Once it is merged, start new work
+  from `main`.
+- The owner's servers: the current VPN (`install.sh`, one shared key) runs
+  on a VPS in Germany; the owner also has a Beget VPS in Russia.
 
 ## Next steps
 
@@ -152,10 +160,18 @@ and give step-by-step instructions for anything he must do himself.
    the installers again later applies `connIdle` 1800 and the new
    whitelist-note texts. The panel publishes only `KirovVPN-*.apk` from the
    `stable` release, so it needs a stable build first.
+   - The panel goes on its own VPS abroad, not on the German VPN server: a
+     block of that IP would take the subscription address down with it.
+   - The German server becomes a node with `MIGRATE=1` once friends have
+     their links (the old shared key stops then); a second node at another
+     hoster lets the apps switch by themselves.
+   - The Beget VPS is not needed: a Russian exit bypasses nothing, and a
+     panel there would put friends' data under Russian requests and its
+     links to the nodes behind TSPU. Later it might be a whitelist relay.
 5. The owner once pasted a Telegram bot token into a chat. Make sure he
    revoked it (@BotFather → /revoke) and entered the new one only on the
    panel.
-6. Merge the branch into `main` through a PR when the owner agrees. The
+6. The owner agreed to move the work to `main` and merges the PR. The
    weekly geo rebuild runs only on the default branch.
 7. Known limits, documented:
    - UDP flows outlive `Stop`, and a UDP socket is routed by its first
