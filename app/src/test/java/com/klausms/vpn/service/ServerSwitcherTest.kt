@@ -32,7 +32,7 @@ class ServerSwitcherTest {
         val w = switchedToB()
         val notice = Failover.switchedNotice(SERVER_B.name, SERVER_A.name)
         assertEquals(
-            listOf(StartRequest(1, userRequested = false, switch = Switch(SERVER_B.id, SERVER_A.id, expectedSelection = SERVER_A.id, notice))),
+            listOf(StartRequest(1, userRequested = false, switch = Switch(SERVER_B.id, SERVER_A.id, expectedSelection = SERVER_A.id, notice, report = true))),
             w.tunnel.starts,
         )
         assertEquals(SERVER_B.id, w.tunnel.session?.profile?.id)
@@ -104,6 +104,22 @@ class ServerSwitcherTest {
         assertFalse(w.memory.failedRecently(SERVER_A.id))
         assertEquals(emptyList<FakeReports.Report>(), w.reports.sent)
         assertEquals(SERVER_A.id, w.profiles.state.selectedId)
+    }
+
+    @Test
+    fun aSwitchThatCameUpOnItsRetryMarksAndReportsTheFailedServer() = runTest {
+        val w = FailoverWorld(this)
+        w.tunnel.startsFail = true
+        w.switcher.switchTo(w.epoch.current, SERVER_A, SERVER_B.id)
+        assertFalse(w.memory.failedRecently(SERVER_A.id))
+        // The engine tries the same start again a moment later (TunnelEngine.retryLater).
+        w.tunnel.startsFail = false
+        w.tunnel.start(w.tunnel.starts.single().copy(attempt = 1))
+
+        assertEquals(SERVER_B.id, w.tunnel.session?.profile?.id)
+        assertEquals(SERVER_B.id, w.profiles.state.selectedId)
+        assertTrue(w.memory.failedRecently(SERVER_A.id))
+        assertEquals(listOf(report(SERVER_A.id, SERVER_B.id)), w.reports.sent)
     }
 
     // --------------------------------------------------- back to the user's server

@@ -74,6 +74,15 @@ internal data class StartRequest(
 /**
  * An automatic move of the tunnel away from [failedId] to [winnerId],
  * which then becomes the selection unless the user chose another than
- * [expectedSelection] meanwhile. [notice] is shown once connected.
+ * [expectedSelection] meanwhile. [notice] is shown once connected; only a
+ * move away from a server that stopped answering has one, and once the
+ * winner is up that server counts as failed and, with [report], is
+ * reported to the owner's panel.
  */
-internal data class Switch(val winnerId: String, val failedId: String, val expectedSelection: String?, val notice: String?)
+internal data class Switch(
+    val winnerId: String,
+    val failedId: String,
+    val expectedSelection: String?,
+    val notice: String?,
+    val report: Boolean = false,
+)

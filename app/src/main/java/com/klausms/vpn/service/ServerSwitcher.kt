@@ -59,22 +59,15 @@ internal class ServerSwitcher(
                 if (!returning) notices.show(Failover.NOTICE_PICK_ANOTHER, e)
                 return
             }
-            val notice = if (returning || winner.id == failed.id) null else Failover.switchedNotice(winner.name, failed.name)
+            val leavesFailed = !returning && winner.id != failed.id
+            val notice = if (leavesFailed) Failover.switchedNotice(winner.name, failed.name) else null
             tunnel.start(
                 StartRequest(
                     tunnel.latestStartId(),
                     userRequested = false,
-                    switch = Switch(winner.id, failed.id, expectedSelection = saved.selectedId, notice = notice),
+                    switch = Switch(winner.id, failed.id, expectedSelection = saved.selectedId, notice = notice, report = leavesFailed && report),
                 ),
             )
-            // Only a switch that happened marks the failed server: one dropped
-            // on the way (a reconnect came first) proves nothing about it.
-            if (!returning && winner.id != failed.id && tunnel.session?.profile?.id == winner.id) {
-                memory.markFailed(failed.id)
-                // Up on another server: the phone is online, so the failed
-                // one does not answer from this network.
-                if (report) reports.report(failed, saved, winner = winner)
-            }
         } catch (ex: Exception) {
             if (ex is CancellationException) throw ex
             AppLog.w("server switch failed", ex)
@@ -84,13 +77,17 @@ internal class ServerSwitcher(
     /**
      * Part of the start [req] that brought [runningId] up. Only a server
      * whose core came up becomes the selection: after an automatic switch
-     * it does, and the user's server is remembered; any other start may
-     * end the way back to it.
+     * it does, the user's server is remembered and the one that stopped
+     * answering marked; any other start may end the way back to it.
      */
     suspend fun afterStart(runningId: String, req: StartRequest) {
         val switch = req.switch
         if (switch != null) {
             if (saveSwitch(switch.failedId, runningId, switch.expectedSelection)) trackAway(switch.failedId, runningId)
+            // Here, not after the start in switchTo: a start that fails at
+            // first may come up on the engine's retry, which switchTo does
+            // not wait for.
+            if (switch.notice != null && runningId == switch.winnerId) switchedAway(switch)
         } else {
             forgetAwayUnless(runningId, req.picked)
         }
@@ -156,6 +153,22 @@ internal class ServerSwitcher(
             AppLog.w("could not save the new selection", e)
         }
         return false
+    }
+
+    /**
+     * The tunnel is up on [switch]'s winner, away from a server that
+     * stopped answering: searches skip that server for a while, and the
+     * owner's panel hears of it if asked.
+     */
+    private fun switchedAway(switch: Switch) {
+        memory.markFailed(switch.failedId)
+        if (!switch.report) return
+        val saved = profiles.snapshot()
+        val failed = saved.profiles.firstOrNull { it.id == switch.failedId } ?: return
+        val winner = saved.profiles.firstOrNull { it.id == switch.winnerId } ?: return
+        // Up on another server: the phone is online, so the failed one
+        // does not answer from this network.
+        reports.report(failed, saved, winner = winner)
     }
 
     /** An automatic switch from [failedId] to [winnerId] happened: remember the user's server. */
