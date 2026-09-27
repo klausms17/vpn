@@ -78,4 +78,12 @@ jobs:
           test -n "$app"
           test -d "$app/PlugIns/PacketTunnel.appex"
           plutil -p "$app/PlugIns/PacketTunnel.appex/Info.plist" | grep -q packet-tunnel
+          # Apple refuses executables that still carry bitcode.
+          for bin in "$app/KlausVPN" "$app/PlugIns/PacketTunnel.appex/PacketTunnel"; do
+            test -f "$bin"
+            if otool -l "$bin" | grep -q "segname __LLVM"; then
+              echo "::error::$bin still contains bitcode"
+              exit 1
+            fi
+          done
           du -sh "$app" "$app/PlugIns/PacketTunnel.appex"

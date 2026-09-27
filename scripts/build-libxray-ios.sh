@@ -25,10 +25,7 @@ gomobile bind -v \
   -o "$out" \
   .
 
-# gomobile still asks clang for bitcode, which Xcode no longer accepts.
-bin="$(find "$out" -path '*ios-arm64*' -name Libxray -type f | head -n 1)"
-if [ -n "$bin" ] && otool -l "$bin" | grep -q __LLVM; then
-  xcrun bitcode_strip -r "$bin" -o "$bin.stripped"
-  mv "$bin.stripped" "$bin"
-fi
+# gomobile still compiles its C glue with -fembed-bitcode. The framework is a
+# static archive, and bitcode_strip cannot process the Go object in it; the
+# linker drops that bitcode from the app instead (ios-app.yml checks it).
 du -sh "$out"
