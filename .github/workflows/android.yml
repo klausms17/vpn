@@ -49,6 +49,16 @@ jobs:
         working-directory: libxray
         run: go vet ./...
 
+      # The Go half of run-local.sh's Remnawave test: its own module on top
+      # of libxray, so a libxray API change must not break it unnoticed.
+      - name: Vet the Remnawave end-to-end tool
+        working-directory: server/remnawave/test/e2e
+        run: go vet ./...
+
+      # Standard library only, like klaus-monitor itself: nothing to install.
+      - name: Block report monitor tests
+        run: python3 -B server/remnawave/test/monitor_test.py
+
       - name: Unit and end-to-end tests (real Xray servers)
         working-directory: libxray
         env:
