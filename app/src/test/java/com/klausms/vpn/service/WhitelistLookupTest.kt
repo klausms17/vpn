@@ -3,6 +3,7 @@ package com.klausms.vpn.service
 import com.klausms.vpn.core.DirectNet
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.joinAll
@@ -16,6 +17,7 @@ import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class WhitelistLookupTest {
     /** Answers [statuses] per host; a host missing from it fails. [before] runs first, on the lookup's thread. */
     private class FakeDirect(private val statuses: Map<String, Int>, private val before: () -> Unit = {}) : DirectNet {

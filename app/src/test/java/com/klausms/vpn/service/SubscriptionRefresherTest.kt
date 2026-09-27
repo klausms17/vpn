@@ -5,6 +5,7 @@ import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.Subscription
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -16,6 +17,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class SubscriptionRefresherTest {
     /** Answers [result]; while [gate] is set, each refresh waits for it. */
     private class FakeSource(var result: Refreshed) : SubscriptionSource {
