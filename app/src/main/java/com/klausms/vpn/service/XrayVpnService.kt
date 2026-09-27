@@ -19,7 +19,9 @@ import android.os.RemoteCallbackList
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.klausms.vpn.core.BuildOptions
+import com.klausms.vpn.core.CoreHandle
 import com.klausms.vpn.core.XrayCore
+import com.klausms.vpn.core.XrayCoreHandle
 import com.klausms.vpn.core.userMessage
 import com.klausms.vpn.data.AppSettings
 import com.klausms.vpn.data.DiskProfiles
@@ -56,7 +58,6 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonArray
-import libxray.Controller
 import libxray.Libxray
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -155,7 +156,7 @@ class XrayVpnService : VpnService() {
 
         /** The running core, for the widget's ping (same process). */
         @Volatile
-        var liveController: Controller? = null
+        internal var liveController: CoreHandle? = null
             private set
 
         /**
@@ -163,7 +164,7 @@ class XrayVpnService : VpnService() {
          * Cloudflare, since some servers cannot reach Google but carry
          * everything else. Blocking; throws when neither answers.
          */
-        fun measureThrough(c: Controller, timeoutMs: Int): Long {
+        internal fun measureThrough(c: CoreHandle, timeoutMs: Int): Long {
             val ms = try {
                 c.measureDelay(XrayCore.TEST_URL, timeoutMs)
             } catch (_: Exception) {
@@ -195,9 +196,8 @@ class XrayVpnService : VpnService() {
     @Volatile
     private var lastStartId = 0
 
-    // Written only on [worker]; read elsewhere.
-    @Volatile
-    private var controller: Controller? = null
+    // Started only on [worker]; stopped there, and synchronously in onDestroy.
+    private val core: CoreHandle = XrayCoreHandle()
 
     @Volatile
     private var tun: ParcelFileDescriptor? = null
@@ -542,22 +542,21 @@ class XrayVpnService : VpnService() {
                 // Checks of the old core end here, not with the next one's results.
                 epoch.advance()
                 try {
-                    controller?.stop()
+                    core.stop()
                 } catch (e: Exception) {
                     AppLog.w("core stop before restart", e)
                 }
             }
             tun = newTun
-            val c = controller ?: Libxray.newController().also { controller = it }
             try {
-                c.start(newConfig, newTun.fd)
+                core.start(newConfig, newTun.fd)
             } catch (e: Exception) {
                 throw VpnStartException("Ядро не запустилось: ${e.userMessage()}")
             } finally {
                 if (oldTun != null && oldTun !== newTun) closeQuietly(oldTun)
             }
             config = newConfig
-            liveController = c
+            liveController = core
             runningProfile = profile
             epoch.advance()
             manualPick = when {
@@ -764,7 +763,7 @@ class XrayVpnService : VpnService() {
         runningProfile = null
         epoch.advance()
         try {
-            controller?.stop()
+            core.stop()
         } catch (e: Exception) {
             AppLog.w("core stop", e)
         }
@@ -941,15 +940,14 @@ class XrayVpnService : VpnService() {
                     if (expectedEpoch != null && !epoch.isCurrent(expectedEpoch)) return@withLock
                     val cfg = config ?: return@withLock
                     val fd = tun ?: return@withLock
-                    val c = controller ?: return@withLock
                     AppLog.i(why)
                     try {
                         epoch.advance()
-                        c.stop()
+                        core.stop()
                         // A tunnel that only ever resets never goes through
                         // startTunnel: its log is kept small here too.
                         XrayLog.trim(coreLog)
-                        c.start(cfg, fd.fd)
+                        core.start(cfg, fd.fd)
                         connectedAtElapsed = clock.elapsed()
                         epoch.advance()
                         scheduleVerify(Reason.NETWORK)
@@ -1035,7 +1033,7 @@ class XrayVpnService : VpnService() {
     }
 
     /** Whether [url] answers through the running tunnel. Blocking. */
-    private fun answers(c: Controller, url: String, timeoutMs: Int): Boolean = try {
+    private fun answers(c: CoreHandle, url: String, timeoutMs: Int): Boolean = try {
         c.measureDelay(url, timeoutMs) >= 0
     } catch (_: Exception) {
         false
@@ -1061,7 +1059,7 @@ class XrayVpnService : VpnService() {
      * or cannot be reached from the server) proves nothing and counts as
      * fine. No app name is sent. Blocking.
      */
-    private fun stalls(c: Controller, network: Network?): Boolean {
+    private fun stalls(c: CoreHandle, network: Network?): Boolean {
         repeat(2) {
             val stalled = try {
                 c.fetchThroughTunnel(BULK_URL, "", BULK_HEADERS, BULK_TIMEOUT_MS)
@@ -1086,7 +1084,7 @@ class XrayVpnService : VpnService() {
      * to the fastest that answers. The tunnel stays as it is meanwhile, and
      * for good when nothing answers: nothing ever leaks outside the VPN.
      */
-    private suspend fun runFailover(e: Long, c: Controller, failed: StoredProfile, stalled: Boolean) {
+    private suspend fun runFailover(e: Long, c: CoreHandle, failed: StoredProfile, stalled: Boolean) {
         val caps = underlying()
         if (!hasNetwork(caps)) {
             AppLog.i("no network, not looking for another server")
@@ -1178,7 +1176,7 @@ class XrayVpnService : VpnService() {
      * server, at most every 10 minutes. False: treat it as a real failure.
      * Google first, as the probe that answered, then Cloudflare.
      */
-    private suspend fun recoveredInPlace(e: Long, c: Controller): Boolean {
+    private suspend fun recoveredInPlace(e: Long, c: CoreHandle): Boolean {
         if (answers(c, XrayCore.TEST_URL, CONFIRM_TIMEOUT_MS) || answers(c, XrayCore.TEST_URL_ALT, CONFIRM_TIMEOUT_MS)) {
             if (!epoch.isCurrent(e)) return true
             AppLog.i("the server answers again: the connection was lost for a moment")
@@ -1396,7 +1394,7 @@ class XrayVpnService : VpnService() {
      * earliest 30 minutes later, then less and less often if it keeps
      * failing), go back to it.
      */
-    private suspend fun returnHomeIfItAnswers(e: Long, c: Controller, running: StoredProfile) {
+    private suspend fun returnHomeIfItAnswers(e: Long, c: CoreHandle, running: StoredProfile) {
         val away = runtime.away() ?: return
         val now = clock.elapsed()
         if (away.to != running.id || !Failover.returnDue(away, now) || failedRecently(away.home)) return
@@ -1465,11 +1463,11 @@ class XrayVpnService : VpnService() {
     }
 
     /** The delay through each of [servers] in ms, or -1, in the same order. Never throws. */
-    private suspend fun probe(c: Controller, servers: List<StoredProfile>): List<Long> {
+    private suspend fun probe(c: CoreHandle, servers: List<StoredProfile>): List<Long> {
         if (servers.isEmpty()) return emptyList()
         return probeLock.withLock {
             try {
-                XrayCore.probe(c, servers.map { it.outbounds }, timeoutMs = Failover.PROBE_TIMEOUT_MS, parallel = Failover.PARALLEL)
+                c.probe(servers.map { it.outbounds }, timeoutMs = Failover.PROBE_TIMEOUT_MS, parallel = Failover.PARALLEL)
             } catch (ex: Exception) {
                 AppLog.w("probe failed", ex)
                 List(servers.size) { -1L }
@@ -1501,9 +1499,9 @@ class XrayVpnService : VpnService() {
     }
 
     /** After a check of [running] passed: downloads subscription [subId] through the tunnel, and restarts if that changed the running server. */
-    private fun refreshThroughTunnel(subId: String, c: Controller, running: StoredProfile) {
+    private fun refreshThroughTunnel(subId: String, c: CoreHandle, running: StoredProfile) {
         if (refreshJob?.isActive == true) return
-        val tunnel = Downloader { url, headers -> XrayCore.fetchThroughTunnel(c, url, headers) }
+        val tunnel = c.downloader()
         refreshJob = scope.async(Dispatchers.IO) {
             refreshSubscription(subId, tunnel).also { if (it.runningChanged) restartOnSaved(running) }
         }

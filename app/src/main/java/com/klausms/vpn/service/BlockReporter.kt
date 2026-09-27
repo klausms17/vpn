@@ -10,13 +10,13 @@ import android.os.SystemClock
 import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import com.klausms.vpn.BuildConfig
+import com.klausms.vpn.core.CoreHandle
 import com.klausms.vpn.core.XrayCore
 import com.klausms.vpn.core.userMessage
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.Subscription
 import com.klausms.vpn.data.httpsUrl
 import com.klausms.vpn.util.AppLog
-import libxray.Controller
 import java.util.Locale
 
 /**
@@ -52,7 +52,7 @@ internal class BlockReporter(context: Context) {
         network: Network?,
         allDown: Boolean = false,
         whitelist: Boolean = false,
-        tunnel: () -> Controller?,
+        tunnel: () -> CoreHandle?,
     ) {
         val base = httpsUrl(subscription.reportUrl) ?: return
         val id = BlockReport.shortUuid(subscription.url) ?: return
@@ -83,7 +83,7 @@ internal class BlockReporter(context: Context) {
     }
 
     /** True when the panel got the report, or refused it for good (4xx). */
-    private fun send(url: String, tunnel: () -> Controller?): Boolean {
+    private fun send(url: String, tunnel: () -> CoreHandle?): Boolean {
         try {
             XrayCore.fetch(url, via = null, timeoutMs = BlockReport.TIMEOUT_MS)
             AppLog.i("block report sent")
@@ -97,9 +97,9 @@ internal class BlockReporter(context: Context) {
             }
             AppLog.w("block report failed directly: ${e.userMessage()}")
         }
-        val c = tunnel() ?: return false
+        val core = tunnel() ?: return false
         return try {
-            XrayCore.fetchThroughTunnel(c, url, headers = "", timeoutMs = BlockReport.TIMEOUT_MS)
+            core.fetchThroughTunnel(url, XrayCore.USER_AGENT, headers = "", timeoutMs = BlockReport.TIMEOUT_MS)
             AppLog.i("block report sent through the tunnel")
             true
         } catch (e: Exception) {
