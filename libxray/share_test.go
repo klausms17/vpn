@@ -180,6 +180,23 @@ func TestParseLinkErrors(t *testing.T) {
 	}
 }
 
+// A broken link must not have its secret quoted back in the error.
+func TestParseLinkErrorsHideSecrets(t *testing.T) {
+	for _, link := range []string{
+		"trojan://h:Secret5ecret", // no "@": the password lands where the port is read
+		"x Secret5ecret y://h:1",  // text before "://" that is not a scheme
+	} {
+		_, err := parseLink(link)
+		if err == nil {
+			t.Errorf("%s: expected error", link)
+			continue
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "secret5ecret") {
+			t.Errorf("%s: error quotes the secret: %q", link, err)
+		}
+	}
+}
+
 func TestPinCertificate(t *testing.T) {
 	k := getKeys(t)
 	p := mustParse(t, "trojan://pw@self.example.com:443?allowInsecure=1#x")

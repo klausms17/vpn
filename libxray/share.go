@@ -87,7 +87,12 @@ func parseLink(raw string) (*Profile, error) {
 	case "happ":
 		return nil, errf("зашифрованные ссылки Happ не поддерживаются — нужна обычная ссылка или подписка")
 	default:
-		return nil, errf("протокол %s:// не поддерживается", scheme)
+		// Only something that looks like a scheme is quoted: the text before
+		// "://" of a mangled line can be part of a key.
+		if linkScheme.MatchString(scheme) {
+			return nil, errf("протокол %s:// не поддерживается", scheme)
+		}
+		return nil, errf("неизвестный тип ссылки")
 	}
 	if err != nil {
 		return nil, err
@@ -235,7 +240,8 @@ func splitHostPort(hp string) (string, int, error) {
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port <= 0 || port > 65535 {
-		return "", 0, errf("неверный порт сервера: %q", portStr)
+		// Not quoted: in a broken link the "port" can be the end of a password.
+		return "", 0, errf("неверный порт сервера")
 	}
 	if host == "" {
 		return "", 0, errf("в ссылке нет адреса сервера")
