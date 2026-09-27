@@ -28,6 +28,9 @@ class UnderlyingNetworkMonitor(
     private val cm = context.getSystemService(ConnectivityManager::class.java)
     private val handler = Handler(Looper.getMainLooper())
     private var registered = false
+
+    // Written on the main thread; read through network from any thread.
+    @Volatile
     private var current: Network? = null
 
     // What the current network last reported; null until its first report.

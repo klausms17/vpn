@@ -1,5 +1,6 @@
 package com.klausms.vpn.service
 
+import android.content.Context
 import com.klausms.vpn.util.AppLog
 import java.io.File
 import java.io.RandomAccessFile
@@ -15,6 +16,9 @@ internal object XrayLog {
 
     /** How much of its end moves to "xray.log.1" when it is cut. */
     const val KEEP_BYTES = 256 * 1024
+
+    /** The core's log, next to the app's own logs (the directory is created if missing). */
+    fun file(context: Context): File = File(AppLog.logDir(context), "xray.log")
 
     /**
      * When [file] is over [maxBytes], moves its last [keepBytes] (from a
