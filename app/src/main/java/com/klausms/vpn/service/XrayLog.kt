@@ -21,8 +21,10 @@ internal object XrayLog {
      * writes: it opens the file for appending, so its next line simply
      * starts the empty file. A "<name>.1" over [maxBytes] (left by older
      * versions) is cut to its end as well. Never throws; returns whether
-     * [file] was cut.
+     * [file] was cut. One call at a time: the check and a core restart may
+     * both call it, and they would share the temporary file.
      */
+    @Synchronized
     fun trim(file: File, maxBytes: Long = MAX_BYTES, keepBytes: Int = KEEP_BYTES): Boolean = try {
         val old = File(file.parentFile, file.name + ".1")
         if (old.length() > maxBytes) old.writeBytes(tail(old, keepBytes))

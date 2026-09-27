@@ -75,7 +75,8 @@ class UnderlyingNetworkMonitor(
 
         override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
             // Android 9 still kept VPN traffic out of Private DNS.
-            if (network != current || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+            if (network != current) return
             onPrivateDns(linkProperties.privateDnsServerName)
         }
     }

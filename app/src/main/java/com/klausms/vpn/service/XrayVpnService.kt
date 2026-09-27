@@ -133,16 +133,20 @@ class XrayVpnService : VpnService() {
          * The download check: some operators freeze connections to foreign
          * servers after the first ~16 KB, which a 204 answer never reaches.
          * 64 KB, not compressed; a stall counts, a refusal does not.
-         * Run on connect, network change and a manual check, and otherwise
-         * at most this often.
+         * Run on connect and a manual check, and otherwise at most this
+         * often per network (a new network gets one at its first check).
          */
         private const val BULK_URL = "https://speed.cloudflare.com/__down?bytes=65536"
         private const val BULK_HEADERS = """{"Accept-Encoding":"identity"}"""
         private const val BULK_TIMEOUT_MS = 12_000
         private const val BULK_CHECK_MS = 30 * 60_000L
 
-        /** A Russian site, opened outside the tunnel: tells "servers blocked" from "no internet". */
-        private const val DIRECT_URL = "https://ya.ru/"
+        /**
+         * A Russian site, opened outside the tunnel: tells "servers blocked"
+         * from "no internet". A small file, not the page: this can run every
+         * few minutes while nothing answers.
+         */
+        private const val DIRECT_URL = "https://ya.ru/robots.txt"
         private const val DIRECT_TIMEOUT_MS = 5_000
 
         /** Hosts looked up in the mobile whitelist per search, and how long to wait for them. */
@@ -235,9 +239,11 @@ class XrayVpnService : VpnService() {
     @Volatile
     private var lastVerifiedOkAt = 0L
 
-    // elapsedRealtime of the last download check that went through.
-    @Volatile
-    private var lastBulkOkAt = 0L
+    // Per network: when a download check there last showed no stall
+    // (elapsedRealtime). Per network, so a phone going back and forth between
+    // Wi-Fi and mobile data does not download on every change: mobile data
+    // keeps its network across Wi-Fi gaps. Guarded by itself.
+    private val bulkFine = HashMap<Network?, Long>()
 
     // elapsedRealtime of the last check started because Android's view of the network changed.
     @Volatile
@@ -353,6 +359,11 @@ class XrayVpnService : VpnService() {
             if (ms < 0) {
                 // The user saw it fail: look for a server that answers.
                 scheduleVerify(Reason.USER)
+            } else if (config != null && bulkDue(Reason.APP, activeNetwork())) {
+                // A quick answer says nothing about downloads that stall
+                // (and must not clear a notice about them): the full check,
+                // with its download, decides.
+                scheduleVerify(Reason.APP)
             } else if (config != null) {
                 val now = SystemClock.elapsedRealtime()
                 lastVerifyAt = now
@@ -514,10 +525,13 @@ class XrayVpnService : VpnService() {
         // Also while a failed start waits to be retried with the interface
         // held: that is a tunnel that should run, not a first start.
         val restarting = config != null || tun != null
+        val previous = runningProfile
         val generation = ++startGeneration
         val before = VpnStatusHolder.status.value
         // From here on the new interface has replaced the old one.
         var swapped = false
+        // The user chose this server (see below); a retry keeps it.
+        var chosen = picked
         // New settings for a running tunnel: it keeps working meanwhile, so
         // it still shows as on (a tap on a "connecting" button would cancel).
         if (restarting && before.state == VpnState.CONNECTED) {
@@ -532,6 +546,7 @@ class XrayVpnService : VpnService() {
                 ?: throw VpnStartException("Не выбран сервер. Добавьте ключ в приложении.")
             val settings = Stores.settings(this).read()
             if (VpnStatusHolder.status.value.state == VpnState.CONNECTING) setStatus(VpnStatus(VpnState.CONNECTING, profile.id, profile.name))
+            chosen = Failover.chosenByUser(picked, userRequested && profileOverride == null, previous?.id, profile.id, profiles)
 
             GeoFiles.ensureInstalled(this)
             XrayCore.init(this)
@@ -583,7 +598,7 @@ class XrayVpnService : VpnService() {
                 // An automatic switch.
                 profileOverride != null -> null
                 // Picked by hand again after it had stopped answering: the user knows.
-                picked && failedRecently(profile.id) -> profile.id
+                chosen && failedRecently(profile.id) -> profile.id
                 // The same server with new settings: the choice still stands.
                 manualPick == profile.id -> manualPick
                 else -> null
@@ -596,7 +611,7 @@ class XrayVpnService : VpnService() {
             if (profileOverride != null && failedId != null) {
                 if (saveSwitch(failedId, profile.id, expectedSelection)) trackAway(failedId, profile.id)
             } else {
-                forgetAwayUnless(profile.id, picked)
+                forgetAwayUnless(profile.id, chosen)
             }
             // The session timer goes on when only the settings changed.
             val since = before.connectedSince.takeIf { restarting && it > 0 && before.profileId == profile.id }
@@ -624,7 +639,7 @@ class XrayVpnService : VpnService() {
             AppLog.e("tunnel start failed (attempt ${attempt + 1}): $message", e.takeIf { it !is VpnStartException })
             val again: (Int) -> Unit = { next ->
                 retryStart(generation, next) {
-                    startTunnel(lastStartId, userRequested = false, profileOverride, failedId, expectedSelection, notice, attempt = next, picked = picked)
+                    startTunnel(lastStartId, userRequested = false, profileOverride, failedId, expectedSelection, notice, attempt = next, picked = chosen)
                 }
             }
             // New settings or another server for a tunnel that works: until
@@ -1054,9 +1069,8 @@ class XrayVpnService : VpnService() {
         // It answers, but some operators freeze a foreign server's
         // connections after the first ~16 KB: pages and video then hang
         // while short answers still get through.
-        val bulkDue = reason == Reason.START || reason == Reason.NETWORK || reason == Reason.USER ||
-            SystemClock.elapsedRealtime() - lastBulkOkAt >= BULK_CHECK_MS
-        if (bulkDue && stalls(c)) {
+        val network = activeNetwork()
+        if (bulkDue(reason, network) && stalls(c, network)) {
             if (epoch.get() != e) return
             AppLog.w("downloads through the server stall (${reason.name.lowercase()})")
             runFailover(e, c, running, reason, stalled = true)
@@ -1068,7 +1082,7 @@ class XrayVpnService : VpnService() {
         clearSwitchNotice(e, minAgeMs = SWITCH_NOTICE_MS)
         owedRefresh?.let { id ->
             owedRefresh = null
-            refreshThroughTunnel(id, c, e)
+            refreshThroughTunnel(id, c, running)
         }
         // Moments when connections start over anyway.
         if (reason == Reason.NETWORK || reason == Reason.UNLOCK) returnHomeIfItAnswers(e, c, running)
@@ -1082,21 +1096,41 @@ class XrayVpnService : VpnService() {
     }
 
     /**
+     * Whether the download check is due: on connect and when the user asks,
+     * otherwise when none showed downloads working on [network] in the last
+     * half hour (a new network, or a stall seen before).
+     */
+    private fun bulkDue(reason: Reason, network: Network?): Boolean {
+        if (reason == Reason.START || reason == Reason.USER) return true
+        val now = SystemClock.elapsedRealtime()
+        return synchronized(bulkFine) {
+            bulkFine.entries.removeIf { now - it.value >= BULK_CHECK_MS || it.value > now }
+            network !in bulkFine
+        }
+    }
+
+    /**
      * Whether downloads through [c] stop partway: twice in a row, a 64 KB
      * file stops coming after it began. Any other failure (the site refuses
      * or cannot be reached from the server) proves nothing and counts as
      * fine. No app name is sent. Blocking.
      */
-    private fun stalls(c: Controller): Boolean {
+    private fun stalls(c: Controller, network: Network?): Boolean {
         repeat(2) {
-            try {
+            val stalled = try {
                 c.fetchThroughTunnel(BULK_URL, "", BULK_HEADERS, BULK_TIMEOUT_MS)
-                lastBulkOkAt = SystemClock.elapsedRealtime()
-                return false
+                false
             } catch (ex: Exception) {
-                if (!Failover.isStall(ex.message)) return false
+                Failover.isStall(ex.message)
+            }
+            if (!stalled) {
+                // Also after a refusal: trying again at every check would
+                // only cost time and data.
+                synchronized(bulkFine) { bulkFine[network] = SystemClock.elapsedRealtime() }
+                return false
             }
         }
+        synchronized(bulkFine) { bulkFine.remove(network) }
         return true
     }
 
@@ -1160,7 +1194,9 @@ class XrayVpnService : VpnService() {
         val control = !stalled
         val delays = probe(c, (if (control) listOf(failed) else emptyList()) + first)
         if (epoch.get() != e) return
-        if (control && delays.first() >= 0 && recoveredInPlace(e, c)) return
+        // It answered: whatever happens next, it is not blocked from here.
+        val reachable = control && delays.first() >= 0
+        if (reachable && recoveredInPlace(e, c)) return
         val tier = { p: StoredProfile -> Failover.tier(p, failed) }
         var probed = first.size
         var winner = Failover.fastest(first, if (control) delays.drop(1) else delays, tier)
@@ -1180,15 +1216,15 @@ class XrayVpnService : VpnService() {
         }
         if (winner == null) {
             AppLog.w("no server answers")
-            nothingAnswers(e, failed, state, probed, network)
+            nothingAnswers(e, failed, state, probed, network, report = !reachable)
             // The refresh changed or removed the running server: run what is
             // saved now, so the app and the widget show what really runs.
-            if (refreshed?.runningChanged == true) restartOnSaved(e)
+            if (refreshed?.runningChanged == true) restartOnSaved(failed)
             return
         }
         val (to, ms) = winner
         AppLog.i("switching to a server that answered in $ms ms")
-        enqueue { switchTo(e, failed, to.id) }
+        enqueue { switchTo(e, failed, to.id, report = !reachable) }
     }
 
     /**
@@ -1196,9 +1232,10 @@ class XrayVpnService : VpnService() {
      * through the running core too, the connection was lost for a moment:
      * stay. If not, the running core is stuck: restart it on the same
      * server, at most every 10 minutes. False: treat it as a real failure.
+     * Google first, as the probe that answered, then Cloudflare.
      */
     private suspend fun recoveredInPlace(e: Long, c: Controller): Boolean {
-        if (answers(c, XrayCore.TEST_URL_ALT, CONFIRM_TIMEOUT_MS)) {
+        if (answers(c, XrayCore.TEST_URL, CONFIRM_TIMEOUT_MS) || answers(c, XrayCore.TEST_URL_ALT, CONFIRM_TIMEOUT_MS)) {
             if (epoch.get() != e) return true
             AppLog.i("the server answers again: the connection was lost for a moment")
             lastVerifiedOkAt = SystemClock.elapsedRealtime()
@@ -1215,9 +1252,10 @@ class XrayVpnService : VpnService() {
     /**
      * No other server answers either (or there is none). A Russian site
      * opened directly, outside the tunnel, tells a block from a phone
-     * without internet: only a block is reported to the owner.
+     * without internet: only a block is reported to the owner, and only
+     * with [report] (false: [failed] itself answered a new connection).
      */
-    private suspend fun nothingAnswers(e: Long, failed: StoredProfile, state: ProfilesState, probed: Int, network: Network?) {
+    private suspend fun nothingAnswers(e: Long, failed: StoredProfile, state: ProfilesState, probed: Int, network: Network?, report: Boolean) {
         val online = directInternetWorks()
         if (epoch.get() != e) return
         val notice = when {
@@ -1228,7 +1266,7 @@ class XrayVpnService : VpnService() {
         }
         if (online) {
             AppLog.w("the phone is online, but no server answers from this network")
-            reportBlocked(failed, state, allDown = true)
+            if (report) reportBlocked(failed, state, allDown = true)
         }
         markFruitless(network, notice)
         setNotice(notice, e)
@@ -1254,10 +1292,15 @@ class XrayVpnService : VpnService() {
         synchronized(fruitless) { fruitless[network] = SystemClock.elapsedRealtime() to notice }
     }
 
-    /** Runs the saved selection again, unless the tunnel changed since [e] or was turned off. */
-    private fun restartOnSaved(e: Long) {
+    /**
+     * Runs the saved selection again, unless [running] no longer runs
+     * (another start came first) or the tunnel was turned off. Not tied to
+     * the check's epoch: a network change during the download resets
+     * connections but leaves the removed server running.
+     */
+    private fun restartOnSaved(running: StoredProfile) {
         enqueue {
-            if (config == null || !RuntimeState.shouldRun(this) || epoch.get() != e) return@enqueue
+            if (config == null || !RuntimeState.shouldRun(this) || runningProfile !== running) return@enqueue
             AppLog.i("the running server changed in the subscription, restarting")
             startTunnel(lastStartId, userRequested = false)
         }
@@ -1268,8 +1311,9 @@ class XrayVpnService : VpnService() {
      * [winnerId], unless something changed since the probe began: another
      * core or network (epoch), the VPN turned off, another server chosen.
      * [returning]: back to the user's server, which is no failure of [failed].
+     * [report]: tell the owner's panel that [failed] does not answer here.
      */
-    private suspend fun switchTo(e: Long, failed: StoredProfile, winnerId: String, returning: Boolean = false) {
+    private suspend fun switchTo(e: Long, failed: StoredProfile, winnerId: String, returning: Boolean = false, report: Boolean = true) {
         try {
             if (epoch.get() != e || config == null || !RuntimeState.shouldRun(this) ||
                 VpnStatusHolder.status.value.state != VpnState.CONNECTED
@@ -1304,7 +1348,7 @@ class XrayVpnService : VpnService() {
                 recentlyFailed[failed.id] = SystemClock.elapsedRealtime()
                 // Up on another server: the phone is online, so the failed
                 // one does not answer from this network.
-                reportBlocked(failed, saved)
+                if (report) reportBlocked(failed, saved)
             }
         } catch (ex: Exception) {
             if (ex is CancellationException) throw ex
@@ -1480,12 +1524,12 @@ class XrayVpnService : VpnService() {
         }.also { refreshJob = it }
     }
 
-    /** After check [e] passed: downloads subscription [subId] through the tunnel, and restarts if that changed the running server. */
-    private fun refreshThroughTunnel(subId: String, c: Controller, e: Long) {
+    /** After a check of [running] passed: downloads subscription [subId] through the tunnel, and restarts if that changed the running server. */
+    private fun refreshThroughTunnel(subId: String, c: Controller, running: StoredProfile) {
         if (refreshJob?.isActive == true) return
         val tunnel = Downloader { url, headers -> XrayCore.fetchThroughTunnel(c, url, headers) }
         refreshJob = scope.async(Dispatchers.IO) {
-            refreshSubscription(subId, tunnel).also { if (it.runningChanged) restartOnSaved(e) }
+            refreshSubscription(subId, tunnel).also { if (it.runningChanged) restartOnSaved(running) }
         }
     }
 

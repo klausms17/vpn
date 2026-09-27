@@ -158,6 +158,17 @@ internal object Failover {
         return state.copy(selectedId = winnerId)
     }
 
+    /**
+     * Whether a start runs server [id] because the user chose it: the app
+     * said so ([picked]), or a start they asked for ([requested], no
+     * automatic switch) moves the tunnel from [runningId], still in
+     * [state], to another server; the app may not say so. Not when the
+     * running server was deleted or dropped by a refresh: the selection
+     * then moved by itself.
+     */
+    fun chosenByUser(picked: Boolean, requested: Boolean, runningId: String?, id: String, state: ProfilesState): Boolean =
+        picked || (requested && runningId != null && runningId != id && state.profiles.any { it.id == runningId })
+
     /** False when someone chose a server other than [failedId] since it was picked up as failed. */
     fun selectionFollowsFailed(state: ProfilesState, failedId: String): Boolean =
         state.selectedId == failedId || state.profiles.none { it.id == failedId }
