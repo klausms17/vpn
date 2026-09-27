@@ -527,7 +527,7 @@ object VpnWidget {
         m.profile == null || !m.vpnAllowed ->
             PendingIntent.getActivity(
                 context, RC_CONNECT_UI,
-                Intent(context, MainActivity::class.java)
+                Intent().setClassName(context, MainActivity.CONNECT_ALIAS)
                     .setAction(MainActivity.ACTION_CONNECT)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 PendingIntent.FLAG_IMMUTABLE,

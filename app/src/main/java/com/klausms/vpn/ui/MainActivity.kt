@@ -68,9 +68,16 @@ class MainActivity : ComponentActivity() {
         /**
          * Sent by the Quick Settings tile and the widget when the app is
          * needed to connect (VPN permission, no server yet). Only connects,
-         * never disconnects.
+         * never disconnects, and only when sent to [CONNECT_ALIAS].
          */
         const val ACTION_CONNECT = "com.klausms.vpn.ui.CONNECT"
+
+        /**
+         * The non-exported activity-alias of this activity that takes
+         * [ACTION_CONNECT]: only this app can start it. The class name
+         * comes from the namespace, so it stays right with any applicationId.
+         */
+        const val CONNECT_ALIAS = "com.klausms.vpn.ui.ConnectAlias"
 
         private const val KEY_SHARED_TEXT = "shared_text"
         private const val KEY_CAMERA_REFUSED = "camera_refused"
@@ -294,8 +301,10 @@ class MainActivity : ComponentActivity() {
             // Always the connect path, whatever the cached status says: it may
             // be from before the app went to the background (e.g. "connected"
             // while the consent was revoked since). Connecting a running
-            // tunnel is a no-op for the service.
-            ACTION_CONNECT -> connect()
+            // tunnel is a no-op for the service. Only through the alias: the
+            // activity itself is exported, and an intent that reached it
+            // directly may come from any app; it is then a plain launch.
+            ACTION_CONNECT -> if (intent.component?.className == CONNECT_ALIAS) connect()
         }
     }
 

@@ -89,6 +89,15 @@
             </intent-filter>
         </activity>
 
+        <!-- The tile and the widget ask the app to connect through this
+             alias (MainActivity.CONNECT_ALIAS). Not exported: another app
+             cannot start the VPN, or take it over from another VPN app, by
+             sending the connect action to the exported activity. -->
+        <activity-alias
+            android:name=".ui.ConnectAlias"
+            android:exported="false"
+            android:targetActivity=".ui.MainActivity" />
+
         <!-- The VPN runs in its own process: a UI problem can never take the
              tunnel down, and the tunnel process stays small. Only the system
              (BIND_VPN_SERVICE) and this app can reach it. -->
