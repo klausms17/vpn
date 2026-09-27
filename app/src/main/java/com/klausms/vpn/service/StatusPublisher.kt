@@ -144,9 +144,12 @@ internal class StatusPublisher(
     }
 
     suspend fun publishConnected() {
-        val s = VpnStatusHolder.status.value
-        if (s.state != VpnState.CONNECTED) return
-        withContext(Dispatchers.Main) { enterForeground("Подключено", connectedText(s)) }
+        withContext(Dispatchers.Main) {
+            // Read on Main, like the notices' compare-and-set: read on the
+            // worker, it could be older than a notice Main shows before this runs.
+            val s = VpnStatusHolder.status.value
+            if (s.state == VpnState.CONNECTED) enterForeground("Подключено", connectedText(s))
+        }
     }
 
     private fun connectedText(s: VpnStatus): String? = when {
