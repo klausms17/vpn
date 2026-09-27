@@ -1,19 +1,13 @@
 package com.klausms.vpn.service
 
 import android.app.PendingIntent
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.net.Network
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
-import android.os.PowerManager
 import androidx.core.app.ServiceCompat
-import androidx.core.content.ContextCompat
 import com.klausms.vpn.core.BuildOptions
 import com.klausms.vpn.core.CoreHandle
 import com.klausms.vpn.core.DirectNet
@@ -156,6 +150,8 @@ class XrayVpnService : VpnService() {
 
     private lateinit var publisher: StatusPublisher
 
+    private lateinit var watcher: NetworkWatcher
+
     @OptIn(ExperimentalCoroutinesApi::class)
     private val worker = Dispatchers.IO.limitedParallelism(1)
 
@@ -183,9 +179,6 @@ class XrayVpnService : VpnService() {
 
     @Volatile
     private var lockdownConflict = false
-
-    private var networkMonitor: UnderlyingNetworkMonitor? = null
-    private var lastNetwork: Network? = null
 
     @Volatile
     private var resetJob: Job? = null
@@ -263,23 +256,24 @@ class XrayVpnService : VpnService() {
 
     private val blockReporter by lazy { BlockReporter(this) }
 
-    private var screenRegistered = false
+    // What the watcher hears, on the main thread.
+    private val networkEvents = object : NetworkWatcher.Listener {
+        override fun onNetworkChanged(net: NetId?, previous: NetId?) = onUnderlyingNetworkChanged(net, previous)
 
-    // Checks every few minutes while the screen is on; none while it is off.
-    private var screenJob: Job? = null
+        override fun onReachability(lost: Boolean) = onReachabilityChanged(lost)
 
-    // Unlocking is when the phone is about to be used: a cheap moment to
-    // find out that the server stopped answering while it was locked. While
-    // the screen stays on, a server blocked mid-session is found by the
-    // checks every few minutes.
-    private val screenReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            when (intent.action) {
-                Intent.ACTION_USER_PRESENT ->
-                    if (clock.elapsed() - lastVerifyAt >= UNLOCK_CHECK_MS) scheduleVerify(Reason.UNLOCK)
-                Intent.ACTION_SCREEN_ON -> startScreenChecks()
-                Intent.ACTION_SCREEN_OFF -> stopScreenChecks()
-            }
+        override fun onPrivateDns(host: String?) = publisher.onPrivateDnsChanged(host)
+
+        // Unlocking is when the phone is about to be used: a cheap moment to
+        // find out that the server stopped answering while it was locked.
+        // While the screen stays on, a server blocked mid-session is found
+        // by the checks every few minutes.
+        override fun onUnlock() {
+            if (clock.elapsed() - lastVerifyAt >= UNLOCK_CHECK_MS) scheduleVerify(Reason.UNLOCK)
+        }
+
+        override fun onScreenTick() {
+            if (clock.elapsed() - lastVerifyAt >= SCREEN_CHECK_MS) scheduleVerify(Reason.SCREEN)
         }
     }
 
@@ -312,6 +306,11 @@ class XrayVpnService : VpnService() {
         profiles = DiskProfiles(this)
         netInfo = SystemNetworkInfo(this)
         publisher = StatusPublisher(this, scope, epoch, clock) { lockdownConflict }
+        watcher = NetworkWatcher(
+            this, scope, SCREEN_CHECK_MS,
+            setUnderlying = { network -> setUnderlyingNetworks(network?.let { arrayOf(it) }) },
+            listener = networkEvents,
+        )
         Notifications.ensureChannels(this)
     }
 
@@ -411,9 +410,7 @@ class XrayVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        networkMonitor?.stop()
-        networkMonitor = null
-        unregisterScreen()
+        watcher.stop()
         // Before the scope goes: the status still reaches the app.
         publisher.markDisconnected()
         scope.cancel()
@@ -532,7 +529,7 @@ class XrayVpnService : VpnService() {
             }
             connectedAtElapsed = clock.elapsed()
             runtime.setShouldRun(true)
-            withContext(Dispatchers.Main) { startNetworkMonitor() }
+            withContext(Dispatchers.Main) { watcher.start() }
             // Only a server whose core came up becomes the selection.
             if (profileOverride != null && failedId != null) {
                 if (saveSwitch(failedId, profile.id, expectedSelection)) trackAway(failedId, profile.id)
@@ -647,7 +644,7 @@ class XrayVpnService : VpnService() {
         // the tunnel (banks, Gosuslugi): say so instead of failing silently.
         lockdownConflict = bypassing && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isLockdownEnabled
         if (lockdownConflict) AppLog.w("lockdown is on while some apps bypass the VPN: they will have no network")
-        (networkMonitor?.network ?: lastNetwork)?.let { builder.setUnderlyingNetworks(arrayOf(it)) }
+        watcher.network?.let { builder.setUnderlyingNetworks(arrayOf(it)) }
         val pfd = builder.establish()
             ?: if (userRequested) {
                 throw VpnStartException("Система не разрешила создать VPN. Возможно, включён другой постоянный VPN.")
@@ -740,79 +737,12 @@ class XrayVpnService : VpnService() {
     }
 
     private fun leaveForeground() {
-        networkMonitor?.stop()
-        networkMonitor = null
-        lastNetwork = null
+        watcher.stop()
         publisher.clearBase()
-        unregisterScreen()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
     }
 
     // --------------------------------------------------------- network change
-
-    private fun startNetworkMonitor() {
-        if (networkMonitor != null) return
-        val monitor = UnderlyingNetworkMonitor(
-            this,
-            onChanged = { network -> onUnderlyingNetworkChanged(network) },
-            onReachability = { lost -> onReachabilityChanged(lost) },
-            onPrivateDns = { host -> publisher.onPrivateDnsChanged(host) },
-        )
-        monitor.start()
-        lastNetwork = monitor.network
-        networkMonitor = monitor
-        registerScreen()
-    }
-
-    private fun registerScreen() {
-        if (screenRegistered) return
-        try {
-            // Exported, unlike a receiver for our own broadcasts: SystemUI,
-            // not the system server, sends USER_PRESENT, and a not-exported
-            // receiver never gets it. Only the system may send these at all
-            // (protected broadcasts), and they only trigger throttled checks.
-            val filter = IntentFilter().apply {
-                addAction(Intent.ACTION_USER_PRESENT)
-                addAction(Intent.ACTION_SCREEN_ON)
-                addAction(Intent.ACTION_SCREEN_OFF)
-            }
-            ContextCompat.registerReceiver(this, screenReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
-            screenRegistered = true
-        } catch (e: Exception) {
-            AppLog.w("screen receiver", e)
-        }
-        if (getSystemService(PowerManager::class.java)?.isInteractive == true) startScreenChecks()
-    }
-
-    private fun unregisterScreen() {
-        stopScreenChecks()
-        if (!screenRegistered) return
-        screenRegistered = false
-        try {
-            unregisterReceiver(screenReceiver)
-        } catch (_: IllegalArgumentException) {
-        }
-    }
-
-    /**
-     * While the screen is on, a server blocked mid-session must not go
-     * unnoticed until the next unlock: check when none ran for a while. On
-     * the main thread; the radio is in use anyway while the phone is.
-     */
-    private fun startScreenChecks() {
-        if (screenJob?.isActive == true) return
-        screenJob = scope.launch {
-            while (true) {
-                delay(SCREEN_CHECK_MS)
-                if (clock.elapsed() - lastVerifyAt >= SCREEN_CHECK_MS) scheduleVerify(Reason.SCREEN)
-            }
-        }
-    }
-
-    private fun stopScreenChecks() {
-        screenJob?.cancel()
-        screenJob = null
-    }
 
     /**
      * Android no longer sees internet on the same network ([lost]: often the
@@ -828,12 +758,7 @@ class XrayVpnService : VpnService() {
         scheduleVerify(Reason.LINK, NETWORK_SETTLE_MS)
     }
 
-    private fun onUnderlyingNetworkChanged(network: Network?) {
-        // Lets Android attribute the tunnel to Wi-Fi/mobile (metered state,
-        // "no internet" detection) correctly.
-        setUnderlyingNetworks(network?.let { arrayOf(it) })
-        val previous = lastNetwork
-        if (network != null) lastNetwork = network
+    private fun onUnderlyingNetworkChanged(network: NetId?, previous: NetId?) {
         // Whatever a check in progress measured belongs to the old network.
         epoch.advance()
         val e = epoch.current
@@ -1242,7 +1167,7 @@ class XrayVpnService : VpnService() {
     ) {
         val sub = state.subscriptions.firstOrNull { it.id == failed.subscriptionId } ?: return
         if (sub.reportUrl == null) return
-        val network = networkMonitor?.network ?: lastNetwork
+        val network = watcher.network
         scope.launch(Dispatchers.IO) {
             try {
                 val listed = whitelist || winner != null && looksLikeWhitelist(failed, winner)
