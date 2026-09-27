@@ -170,7 +170,6 @@ fun HomeContent(
         server?.id?.let(onPing)
     }
 
-    val now = rememberSecondsTicker(state == VpnState.CONNECTED && status.connectedSince > 0)
     var renameTarget by remember { mutableStateOf<StoredProfile?>(null) }
 
     // The map and glow follow the connect button while it scrolls away and
@@ -224,7 +223,6 @@ fun HomeContent(
                         state = state,
                         hero = hero,
                         since = status.connectedSince,
-                        now = now,
                         message = status.message,
                         place = Countries.name(code) ?: serverName?.let { Countries.stripFlags(it) },
                     )
@@ -334,7 +332,7 @@ private fun openInBrowser(context: Context, url: String): Boolean = try {
 }
 
 @Composable
-private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, now: Long, message: String?, place: String?) {
+private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, message: String?, place: String?) {
     val statusColor by animateColorAsState(
         when (state) {
             VpnState.CONNECTED -> kc.green
@@ -368,14 +366,7 @@ private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, now: Long
             color = statusColor,
         )
         Box(Modifier.height(timerHeight)) {
-            if (showTimer) {
-                Text(
-                    formatDuration(((now - since) / 1000).coerceAtLeast(0)),
-                    style = IosType.timer,
-                    color = kc.label,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
-            }
+            if (showTimer) SessionTimer(since)
         }
         // While connected the message is a notice, e.g. that the server was switched.
         val notice = message?.takeIf { state == VpnState.CONNECTED && it.isNotBlank() }
@@ -404,6 +395,21 @@ private fun StatusBlock(state: VpnState, hero: HeroState, since: Long, now: Long
             modifier = Modifier.padding(top = 4.dp),
         )
     }
+}
+
+/**
+ * The time connected, ticking once a second. Its own composable, so each
+ * tick redraws only this text, not the whole screen and the server list.
+ */
+@Composable
+private fun SessionTimer(since: Long) {
+    val now = rememberSecondsTicker(active = true)
+    Text(
+        formatDuration(((now - since) / 1000).coerceAtLeast(0)),
+        style = IosType.timer,
+        color = kc.label,
+        modifier = Modifier.padding(top = 2.dp),
+    )
 }
 
 @Composable
