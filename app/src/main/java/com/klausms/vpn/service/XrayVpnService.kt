@@ -29,6 +29,7 @@ import com.klausms.vpn.data.AppSettings
 import com.klausms.vpn.data.DiskProfiles
 import com.klausms.vpn.data.Downloader
 import com.klausms.vpn.data.GeoFiles
+import com.klausms.vpn.data.ProfilesAccess
 import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.RussianApps
 import com.klausms.vpn.data.StoredProfile
@@ -153,6 +154,8 @@ class XrayVpnService : VpnService() {
     private lateinit var coreLog: File
 
     private lateinit var direct: DirectNet
+
+    private lateinit var profiles: ProfilesAccess
 
     @OptIn(ExperimentalCoroutinesApi::class)
     private val worker = Dispatchers.IO.limitedParallelism(1)
@@ -321,6 +324,7 @@ class XrayVpnService : VpnService() {
         runtime = PrefsRuntimeStore(this)
         coreLog = XrayLog.file(this)
         direct = XrayDirectNet(this)
+        profiles = DiskProfiles(this)
         Notifications.ensureChannels(this)
     }
 
@@ -479,9 +483,9 @@ class XrayVpnService : VpnService() {
             setStatus(VpnStatus(VpnState.CONNECTING, profileName = before.profileName))
         }
         try {
-            val profiles = Stores.profiles(this).read()
-            val profile = profileOverride?.let { id -> profiles.profiles.firstOrNull { it.id == id } }
-                ?: profiles.selected
+            val saved = profiles.snapshot()
+            val profile = profileOverride?.let { id -> saved.profiles.firstOrNull { it.id == id } }
+                ?: saved.selected
                 ?: throw VpnStartException("Не выбран сервер. Добавьте ключ в приложении.")
             val settings = Stores.settings(this).read()
             if (VpnStatusHolder.status.value.state == VpnState.CONNECTING) setStatus(VpnStatus(VpnState.CONNECTING, profile.id, profile.name))
@@ -1077,7 +1081,7 @@ class XrayVpnService : VpnService() {
         val now = clock.elapsed()
         recentlyFailed.entries.removeIf { now - it.value >= Failover.RECENTLY_FAILED_MS }
         val exclude = recentlyFailed.keys.toSet()
-        val state = Stores.profiles(this).read()
+        val state = profiles.snapshot()
         val first = pick(state, failed, exclude, tried = emptyList())
         // The panel may have moved the servers meanwhile (new addresses or keys).
         val sub = refreshableSubscription(state, failed)
@@ -1109,7 +1113,7 @@ class XrayVpnService : VpnService() {
             refreshed = refresh.await()
             if (refreshed.applied == true) {
                 // Only what the refresh brought: new servers, or new settings of known ones.
-                val second = pick(Stores.profiles(this).read(), failed, exclude, tried = first.map { it.outbounds })
+                val second = pick(profiles.snapshot(), failed, exclude, tried = first.map { it.outbounds })
                 if (second.isNotEmpty()) {
                     AppLog.i("subscription refreshed, trying ${second.size} more servers")
                     probed += second.size
@@ -1223,7 +1227,7 @@ class XrayVpnService : VpnService() {
                 AppLog.i("server switch dropped: the tunnel changed meanwhile")
                 return
             }
-            val saved = Stores.profiles(this).read()
+            val saved = profiles.snapshot()
             val winner = saved.profiles.firstOrNull { it.id == winnerId }
             if (winner == null || !Failover.selectionFollowsFailed(saved, failed.id)) {
                 // The user's choice wins; their reconnect follows.
@@ -1306,15 +1310,16 @@ class XrayVpnService : VpnService() {
      * The server the tunnel switched to becomes the selection, unless the
      * user chose another meanwhile. Returns whether it did.
      */
-    private fun saveSwitch(failedId: String, winnerId: String, expected: String?): Boolean {
+    private suspend fun saveSwitch(failedId: String, winnerId: String, expected: String?): Boolean {
         try {
-            val saved = Stores.profiles(this).update { s -> Failover.selectInstead(s, failedId, winnerId, expected) }
+            val saved = profiles.updateProfiles { s -> Failover.selectInstead(s, failedId, winnerId, expected) }
             if (saved.selectedId == winnerId) {
                 notifyProfilesChanged()
                 return true
             }
             AppLog.i("another server was chosen meanwhile, selection kept")
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             // The tunnel runs anyway; only the next start picks the old server.
             AppLog.w("could not save the new selection", e)
         }
@@ -1351,7 +1356,7 @@ class XrayVpnService : VpnService() {
         val away = runtime.away() ?: return
         val now = clock.elapsed()
         if (away.to != running.id || !Failover.returnDue(away, now) || failedRecently(away.home)) return
-        val saved = Stores.profiles(this).read()
+        val saved = profiles.snapshot()
         val home = saved.profiles.firstOrNull { it.id == away.home }
         if (home == null) {
             runtime.setAway(null)
@@ -1465,7 +1470,7 @@ class XrayVpnService : VpnService() {
      * stay when the panel sends none. The app, if open, reloads. Never throws.
      */
     private suspend fun refreshSubscription(subId: String, downloader: Downloader): Refreshed = try {
-        val outcome = SubscriptionUpdater(this, DiskProfiles(this)).refresh(subId, downloader, runningId = runningProfileId)
+        val outcome = SubscriptionUpdater(this, profiles).refresh(subId, downloader, runningId = runningProfileId)
         Refreshed(applied = outcome?.applied ?: false, runningChanged = outcome?.runningChanged == true)
     } catch (e: Exception) {
         if (e is CancellationException) throw e
