@@ -177,6 +177,9 @@ class XrayVpnService : VpnService() {
 
     private lateinit var runtime: RuntimeStore
 
+    /** The core's log. */
+    private lateinit var coreLog: File
+
     @OptIn(ExperimentalCoroutinesApi::class)
     private val worker = Dispatchers.IO.limitedParallelism(1)
 
@@ -352,6 +355,7 @@ class XrayVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         runtime = PrefsRuntimeStore(this)
+        coreLog = XrayLog.file(this)
         Notifications.ensureChannels(this)
     }
 
@@ -726,9 +730,8 @@ class XrayVpnService : VpnService() {
     }
 
     private fun prepareLogFile(): File {
-        val f = File(File(filesDir, "logs").apply { mkdirs() }, "xray.log")
-        XrayLog.trim(f)
-        return f
+        XrayLog.trim(coreLog)
+        return coreLog
     }
 
     // ------------------------------------------------------------------ stop
@@ -952,7 +955,7 @@ class XrayVpnService : VpnService() {
                         c.stop()
                         // A tunnel that only ever resets never goes through
                         // startTunnel: its log is kept small here too.
-                        XrayLog.trim(File(File(filesDir, "logs"), "xray.log"))
+                        XrayLog.trim(coreLog)
                         c.start(cfg, fd.fd)
                         connectedAtElapsed = SystemClock.elapsedRealtime()
                         newEpoch()
@@ -1011,7 +1014,7 @@ class XrayVpnService : VpnService() {
 
     private suspend fun verify(e: Long, reason: Reason) {
         // The log grows for as long as the tunnel runs; checks come often enough to keep it small.
-        XrayLog.trim(File(File(filesDir, "logs"), "xray.log"))
+        XrayLog.trim(coreLog)
         val c = liveController ?: return
         val running = runningProfile ?: return
         if (epoch.get() != e || VpnStatusHolder.status.value.state != VpnState.CONNECTED) return
