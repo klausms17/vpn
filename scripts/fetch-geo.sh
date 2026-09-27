@@ -7,5 +7,5 @@ base="https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/rele
 mkdir -p "$out"
 for f in geoip.dat geosite.dat; do
   curl --fail --location --silent --show-error --retry 5 --retry-delay 5 --retry-all-errors -o "$out/$f" "$base/$f"
-  echo "$f: $(stat -c %s "$out/$f") bytes"
+  echo "$f: $(wc -c < "$out/$f" | tr -d ' ') bytes"
 done

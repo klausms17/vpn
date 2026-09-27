@@ -9,6 +9,8 @@ on:
     paths:
       - "ios/**"
       - "scripts/build-libxray-ios.sh"
+      - "scripts/fetch-geo.sh"
+      - "scripts/prepare-geo.sh"
       - ".github/workflows/ios-app.yml"
   workflow_dispatch:
 
@@ -53,6 +55,11 @@ jobs:
         if: steps.core.outputs.cache-hit != 'true'
         run: scripts/build-libxray-ios.sh
 
+      - name: Routing databases for the tunnel extension
+        run: |
+          scripts/fetch-geo.sh "$RUNNER_TEMP/geo-upstream"
+          scripts/prepare-geo.sh "$RUNNER_TEMP/geo-upstream" ios/PacketTunnel/Resources/geo
+
       - name: Install XcodeGen
         run: |
           curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
@@ -78,6 +85,8 @@ jobs:
           test -n "$app"
           test -d "$app/PlugIns/PacketTunnel.appex"
           plutil -p "$app/PlugIns/PacketTunnel.appex/Info.plist" | grep -q packet-tunnel
+          test -s "$app/PlugIns/PacketTunnel.appex/geo/geoip.dat"
+          test -s "$app/PlugIns/PacketTunnel.appex/geo/geosite.dat"
           # Apple refuses executables that still carry bitcode.
           for bin in "$app/KlausVPN" "$app/PlugIns/PacketTunnel.appex/PacketTunnel"; do
             test -f "$bin"
