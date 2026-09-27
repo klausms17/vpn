@@ -10,7 +10,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 
-/** Downloads a subscription again and saves what it brings. */
+/**
+ * Downloads a subscription again and saves what it brings. A refresh may
+ * block while it downloads; [SubscriptionRefresher] only calls it on IO.
+ */
 internal interface SubscriptionSource {
     /**
      * Downloads subscription [subId] directly, or through the running core
