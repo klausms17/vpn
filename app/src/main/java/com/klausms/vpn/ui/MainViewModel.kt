@@ -185,6 +185,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         onScreen = true
         viewModelScope.launch {
             repo.reload()
+            // Servers the VPN process added by itself (a subscription refresh).
+            ui.checkWhitelist(profiles.value.profiles)
             if (staleJob?.isActive == true) return@launch
             staleJob = viewModelScope.launch {
                 refreshStaleSubscriptions()

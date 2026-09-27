@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Captions of the long operations now running; [text] is the newest. One
@@ -136,18 +137,28 @@ class UiSession(private val app: Application, private val repo: AppRepository, p
         _geoVersion.value = GeoFiles.installedVersion(app)
     }
 
-    /** Looks up the whitelist marks of the servers in [list] not looked up yet. */
+    /** Hosts whose lookup is running, so a second call does not repeat it. */
+    private val lookingUp = ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * Looks up the whitelist marks of the servers in [list] not looked up
+     * yet. Before the core is set up it does nothing: [start] then checks
+     * every saved server.
+     */
     fun checkWhitelist(list: List<StoredProfile>) {
-        val hosts = list.map { it.address }.distinct().filter { it !in _whitelist.value }
+        if (!started) return
+        val hosts = list.map { it.address }.distinct().filter { it !in _whitelist.value && lookingUp.add(it) }
         if (hosts.isEmpty()) return
         scope.launch(Dispatchers.IO) {
             for (host in hosts) {
-                val r = try {
-                    XrayCore.whitelistStatus(app, host)
+                try {
+                    val r = XrayCore.whitelistStatus(app, host)
+                    _whitelist.update { it + (host to r) }
                 } catch (_: Exception) {
-                    continue
+                    // Left unmarked; the next call tries again.
+                } finally {
+                    lookingUp.remove(host)
                 }
-                _whitelist.update { it + (host to r) }
             }
         }
     }
