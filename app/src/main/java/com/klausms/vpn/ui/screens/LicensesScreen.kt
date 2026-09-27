@@ -31,6 +31,7 @@ private val components = listOf(
     Triple("Шрифт Inter", "SIL Open Font License 1.1", "rsms.me/inter"),
     Triple("Списки российских сайтов", "runetfreedom / russia-v2ray-rules-dat", "github.com/runetfreedom"),
     Triple("Карта", "Natural Earth, общественное достояние", "naturalearthdata.com"),
+    Triple("ZXing", "Apache License 2.0", "github.com/zxing/zxing"),
     Triple("Jetpack Compose, AndroidX, Kotlin", "Apache License 2.0", "developer.android.com"),
 )
 

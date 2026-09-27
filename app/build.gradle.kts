@@ -106,6 +106,7 @@ tasks.withType<Test>().configureEach {
     }
 }
 
+// A library that ships in the APK must also be listed on the Licenses screen (LicensesScreen.kt).
 dependencies {
     // Xray core, built from ../libxray by gomobile (see scripts/build-libxray.sh).
     implementation(files("libs/libxray.aar"))
