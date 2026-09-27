@@ -86,12 +86,12 @@ private fun loadApps(context: Context): List<AppEntry> {
 }
 
 @Composable
-fun AppsScreen(vm: MainViewModel, includeMode: Boolean, onBack: () -> Unit) {
+fun AppsScreen(vm: MainViewModel, onBack: () -> Unit) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val apps by produceState<List<AppEntry>?>(null) { value = withContext(Dispatchers.IO) { loadApps(context) } }
     var query by rememberSaveable { mutableStateOf("") }
-    val selected = if (includeMode) settings.includedApps else settings.excludedApps
+    val excluded = settings.excludedApps
     val icons = remember { IconCache() }
 
     // The tunnel takes the new list once, when this screen closes or the
@@ -100,15 +100,11 @@ fun AppsScreen(vm: MainViewModel, includeMode: Boolean, onBack: () -> Unit) {
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) { vm.applyAppLists() }
 
     fun toggle(pkg: String) = vm.updateAppLists { s ->
-        if (includeMode) {
-            s.copy(includedApps = if (pkg in s.includedApps) s.includedApps - pkg else s.includedApps + pkg)
-        } else {
-            s.copy(excludedApps = if (pkg in s.excludedApps) s.excludedApps - pkg else s.excludedApps + pkg)
-        }
+        s.copy(excludedApps = if (pkg in s.excludedApps) s.excludedApps - pkg else s.excludedApps + pkg)
     }
 
     Column(Modifier.fillMaxSize().background(kc.page)) {
-        NavBar(if (includeMode) "Через VPN" else "Без VPN", onBack, backLabel = "Настройки")
+        NavBar("Без VPN", onBack, backLabel = "Настройки")
         val list = apps
         if (list == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -119,10 +115,10 @@ fun AppsScreen(vm: MainViewModel, includeMode: Boolean, onBack: () -> Unit) {
         val q = query.trim().lowercase()
         // Checked apps go first, but only as they were when the screen opened
         // (or the search changed): rows must not jump under the finger.
-        val sortSelected = remember(includeMode, q) { selected }
+        val sortExcluded = remember(q) { excluded }
         val shown = list
             .filter { q.isEmpty() || it.label.lowercase().contains(q) || it.pkg.contains(q) }
-            .sortedByDescending { it.pkg in sortSelected }
+            .sortedByDescending { it.pkg in sortExcluded }
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp + navBarClearance())) {
             item {
                 BasicTextField(
@@ -151,12 +147,8 @@ fun AppsScreen(vm: MainViewModel, includeMode: Boolean, onBack: () -> Unit) {
             }
             item {
                 SectionFooter(
-                    if (includeMode) {
-                        "Через VPN пойдут только отмеченные приложения. Остальные — напрямую."
-                    } else {
-                        "Отмеченные приложения работают без VPN и не видят его. Российские банки и Госуслуги уже работают без VPN, если включён этот режим в настройках.\n\n" +
-                            "Если видеорегистратор, умный дом (Mi Home) или Android Auto не подключается к своей Wi-Fi-сети, отметьте здесь его приложение."
-                    },
+                    "Отмеченные приложения работают без VPN и не видят его. Российские банки и Госуслуги уже работают без VPN, если включён этот режим в настройках.\n\n" +
+                        "Если видеорегистратор, умный дом (Mi Home) или Android Auto не подключается к своей Wi-Fi-сети, отметьте здесь его приложение.",
                 )
             }
             item { Spacer(Modifier.height(12.dp)) }
@@ -173,7 +165,7 @@ fun AppsScreen(vm: MainViewModel, includeMode: Boolean, onBack: () -> Unit) {
                         .background(kc.card),
                 ) {
                     if (i > 0) RowDivider(start = 68.dp)
-                    val checked = app.pkg in selected
+                    val checked = app.pkg in excluded
                     ListRow(
                         title = app.label,
                         leading = { AppIcon(context, app.pkg, icons) },

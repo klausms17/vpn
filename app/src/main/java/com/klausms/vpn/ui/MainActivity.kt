@@ -164,7 +164,7 @@ class MainActivity : ComponentActivity() {
         Box(Modifier.fillMaxSize().background(kc.page)) {
             when (top) {
                 "settings" -> SettingsScreen(vm = vm, onBack = back, onNavigate = push)
-                "apps" -> AppsScreen(vm = vm, includeMode = false, onBack = back)
+                "apps" -> AppsScreen(vm = vm, onBack = back)
                 "logs" -> LogsScreen(onBack = back)
                 "licenses" -> {
                     val coreVersion by vm.coreVersion.collectAsStateWithLifecycle()

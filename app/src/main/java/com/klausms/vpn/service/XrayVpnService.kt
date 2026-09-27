@@ -23,7 +23,6 @@ import androidx.core.content.edit
 import com.klausms.vpn.core.BuildOptions
 import com.klausms.vpn.core.XrayCore
 import com.klausms.vpn.core.userMessage
-import com.klausms.vpn.data.AppMode
 import com.klausms.vpn.data.AppSettings
 import com.klausms.vpn.data.DiskProfiles
 import com.klausms.vpn.data.Downloader
@@ -203,9 +202,6 @@ class XrayVpnService : VpnService() {
 
     @Volatile
     private var connectedAtElapsed = 0L
-
-    @Volatile
-    private var resetOnNetworkChange = true
 
     @Volatile
     private var lockdownConflict = false
@@ -523,12 +519,12 @@ class XrayVpnService : VpnService() {
             val newConfig = XrayCore.buildConfig(
                 BuildOptions(
                     outbounds = profile.outbounds,
-                    mode = settings.mode.core,
-                    ipv6 = settings.ipv6,
-                    directRules = settings.directRules,
-                    proxyRules = settings.proxyRules,
-                    blockRules = settings.blockRules,
-                    logLevel = if (settings.verboseLog) "info" else "warning",
+                    mode = "ru_direct",
+                    ipv6 = false,
+                    directRules = emptyList(),
+                    proxyRules = emptyList(),
+                    blockRules = emptyList(),
+                    logLevel = "warning",
                     logFile = logFile.absolutePath,
                     tun = true,
                 ),
@@ -572,7 +568,6 @@ class XrayVpnService : VpnService() {
                 manualPick == profile.id -> manualPick
                 else -> null
             }
-            resetOnNetworkChange = settings.resetOnNetworkChange
             connectedAtElapsed = SystemClock.elapsedRealtime()
             RuntimeState.setShouldRun(this, true)
             withContext(Dispatchers.Main) { startNetworkMonitor() }
@@ -589,7 +584,7 @@ class XrayVpnService : VpnService() {
             switchNoticeAt = SystemClock.elapsedRealtime()
             setStatus(VpnStatus(VpnState.CONNECTED, profile.id, profile.name, message = notice ?: baseNotice, connectedSince = since))
             Notifications.clearError(this)
-            AppLog.i("tunnel up: ${profile.protocol}/${profile.network}/${profile.security}, mode ${settings.mode.core}; ${PhoneSettings.vpnSummary(this)}")
+            AppLog.i("tunnel up: ${profile.protocol}/${profile.network}/${profile.security}; ${PhoneSettings.vpnSummary(this)}")
             publishConnected()
             scheduleVerify(Reason.START)
         } catch (e: Exception) {
@@ -668,7 +663,7 @@ class XrayVpnService : VpnService() {
             RuntimeState.setVpnConsented(this, false)
             throw VpnStartException("Нет разрешения на VPN. Откройте приложение и подключитесь оттуда.")
         }
-        val tunCfg = XrayCore.tunConfig(settings.ipv6)
+        val tunCfg = XrayCore.tunConfig(ipv6 = false)
         val builder = Builder()
             .setSession(profile.name.ifBlank { "VPN" })
             .setMtu(tunCfg.mtu)
@@ -709,23 +704,6 @@ class XrayVpnService : VpnService() {
 
     /** Returns whether some other app ends up outside the tunnel. */
     private fun applyPerAppRules(builder: Builder, settings: AppSettings): Boolean {
-        if (settings.appMode == AppMode.ONLY_SELECTED) {
-            var added = 0
-            for (pkg in settings.includedApps) {
-                if (pkg == packageName) continue
-                try {
-                    builder.addAllowedApplication(pkg)
-                    added++
-                } catch (_: PackageManager.NameNotFoundException) {
-                    // Uninstalled since it was chosen.
-                }
-            }
-            if (added > 0) return true
-            // No selected app is installed: fall back to "all apps", otherwise
-            // Android would route everything, including this app, into the
-            // tunnel and create a loop.
-            AppLog.w("no selected apps installed, using all apps")
-        }
         builder.addDisallowedApplication(packageName)
         val excluded = buildSet {
             addAll(settings.excludedApps)
@@ -928,9 +906,9 @@ class XrayVpnService : VpnService() {
         // Another network: why the server was switched no longer applies.
         if (network != previous) clearSwitchNotice(e, minAgeMs = 0)
         // No reset for the first network since the tunnel came up (Always-on
-        // at boot), the same one back after a gap, right after connecting or
-        // with resets turned off: still worth a check.
-        val reset = previous != null && network != previous && resetOnNetworkChange &&
+        // at boot), the same one back after a gap or right after connecting:
+        // still worth a check.
+        val reset = previous != null && network != previous &&
             SystemClock.elapsedRealtime() - connectedAtElapsed >= MIN_UPTIME_FOR_RESET_MS
         if (!reset) {
             scheduleVerify(Reason.NETWORK, NETWORK_SETTLE_MS)
