@@ -169,6 +169,39 @@ func TestFetchKlausHeaders(t *testing.T) {
 	}
 }
 
+// The app tells a download that froze mid-body (operators freezing foreign
+// flows after ~16 KB) from other failures by this net/http text: see
+// Failover.isStall. If a Go update rewords it, stall failover silently
+// stops, so the exact text is pinned here.
+func TestDownloadStallErrorText(t *testing.T) {
+	const stall = "while reading body"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/freeze/") {
+			w.Write(make([]byte, 16<<10))
+			w.(http.Flusher).Flush()
+		}
+		// /freeze hangs mid-body, anything else before the headers.
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	defer srv.CloseClientConnections()
+
+	_, err := FetchWithHeaders(srv.URL+"/freeze/SECRET-TOKEN-123", "", "", 1000, "")
+	if err == nil || !strings.Contains(err.Error(), stall) {
+		t.Errorf("a frozen body gives %v, want the text %q", err, stall)
+	}
+	if err != nil && strings.Contains(err.Error(), "SECRET-TOKEN-123") {
+		t.Errorf("error leaks the URL path: %v", err)
+	}
+	_, err = FetchWithHeaders(srv.URL+"/hang/SECRET-TOKEN-123", "", "", 1000, "")
+	if err == nil || strings.Contains(err.Error(), stall) {
+		t.Errorf("a server that never answers must not count as a stall: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "SECRET-TOKEN-123") {
+		t.Errorf("error leaks the URL path: %v", err)
+	}
+}
+
 func TestFetchErrorsAndLimit(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
