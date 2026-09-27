@@ -52,3 +52,27 @@ internal data class TunnelSession(
     // The config carries the server's keys: never into a log or a crash report.
     override fun toString(): String = "TunnelSession(connectedAt=$connectedAt, lockdownConflict=$lockdownConflict)"
 }
+
+/**
+ * One start of the tunnel. [startId]: the command it answers, whose
+ * service stops if the start fails for good. [userRequested]: the user
+ * asked just now (the app, the tile, the widget, a reconnect); only such a
+ * start may take the VPN over from another app, and it is not retried.
+ * [picked]: the user has just chosen the server by hand. [switch]: an
+ * automatic move to another server instead of the selected one.
+ * [attempt]: 0 for the first try, then the retry's number.
+ */
+internal data class StartRequest(
+    val startId: Int,
+    val userRequested: Boolean,
+    val picked: Boolean = false,
+    val switch: Switch? = null,
+    val attempt: Int = 0,
+)
+
+/**
+ * An automatic move of the tunnel away from [failedId] to [winnerId],
+ * which then becomes the selection unless the user chose another than
+ * [expectedSelection] meanwhile. [notice] is shown once connected.
+ */
+internal data class Switch(val winnerId: String, val failedId: String, val expectedSelection: String?, val notice: String?)

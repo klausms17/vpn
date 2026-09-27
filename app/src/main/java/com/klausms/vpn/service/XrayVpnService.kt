@@ -331,7 +331,7 @@ class XrayVpnService : VpnService() {
                             withContext(Dispatchers.Main) { stopIfLatest(startId) }
                         }
                         // Read and cleared in one step: a pick sent meanwhile is never lost.
-                        else -> startTunnel(startId, userRequested = true, picked = pickPending.getAndSet(false))
+                        else -> startTunnel(StartRequest(startId, userRequested = true, picked = pickPending.getAndSet(false)))
                     }
                 }
             }
@@ -383,7 +383,7 @@ class XrayVpnService : VpnService() {
                         }
                         // Turned off after the resume was sent.
                         resume && !runtime.shouldRun() -> withContext(Dispatchers.Main) { stopIfLatest(startId) }
-                        else -> startTunnel(startId, requested, picked = picked)
+                        else -> startTunnel(StartRequest(startId, requested, picked = picked))
                     }
                 }
             }
@@ -423,22 +423,7 @@ class XrayVpnService : VpnService() {
 
     // ------------------------------------------------------------------ start
 
-    /**
-     * [profileOverride]: run this server instead of the selected one (an
-     * automatic switch away from [failedId], which then becomes the
-     * selection unless the user chose another meanwhile). [notice] is shown
-     * once connected. [picked]: the user has just chosen this server.
-     */
-    private suspend fun startTunnel(
-        startId: Int,
-        userRequested: Boolean,
-        profileOverride: String? = null,
-        failedId: String? = null,
-        expectedSelection: String? = null,
-        notice: String? = null,
-        attempt: Int = 0,
-        picked: Boolean = false,
-    ) {
+    private suspend fun startTunnel(req: StartRequest) {
         // Also while a failed start waits to be retried with the interface
         // held: that is a tunnel that should run, not a first start.
         val restarting = session != null || tun != null
@@ -455,7 +440,7 @@ class XrayVpnService : VpnService() {
         }
         try {
             val saved = profiles.snapshot()
-            val profile = profileOverride?.let { id -> saved.profiles.firstOrNull { it.id == id } }
+            val profile = req.switch?.let { switch -> saved.profiles.firstOrNull { it.id == switch.winnerId } }
                 ?: saved.selected
                 ?: throw VpnStartException("Не выбран сервер. Добавьте ключ в приложении.")
             val settings = Stores.settings(this).read()
@@ -481,7 +466,7 @@ class XrayVpnService : VpnService() {
             // Bring the new interface up before the old one goes away:
             // Android then switches over without a moment of traffic
             // flowing outside the VPN.
-            val (newTun, lockdownConflict) = establishTun(profile, settings, userRequested)
+            val (newTun, lockdownConflict) = establishTun(profile, settings, req.userRequested)
             swapped = true
             val oldTun = tun
             resets.cancel()
@@ -507,9 +492,9 @@ class XrayVpnService : VpnService() {
             epoch.advance()
             manualPick = when {
                 // An automatic switch.
-                profileOverride != null -> null
+                req.switch != null -> null
                 // Picked by hand again after it had stopped answering: the user knows.
-                picked && failedRecently(profile.id) -> profile.id
+                req.picked && failedRecently(profile.id) -> profile.id
                 // The same server with new settings: the choice still stands.
                 manualPick == profile.id -> manualPick
                 else -> null
@@ -517,12 +502,13 @@ class XrayVpnService : VpnService() {
             runtime.setShouldRun(true)
             withContext(Dispatchers.Main) { watcher.start() }
             // Only a server whose core came up becomes the selection.
-            if (profileOverride != null && failedId != null) {
-                if (saveSwitch(failedId, profile.id, expectedSelection)) trackAway(failedId, profile.id)
+            val switch = req.switch
+            if (switch != null) {
+                if (saveSwitch(switch.failedId, profile.id, switch.expectedSelection)) trackAway(switch.failedId, profile.id)
             } else {
-                forgetAwayUnless(profile.id, picked)
+                forgetAwayUnless(profile.id, req.picked)
             }
-            publisher.connected(profile, notice, before, restarting)
+            publisher.connected(profile, switch?.notice, before, restarting)
             AppLog.i("tunnel up: ${profile.protocol}/${profile.network}/${profile.security}; ${PhoneSettings.vpnSummary(this)}")
             publisher.publishConnected()
             scheduleVerify(Reason.START)
@@ -534,13 +520,13 @@ class XrayVpnService : VpnService() {
                 restarting = restarting,
                 swapped = swapped,
                 sessionAlive = running != null,
-                userRequested = userRequested,
-                attempt = attempt,
+                userRequested = req.userRequested,
+                attempt = req.attempt,
                 shouldRun = runtime::shouldRun,
             )
             val again: (Int) -> Unit = { next ->
                 retryStart(generation, next) {
-                    startTunnel(lastStartId, userRequested = false, profileOverride, failedId, expectedSelection, notice, attempt = next, picked = picked)
+                    startTunnel(req.copy(startId = lastStartId, userRequested = false, attempt = next))
                 }
             }
             when (action) {
@@ -549,10 +535,10 @@ class XrayVpnService : VpnService() {
                     stopCore()
                     runtime.setShouldRun(false)
                     publisher.setStatus(VpnStatus(VpnState.DISCONNECTED))
-                    withContext(Dispatchers.Main) { stopIfLatest(startId) }
+                    withContext(Dispatchers.Main) { stopIfLatest(req.startId) }
                 }
                 is FailureAction.KeepOld -> {
-                    val message = logStartFailure(e, attempt)
+                    val message = logStartFailure(e, req.attempt)
                     val old = checkNotNull(running)
                     publisher.setStatus(
                         VpnStatus(
@@ -562,22 +548,22 @@ class XrayVpnService : VpnService() {
                         ),
                     )
                     publisher.publishConnected()
-                    if (action.retry) again(attempt + 1)
+                    if (action.retry) again(req.attempt + 1)
                 }
                 FailureAction.HoldTunAndRetry -> {
-                    logStartFailure(e, attempt)
+                    logStartFailure(e, req.attempt)
                     haltCore()
                     publisher.setStatus(VpnStatus(VpnState.CONNECTING, profileName = before.profileName, message = "Переподключение…"))
                     withContext(Dispatchers.Main) { publisher.enterForeground("Переподключение…", null) }
-                    again(attempt + 1)
+                    again(req.attempt + 1)
                 }
                 FailureAction.GiveUp -> {
-                    val message = logStartFailure(e, attempt)
+                    val message = logStartFailure(e, req.attempt)
                     stopCore()
                     runtime.setShouldRun(false)
                     publisher.setStatus(VpnStatus(VpnState.ERROR, message = message))
                     if (!publisher.isAppVisible()) Notifications.showError(this, message)
-                    withContext(Dispatchers.Main) { stopIfLatest(startId) }
+                    withContext(Dispatchers.Main) { stopIfLatest(req.startId) }
                 }
             }
         }
@@ -818,7 +804,7 @@ class XrayVpnService : VpnService() {
                     session = null
                     LiveCore.current = null
                     epoch.advance()
-                    enqueue { if (runtime.shouldRun()) startTunnel(startId, userRequested = false) }
+                    enqueue { if (runtime.shouldRun()) startTunnel(StartRequest(startId, userRequested = false)) }
                 }
             }
         }
@@ -1091,7 +1077,7 @@ class XrayVpnService : VpnService() {
         enqueue {
             if (session?.profile !== running || !runtime.shouldRun()) return@enqueue
             AppLog.i("the running server changed in the subscription, restarting")
-            startTunnel(lastStartId, userRequested = false)
+            startTunnel(StartRequest(lastStartId, userRequested = false))
         }
     }
 
@@ -1124,12 +1110,11 @@ class XrayVpnService : VpnService() {
             }
             val notice = if (returning || winner.id == failed.id) null else Failover.switchedNotice(winner.name, failed.name)
             startTunnel(
-                lastStartId,
-                userRequested = false,
-                profileOverride = winner.id,
-                failedId = failed.id,
-                expectedSelection = saved.selectedId,
-                notice = notice,
+                StartRequest(
+                    lastStartId,
+                    userRequested = false,
+                    switch = Switch(winner.id, failed.id, expectedSelection = saved.selectedId, notice = notice),
+                ),
             )
             // Only a switch that happened marks the failed server: one dropped
             // on the way (a reconnect came first) proves nothing about it.
