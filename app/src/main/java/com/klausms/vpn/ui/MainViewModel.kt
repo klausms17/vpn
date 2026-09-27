@@ -125,7 +125,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val profiles: StateFlow<ProfilesState> = repo.profiles
     val settings: StateFlow<AppSettings> = repo.settings
     val status = vpn.status
-    val traffic = vpn.traffic
 
     private val _pings = MutableStateFlow<Map<String, PingResult>>(emptyMap())
     val pings: StateFlow<Map<String, PingResult>> = _pings.asStateFlow()

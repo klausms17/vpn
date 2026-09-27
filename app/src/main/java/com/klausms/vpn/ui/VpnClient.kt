@@ -10,7 +10,6 @@ import android.os.Looper
 import android.os.SystemClock
 import com.klausms.vpn.service.IVpnCallback
 import com.klausms.vpn.service.IVpnController
-import com.klausms.vpn.service.TrafficStats
 import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.service.VpnStatus
 import com.klausms.vpn.service.XrayVpnService
@@ -46,9 +45,6 @@ class VpnClient(private val context: Context) {
      */
     val fresh: StateFlow<Boolean> = _fresh.asStateFlow()
 
-    private val _traffic = MutableStateFlow(TrafficStats())
-    val traffic: StateFlow<TrafficStats> = _traffic.asStateFlow()
-
     private val _profilesChanged = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     /** The VPN process saved other servers or a new selection: reload them. */
@@ -62,14 +58,8 @@ class VpnClient(private val context: Context) {
 
     private val callback = object : IVpnCallback.Stub() {
         override fun onStatus(state: Int, profileId: String?, profileName: String?, message: String?, connectedSince: Long) {
-            val s = VpnState.of(state)
-            _status.value = VpnStatus(s, profileId, profileName, message, connectedSince)
+            _status.value = VpnStatus(VpnState.of(state), profileId, profileName, message, connectedSince)
             _fresh.value = true
-            if (s != VpnState.CONNECTED) _traffic.value = TrafficStats()
-        }
-
-        override fun onTraffic(upRate: Long, downRate: Long, upTotal: Long, downTotal: Long) {
-            _traffic.value = TrafficStats(upRate, downRate, upTotal, downTotal)
         }
 
         override fun onProfilesChanged() {
@@ -95,7 +85,6 @@ class VpnClient(private val context: Context) {
             // Known, not guessed: no process, no tunnel.
             _status.value = VpnStatus()
             _fresh.value = true
-            _traffic.value = TrafficStats()
             // Android restarts a crashed service only after a pause (up to
             // half an hour after repeated crashes); binding anew brings it
             // back now, and it resumes the tunnel if it should run.

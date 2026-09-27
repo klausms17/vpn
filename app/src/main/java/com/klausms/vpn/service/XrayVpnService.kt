@@ -1627,7 +1627,7 @@ class XrayVpnService : VpnService() {
         scope.launch { setNotice(baseNotice, e, replacing = setOf(notice)) }
     }
 
-    // ------------------------------------------------------ status & traffic
+    // ---------------------------------------------------------------- status
 
     private fun enterForeground(title: String, text: String?) {
         val n = Notifications.status(this, title, text, withDisconnect = true, networkSettings = text == Failover.NOTICE_PRIVATE_DNS)

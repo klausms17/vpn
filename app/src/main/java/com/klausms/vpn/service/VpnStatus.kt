@@ -41,13 +41,6 @@ data class VpnStatus(
     }
 }
 
-data class TrafficStats(
-    val upRate: Long = 0,
-    val downRate: Long = 0,
-    val upTotal: Long = 0,
-    val downTotal: Long = 0,
-)
-
 /** Status inside the VPN process, observed by the service and the tile. */
 object VpnStatusHolder {
     private val _status = MutableStateFlow(VpnStatus())
