@@ -231,7 +231,11 @@ profile_config() { # CURRENT_CONFIG_JSON PRIVATE_KEY SHORT_ID
     # would be cut and redone every 5 minutes, waking the phone. 30 minutes
     # outlasts them. The node keeps level 0 settings next to its own
     # statistics switches. A value set by hand in the panel stays.
-    | .policy.levels["0"].connIdle //= 1800' <<<"$1"
+    | .policy.levels["0"].connIdle //= 1800
+    # The servers keep no record of who connected from where and what they
+    # opened: no access log, and addresses in error messages are masked.
+    # Set on every run, also over a hand edit.
+    | .log = ((.log // {}) + {access: "none", dnsLog: false, maskAddress: "full"})' <<<"$1"
 }
 
 setup_profile() {

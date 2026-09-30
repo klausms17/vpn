@@ -1,0 +1,610 @@
+<!doctype html>
+<!-- Kirov VPN: the page friends see when they open their subscription link
+     in a browser (Caddy serves it for Accept: text/html; apps still get
+     their server list from Remnawave). install-panel.sh fills in
+     klaus-config. Nothing is loaded from other sites, and the link never
+     leaves as a referrer. -->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<meta name="format-detection" content="telephone=no">
+<meta name="theme-color" content="#EEF3F9">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<title>Kirov VPN</title>
+<link rel="icon" href="data:,">
+<script id="klaus-config" type="application/json">{}</script>
+<style>
+  :root {
+    --ice: #EEF3F9;
+    --ink: #0E1726;
+    --slate: #556173;
+    --mist: #7D8799;
+    --blue: #0A74FF;
+    --blue-deep: #0659D6;
+    --mint: #2FC8A8;
+    --hair: rgba(14, 23, 38, 0.08);
+    --edge: rgba(255, 255, 255, 0.85);
+    --shadow: 0 18px 40px -14px rgba(22, 44, 96, 0.24), 0 2px 6px rgba(22, 44, 96, 0.06);
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Roboto Mono", monospace;
+    color-scheme: light;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { background: var(--ice); }
+  body {
+    margin: 0;
+    font-family: var(--font);
+    color: var(--ink);
+    background: var(--ice);
+    -webkit-font-smoothing: antialiased;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  /* The wallpaper the glass sits on. */
+  .wall {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(62vmax 50vmax at 6% 0%, rgba(140, 203, 255, 0.95), rgba(140, 203, 255, 0) 70%),
+      radial-gradient(56vmax 46vmax at 100% 34%, rgba(125, 226, 205, 0.85), rgba(125, 226, 205, 0) 70%),
+      radial-gradient(60vmax 50vmax at 18% 100%, rgba(255, 190, 150, 0.8), rgba(255, 190, 150, 0) 70%),
+      var(--ice);
+  }
+
+  .page {
+    position: relative;
+    z-index: 1;
+    max-width: 460px;
+    margin: 0 auto;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: calc(16px + env(safe-area-inset-top, 0px)) calc(40px + env(safe-area-inset-bottom, 0px));
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+  }
+
+  .top {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-weight: 700;
+    font-size: 17px;
+    letter-spacing: -0.01em;
+  }
+  .mark {
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    display: grid;
+    place-items: center;
+    background: linear-gradient(155deg, #3A93FF, var(--blue) 58%, var(--mint));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55), 0 4px 12px rgba(10, 116, 255, 0.35);
+  }
+  .mark svg { width: 18px; height: 18px; }
+
+  /* Hero: the big button of the app, in glass, with the rings of a connection. */
+  .hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 12px;
+  }
+  .orb {
+    position: relative;
+    width: 150px;
+    height: 150px;
+    margin-block: 10px 6px;
+    display: grid;
+    place-items: center;
+  }
+  .ring {
+    position: absolute;
+    border-radius: 50%;
+    border: 1.5px solid rgba(10, 116, 255, 0.16);
+  }
+  .r1 { inset: 12px; background: rgba(255, 255, 255, 0.28); }
+  .r2 { inset: -6px; border-color: rgba(10, 116, 255, 0.11); }
+  .r3 { inset: -26px; border-color: rgba(10, 116, 255, 0.07); }
+  .disc {
+    position: relative;
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: radial-gradient(120% 120% at 30% 18%, rgba(255, 255, 255, 0.97), rgba(255, 255, 255, 0.6) 46%, rgba(206, 230, 255, 0.55) 100%);
+    -webkit-backdrop-filter: blur(10px) saturate(180%);
+    backdrop-filter: blur(10px) saturate(180%);
+    box-shadow:
+      inset 0 2px 1px rgba(255, 255, 255, 0.95),
+      inset 0 -10px 18px rgba(10, 116, 255, 0.12),
+      0 20px 38px -12px rgba(10, 116, 255, 0.5);
+  }
+  .disc::after {
+    content: "";
+    position: absolute;
+    inset: -3px;
+    border-radius: 50%;
+    padding: 3px;
+    background: conic-gradient(from 210deg, rgba(140, 203, 255, 0.95), rgba(125, 226, 205, 0.95), rgba(255, 190, 150, 0.95), rgba(140, 203, 255, 0.95));
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+  }
+  .disc svg { width: 48px; height: 48px; }
+
+  h1 {
+    margin: 0;
+    font-size: clamp(32px, 9vw, 40px);
+    line-height: 1.05;
+    font-weight: 800;
+    letter-spacing: -0.028em;
+    text-wrap: balance;
+  }
+  .lede {
+    margin: 0;
+    max-width: 30ch;
+    font-size: 17px;
+    line-height: 1.45;
+    color: var(--slate);
+    text-wrap: balance;
+  }
+
+  /* Segmented control with a sliding glass drop. */
+  .seg {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    padding: 4px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.42);
+    -webkit-backdrop-filter: blur(18px) saturate(180%);
+    backdrop-filter: blur(18px) saturate(180%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 0 0 1px rgba(255, 255, 255, 0.55), 0 8px 20px -10px rgba(22, 44, 96, 0.3);
+  }
+  .seg .thumb {
+    position: absolute;
+    top: 4px;
+    bottom: 4px;
+    left: 4px;
+    width: calc(50% - 4px);
+    border-radius: 999px;
+    background: linear-gradient(180deg, #FFFFFF, rgba(255, 255, 255, 0.85));
+    box-shadow: 0 4px 12px rgba(22, 44, 96, 0.16), inset 0 1px 0 #FFFFFF;
+    transition: transform 0.4s cubic-bezier(0.3, 1.35, 0.5, 1);
+  }
+  .seg[data-active="iphone"] .thumb { transform: translateX(100%); }
+  .seg button {
+    position: relative;
+    z-index: 1;
+    height: 42px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    font: 600 15px/1 var(--font);
+    color: var(--slate);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .seg button[aria-selected="true"] { color: var(--ink); }
+
+  /* Glass sheets. */
+  .sheet {
+    position: relative;
+    border-radius: 30px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.74), rgba(255, 255, 255, 0.52));
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    backdrop-filter: blur(24px) saturate(180%);
+    border: 1px solid var(--edge);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.95), var(--shadow);
+  }
+  @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .sheet, .seg { background: rgba(255, 255, 255, 0.92); }
+  }
+
+  .steps { list-style: none; margin: 0; padding: 4px 0; }
+  .step {
+    position: relative;
+    display: grid;
+    grid-template-columns: 34px 1fr;
+    gap: 14px;
+    padding: 18px 18px 18px 16px;
+  }
+  .step + .step::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 64px;
+    right: 0;
+    border-top: 1px solid var(--hair);
+  }
+  .num {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    font-weight: 700;
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+    color: var(--blue);
+    background: linear-gradient(180deg, #FFFFFF, rgba(255, 255, 255, 0.6));
+    border: 1px solid rgba(10, 116, 255, 0.18);
+    box-shadow: inset 0 1px 0 #FFFFFF, 0 3px 8px rgba(10, 116, 255, 0.16);
+  }
+  .body { display: flex; flex-direction: column; gap: 11px; min-width: 0; }
+  .body h2 {
+    margin: 5px 0 0;
+    font-size: 19px;
+    line-height: 1.25;
+    font-weight: 650;
+    letter-spacing: -0.012em;
+  }
+  .body p { margin: 0; font-size: 15.5px; line-height: 1.45; color: var(--slate); }
+  .body .note, .soon .note { font-size: 14px; color: var(--mist); }
+
+  .btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 50px;
+    padding: 0 20px;
+    border: 0;
+    border-radius: 999px;
+    font: 600 17px/1.1 var(--font);
+    text-decoration: none;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: transform 0.15s ease, box-shadow 0.2s ease;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn svg { width: 20px; height: 20px; flex: none; }
+  .btn.primary {
+    color: #FFFFFF;
+    background: linear-gradient(180deg, #3A93FF 0%, var(--blue) 55%, #0662E0 100%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), inset 0 -2px 6px rgba(0, 40, 120, 0.25), 0 12px 24px -8px rgba(10, 116, 255, 0.6);
+  }
+  .btn.tint {
+    color: var(--blue-deep);
+    background: rgba(10, 116, 255, 0.1);
+    box-shadow: inset 0 0 0 1px rgba(10, 116, 255, 0.16);
+  }
+  .btn.small {
+    width: auto;
+    min-height: 38px;
+    padding: 0 14px;
+    font-size: 15px;
+    color: var(--blue-deep);
+    background: rgba(255, 255, 255, 0.85);
+    box-shadow: inset 0 1px 0 #FFFFFF, 0 1px 3px rgba(22, 44, 96, 0.14), inset 0 0 0 1px rgba(14, 23, 38, 0.06);
+  }
+  .btn.small svg { width: 17px; height: 17px; }
+
+  .linkrow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 5px 5px 14px;
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.55);
+    box-shadow: inset 0 0 0 1px rgba(14, 23, 38, 0.06);
+  }
+  .linkrow code {
+    flex: 1;
+    min-width: 0;
+    font: 13px/1.3 var(--mono);
+    color: var(--slate);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    -webkit-user-select: all;
+    user-select: all;
+  }
+
+  details.tip { font-size: 14px; color: var(--slate); }
+  details.tip summary {
+    list-style: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--blue-deep);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  details.tip summary::-webkit-details-marker { display: none; }
+  details.tip summary svg { width: 14px; height: 14px; transition: transform 0.2s ease; }
+  details.tip[open] summary svg { transform: rotate(90deg); }
+  details.tip p { margin: 8px 0 0; font-size: 14px; }
+
+  .soon { padding: 26px 22px 24px; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 12px; }
+  .soon-icon {
+    width: 64px;
+    height: 64px;
+    border-radius: 20px;
+    display: grid;
+    place-items: center;
+    background: linear-gradient(180deg, #FFFFFF, rgba(255, 255, 255, 0.6));
+    box-shadow: inset 0 1px 0 #FFFFFF, 0 8px 18px -6px rgba(22, 44, 96, 0.25), inset 0 0 0 1px rgba(14, 23, 38, 0.05);
+  }
+  .soon-icon svg { width: 30px; height: 30px; }
+  .soon h2 { margin: 4px 0 0; font-size: 21px; font-weight: 700; letter-spacing: -0.015em; text-wrap: balance; }
+  .soon p { margin: 0; max-width: 32ch; font-size: 15.5px; line-height: 1.45; color: var(--slate); }
+  .badge {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--blue-deep);
+    padding: 5px 10px;
+    border-radius: 999px;
+    background: rgba(10, 116, 255, 0.1);
+  }
+
+  .foot { display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; padding-inline: 6px; }
+  .foot p { margin: 0; font-size: 14px; line-height: 1.45; color: var(--slate); max-width: 36ch; }
+  .foot a { color: var(--blue-deep); font-weight: 600; text-decoration: none; }
+  .foot .priv { display: flex; gap: 8px; align-items: flex-start; text-align: left; font-size: 13px; color: var(--mist); }
+  .foot .priv svg { width: 16px; height: 16px; flex: none; margin-top: 1px; }
+
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    transform: translateX(-50%);
+    z-index: 10;
+    max-width: calc(100% - 32px);
+    padding: 12px 18px;
+    border-radius: 999px;
+    background: rgba(20, 28, 44, 0.84);
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
+    color: #FFFFFF;
+    font: 600 15px/1.3 var(--font);
+    text-align: center;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.22);
+  }
+
+  .btn:focus-visible, .seg button:focus-visible, details.tip summary:focus-visible, .foot a:focus-visible {
+    outline: 3px solid rgba(10, 116, 255, 0.45);
+    outline-offset: 3px;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .ring { animation: ripple 2.2s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+    .r2 { animation-delay: 0.18s; }
+    .r3 { animation-delay: 0.36s; }
+    .disc { animation: settle 0.9s cubic-bezier(0.2, 1.3, 0.4, 1) both; }
+    @keyframes ripple {
+      0% { transform: scale(0.72); opacity: 0; }
+      55% { opacity: 1; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    @keyframes settle {
+      0% { transform: scale(0.86); }
+      100% { transform: scale(1); }
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .seg .thumb, .btn, details.tip summary svg { transition: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wall" aria-hidden="true"></div>
+
+<main class="page">
+  <header class="top">
+    <span class="mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/></svg>
+    </span>
+    Kirov VPN
+  </header>
+
+  <section class="hero">
+    <div class="orb" aria-hidden="true">
+      <span class="ring r3"></span>
+      <span class="ring r2"></span>
+      <span class="ring r1"></span>
+      <span class="disc">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <defs>
+            <linearGradient id="shield-ink" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#0A74FF"/>
+              <stop offset="1" stop-color="#2FC8A8"/>
+            </linearGradient>
+          </defs>
+          <path stroke="url(#shield-ink)" d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/>
+          <path stroke="url(#shield-ink)" d="M9 12l2 2 4-4"/>
+        </svg>
+      </span>
+    </div>
+    <h1>Ваш личный VPN</h1>
+    <p class="lede">Ссылка на эту страницу работает как ключ. Не пересылайте её никому.</p>
+  </section>
+
+  <div class="seg" id="seg" role="tablist" aria-label="Ваш телефон" data-active="android">
+    <span class="thumb" aria-hidden="true"></span>
+    <button type="button" role="tab" id="tab-android" aria-controls="panel-android" aria-selected="true">Android</button>
+    <button type="button" role="tab" id="tab-iphone" aria-controls="panel-iphone" aria-selected="false" tabindex="-1">iPhone</button>
+  </div>
+
+  <section class="sheet" id="panel-android" role="tabpanel" aria-labelledby="tab-android">
+    <ol class="steps">
+      <li class="step">
+        <span class="num">1</span>
+        <div class="body">
+          <h2>Установите Kirov VPN</h2>
+          <p id="ask-app">Попросите файл Kirov VPN у того, кто дал вам эту ссылку, и установите его.</p>
+          <p id="open-app" hidden>Скачайте приложение и откройте файл. Если телефон спросит, разрешите установку из этого источника.</p>
+          <a class="btn tint" id="get-app" href="/app/KirovVPN.apk" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7 10l5 5 5-5"/><path d="M5 20h14"/></svg>
+            Скачать приложение
+          </a>
+          <details class="tip">
+            <summary>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+              Телефон не даёт установить файл?
+            </summary>
+            <p>На Samsung на время выключите «Автоблокировщик», на Huawei и Honor выключите «Чистый режим». Их можно найти поиском в настройках.</p>
+          </details>
+        </div>
+      </li>
+      <li class="step">
+        <span class="num">2</span>
+        <div class="body">
+          <h2>Добавьте ссылку в приложение</h2>
+          <p>Нажмите кнопку: откроется Kirov VPN и предложит добавить подписку.</p>
+          <a class="btn primary" id="add" href="#">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+            Добавить в Kirov VPN
+          </a>
+          <div class="linkrow">
+            <code id="link"></code>
+            <button type="button" class="btn small" id="copy">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="3"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+              Скопировать
+            </button>
+          </div>
+          <p class="note">Ничего не открылось? Так бывает в браузере Telegram. Скопируйте ссылку, откройте Kirov VPN, нажмите «+» и вставьте её.</p>
+        </div>
+      </li>
+      <li class="step">
+        <span class="num">3</span>
+        <div class="body">
+          <h2>Нажмите большую кнопку</h2>
+          <p>VPN включится. Список серверов приложение обновляет само.</p>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <section class="sheet soon" id="panel-iphone" role="tabpanel" aria-labelledby="tab-iphone" hidden>
+    <span class="soon-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#0A74FF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2.5" width="12" height="19" rx="3"/><path d="M10.5 18.5h3"/></svg>
+    </span>
+    <span class="badge">Скоро</span>
+    <h2>Kirov VPN для iPhone</h2>
+    <p>Приложение для iPhone готовится. Когда оно выйдет, здесь появится кнопка установки, а ваша ссылка останется той же.</p>
+    <p class="note">Пока его нет, спросите у того, кто дал вам ссылку, как подключиться.</p>
+  </section>
+
+  <footer class="foot">
+    <p id="ask-support">Вопросы? Напишите тому, кто дал вам ссылку.</p>
+    <p id="support" hidden>Вопросы? <a id="support-link" href="#" target="_blank" rel="noopener noreferrer">Напишите нам</a></p>
+    <p class="priv">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+      Kirov VPN не записывает ни ваш IP-адрес, ни то, какие сайты вы открываете.
+    </p>
+  </footer>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script>
+  (function () {
+    var cfg = {};
+    try { cfg = JSON.parse(document.getElementById("klaus-config").textContent) || {}; } catch (err) { cfg = {}; }
+    var link = location.origin + location.pathname.replace(/\/+$/, "");
+
+    var toastEl = document.getElementById("toast");
+    var toastTimer;
+    function toast(text) {
+      toastEl.textContent = text;
+      toastEl.hidden = false;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(function () { toastEl.hidden = true; }, 2600);
+    }
+
+    var linkEl = document.getElementById("link");
+    linkEl.textContent = link.replace(/^https:\/\//, "");
+    document.getElementById("add").href = "klausvpn://add/" + link;
+
+    // The app: a link of the owner (APK_URL), or the build the panel
+    // publishes on /app/ once there is one.
+    function offerDownload(url) {
+      var a = document.getElementById("get-app");
+      a.href = url;
+      a.hidden = false;
+      document.getElementById("open-app").hidden = false;
+      document.getElementById("ask-app").hidden = true;
+    }
+    if (/^https:\/\//.test(cfg.apkUrl || "")) {
+      offerDownload(cfg.apkUrl);
+    } else if (window.fetch) {
+      fetch("/app/version.json", { cache: "no-store" })
+        .then(function (r) { if (r.ok) offerDownload("/app/KirovVPN.apk"); })
+        .catch(function () {});
+    }
+
+    if (/^https?:\/\//.test(cfg.supportUrl || "")) {
+      document.getElementById("support-link").href = cfg.supportUrl;
+      document.getElementById("support").hidden = false;
+      document.getElementById("ask-support").hidden = true;
+    }
+
+    function selectLink() {
+      var range = document.createRange();
+      range.selectNodeContents(linkEl);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    document.getElementById("copy").addEventListener("click", function () {
+      var done = function () { toast("Ссылка скопирована"); };
+      var fallback = function () { selectLink(); toast("Ссылка выделена: скопируйте её"); };
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(link).then(done, fallback);
+        } else {
+          fallback();
+        }
+      } catch (err) {
+        fallback();
+      }
+    });
+
+    var seg = document.getElementById("seg");
+    var tabs = {
+      android: document.getElementById("tab-android"),
+      iphone: document.getElementById("tab-iphone")
+    };
+    var panels = {
+      android: document.getElementById("panel-android"),
+      iphone: document.getElementById("panel-iphone")
+    };
+    function select(which, focus) {
+      seg.setAttribute("data-active", which);
+      Object.keys(tabs).forEach(function (k) {
+        var on = k === which;
+        tabs[k].setAttribute("aria-selected", on ? "true" : "false");
+        tabs[k].tabIndex = on ? 0 : -1;
+        panels[k].hidden = !on;
+      });
+      if (focus) tabs[which].focus();
+    }
+    tabs.android.addEventListener("click", function () { select("android"); });
+    tabs.iphone.addEventListener("click", function () { select("iphone"); });
+    seg.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        select(seg.getAttribute("data-active") === "android" ? "iphone" : "android", true);
+        e.preventDefault();
+      }
+    });
+    // iPadOS also says Macintosh; a touch screen tells them apart.
+    var ios = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+      (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+    select(ios ? "iphone" : "android");
+  })();
+</script>
+</body>
+</html>

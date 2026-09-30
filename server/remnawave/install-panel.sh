@@ -4,7 +4,7 @@
 #
 # Run as root on a fresh Ubuntu 22.04+/Debian 12+ VPS abroad (2 CPU, 4 GB).
 # Both domains must already point at this server. Copy this file,
-# klaus-panel and klaus-monitor.py into one folder, then:
+# klaus-panel, klaus-monitor.py and klaus-page.html into one folder, then:
 #
 #   sudo PANEL_DOMAIN=panel.example.com SUB_DOMAIN=sub.example.com bash install-panel.sh
 #
@@ -72,8 +72,8 @@ warn() { printf '\033[1;33mВнимание:\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31mОшибка:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "запустите от root (sudo … bash install-panel.sh)"
-for f in klaus-panel klaus-monitor.py; do
-  [ -f "$HERE/$f" ] || die "рядом со скриптом нет файла $f: скопируйте install-panel.sh, klaus-panel и klaus-monitor.py в одну папку"
+for f in klaus-panel klaus-monitor.py klaus-page.html; do
+  [ -f "$HERE/$f" ] || die "рядом со скриптом нет файла $f: скопируйте install-panel.sh, klaus-panel, klaus-monitor.py и klaus-page.html в одну папку"
 done
 
 # ---------------------------------------------------------------- restore
@@ -389,6 +389,12 @@ SUB_PUBLIC_DOMAIN=$SUB_DOMAIN
 METRICS_USER=admin
 METRICS_PASS=$METRICS_PASS
 WEBHOOK_ENABLED=false
+# Privacy: no history of subscription downloads (who, when, which app) and
+# no traffic of each friend by day; the totals and the last time online stay,
+# the panel works with them. No request log either.
+SERVICE_DISABLE_SRH_RECORDS=true
+SERVICE_DISABLE_USER_USAGE_RECORDS=true
+IS_HTTP_LOGGING_ENABLED=false
 SHORT_UUID_METHOD=nanoid
 SHORT_UUID_LENGTH=16
 POSTGRES_USER=$POSTGRES_USER
@@ -488,11 +494,15 @@ services:
       timeout: 3s
       retries: 3
 
+  # It logs each request with the friend's personal link and has no switch
+  # for that: no log at all.
   remnawave-subscription-page:
     image: remnawave/subscription-page:latest
     container_name: remnawave-subscription-page
     hostname: remnawave-subscription-page
-    <<: [*common, *logging]
+    <<: *common
+    logging:
+      driver: none
     env_file: subscription.env
     ports:
       - 127.0.0.1:3010:3010
@@ -535,6 +545,7 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./app:/srv/app:ro
+      - ./page:/srv/page:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on:
@@ -570,8 +581,13 @@ tls_line=""
 # subscription address is where the page's support button leads when there
 # is no SUPPORT_URL (the page itself only drops such requests). /app/ is the
 # app published by "klaus-panel publish-apk", /klaus/ the block reports.
+# A browser opening a friend's link gets Kirov VPN's own page (/srv/page,
+# from klaus-page.html); the apps get their subscription from Remnawave.
 # No access log, and the error log (a request that failed, e.g. while the
 # page restarts) keeps neither the address nor the link of the friend.
+# Nor does anything behind Caddy learn the address: the page, the panel it
+# asks (which would store it with the friend's phone) and the monitor all
+# get 127.0.0.1.
 put_file "$RW_DIR/Caddyfile" <<EOF
 # Written by Kirov VPN install-panel.sh; re-running the script rewrites it.
 {
@@ -598,12 +614,15 @@ $tls_line
 https://$SUB_DOMAIN {
 $tls_line
 	encode
+	@page header Accept *text/html*
 	handle / {
 		header Content-Type "text/plain; charset=utf-8"
 		respond "Kirov VPN: с вопросами обращайтесь к тому, кто дал вам ссылку на подписку." 200
 	}
 	handle /klaus/* {
-		reverse_proxy klaus-monitor:8080
+		reverse_proxy klaus-monitor:8080 {
+			header_up X-Forwarded-For 127.0.0.1
+		}
 	}
 	handle_path /app/* {
 		root * /srv/app
@@ -621,7 +640,17 @@ $tls_line
 		file_server
 	}
 	handle {
-		reverse_proxy remnawave-subscription-page:3010
+		handle @page {
+			root * /srv/page
+			rewrite * /index.html
+			header Cache-Control "no-cache"
+			file_server
+		}
+		handle {
+			reverse_proxy remnawave-subscription-page:3010 {
+				header_up X-Forwarded-For 127.0.0.1
+			}
+		}
 	}
 }
 
@@ -640,6 +669,16 @@ chmod 644 "$RW_DIR/Caddyfile"
 put_file "$RW_DIR/klaus-monitor.py" < "$HERE/klaus-monitor.py"
 # Read by the monitor's unprivileged user.
 chmod 644 "$RW_DIR/klaus-monitor.py"
+# Kirov VPN's page for friends' browsers. Its only settings, the app link
+# and the support link, go into its klaus-config block (a "<" escaped, so
+# no value can close the script tag).
+mkdir -p "$RW_DIR/page"
+page_cfg="$(jq -nc --arg apk "$APK_URL" --arg support "$SUPPORT_URL" '{apkUrl: $apk, supportUrl: $support}' | sed 's/</\\u003c/g')"
+jq -Rsj --arg cfg "$page_cfg" \
+  'sub("<script id=\"klaus-config\" type=\"application/json\">[^<]*</script>";
+    "<script id=\"klaus-config\" type=\"application/json\">" + $cfg + "</script>")' \
+  "$HERE/klaus-page.html" | put_file "$RW_DIR/page/index.html"
+chmod 644 "$RW_DIR/page/index.html"
 mkdir -p "$RW_DIR/app"
 
 # Containers left from a setup made by hand (e.g. the Caddy example from the
@@ -865,7 +904,8 @@ if ! docker exec klaus-monitor cat /app/klaus-monitor.py 2>/dev/null | cmp -s - 
 fi
 for i in $(seq 1 60); do
   [ "$(docker inspect -f '{{.State.Health.Status}}' remnawave-subscription-page 2>/dev/null)" = "healthy" ] && break
-  [ "$i" -eq 60 ] && { docker compose logs --tail 40 remnawave-subscription-page >&2 || true; die "страница подписки не запустилась (журнал выше)"; }
+  # It keeps no log (friends' links): its errors show only when run by hand.
+  [ "$i" -eq 60 ] && die "страница подписки не запустилась. Её журнал не ведётся ради приватности знакомых; ошибки покажет запуск вручную: cd $RW_DIR && docker compose run --rm remnawave-subscription-page"
   sleep 3
 done
 # Friends' VPN does not depend on it: only a warning.

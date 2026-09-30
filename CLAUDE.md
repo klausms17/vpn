@@ -52,12 +52,22 @@ and give step-by-step instructions for anything he must do himself.
   - `remnawave/`: the panel for friends. `install-panel.sh` and
     `install-node.sh` install it; `klaus-panel` is the owner's CLI (friends,
     nodes, publish-apk, telegram-setup); `klaus-monitor.py` turns block
-    reports from the app into Telegram alerts; `test/` holds the Docker
-    end-to-end test and the monitor unit tests.
+    reports from the app into Telegram alerts; `klaus-page.html` is the
+    light iOS-style page a friend's browser gets for the link (Caddy serves
+    it for `Accept: text/html`, apps still get their list from Remnawave;
+    install-panel.sh fills in the APK and support links); `test/` holds
+    the Docker end-to-end test and the monitor unit tests.
   - The owner may add friends in the panel's web form instead of the CLI.
     That form starts with no squad and an end date of tomorrow, so a
     systemd timer runs `klaus-panel tidy-users` every 20 seconds: users
     made in the last two days get the `KlausVPN` squad and no end date.
+  - Nothing about friends is kept beyond what the panel needs (name, link,
+    traffic totals, last time online, and their phones for the device
+    limit): Caddy hands 127.0.0.1 instead of their IP to everything behind
+    it, the subscription page has no log, `.env` switches off the
+    subscription-download and per-day traffic history
+    (`SERVICE_DISABLE_*`), and the profile gives the nodes' Xray no access
+    log and masked addresses.
 - `scripts/`: `build-libxray.sh` (AAR), `build-libxray-ios.sh`,
   `fetch-geo.sh`, `prepare-geo.sh`.
 - `docs/README.ru.md`: the owner's full guide in Russian: install, servers,
@@ -129,9 +139,13 @@ and give step-by-step instructions for anything he must do himself.
   for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
   passes its checks (geo files in the extension, no bitcode). The app is
   still the skeleton: paste a key, connect, disconnect.
-- **Panel:** the scripts are written and pass the Docker e2e, but they are
-  not installed on real servers yet. Friends can be added in the web form
-  too (see `tidy-users` above), so the owner needs no custom admin UI.
+- **Panel:** installed on the owner's own panel VPS on 28 Sep 2026; the old
+  German VPN server is registered as node `de-1` but not switched over yet
+  (`MIGRATE=1`, once friends have their links). The privacy changes and
+  `klaus-page.html` of 28 Sep (see the map above) have not been through
+  the Docker e2e yet: run it in a cloud session, never on the live panel. Friends can be added in
+  the web form too (see `tidy-users` above), so the owner needs no custom
+  admin UI.
 - The work of `claude/compassionate-mayer-6jph8m` goes to `main` through a
   PR from `claude/pensive-gates-mddsan`. Once it is merged, start new work
   from `main`.

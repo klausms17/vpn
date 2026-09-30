@@ -25,8 +25,11 @@
 # and then
 #   (a) the app's User-Agent gets a base64 list with a vless REALITY link
 #       and the klaus-report-url / klaus-app-url headers,
-#   (b) a browser gets the page; its Kirov VPN button is klausvpn://add/…,
-#   (c) the device from X-Hwid is recorded in the panel,
+#   (b) a browser gets Kirov VPN's own page (klaus-page.html): the
+#       klausvpn://add/… button, its settings, nothing from other sites,
+#   (c) the device from X-Hwid is recorded in the panel without the
+#       friend's IP; no history of subscription downloads and no log of the
+#       subscription page,
 #   (d) the app's own Go core (libxray, via test/e2e) parses the
 #       subscription and fetches a page through the node,
 #   plus: a disabled friend is refused by the node, a friend made as the
@@ -35,7 +38,8 @@
 #   stay, a disabled node leaves the subscription, the device limit works, a domain change reaches Caddy,
 #   the support link follows SUPPORT_URL (never the panel's placeholder),
 #   the node keeps its custom port on a re-run, the node's Xray keeps idle
-#   connections 30 minutes (the profile's policy), the APK is published
+#   connections 30 minutes and no access log, with addresses masked in its
+#   error log (the profile's policy and log settings), the APK is published
 #   with a verified checksum (a wrong one is refused, a missing release is
 #   quiet for the timer) on https://SUB/app/ with version.json and the
 #   page's download button (and its Samsung and Huawei tip), the page
@@ -201,6 +205,10 @@ support_links() { # -> {header, page}: the support link in subscriptions and on 
   jq -nc --slurpfile s "$WORK/settings.json" --slurpfile p "$WORK/page-config.json" \
     '{header: $s[0].response.customResponseHeaders["support-url"], page: $p[0].response.config.brandingSettings.supportUrl}'
 }
+page_config() { # NAME -> the settings install-panel.sh wrote into Kirov VPN's page on https://NAME/
+  curl -fsS --noproxy '*' --resolve "$1:443:127.0.0.1" --cacert "$WORK/caddy-root.crt" -H 'Accept: text/html' \
+    "https://$1/page-check" | sed -n 's#.*<script id="klaus-config" type="application/json">\(.*\)</script>.*#\1#p'
+}
 db_volume() { docker volume inspect remnawave-db-data >/dev/null 2>&1; }
 install_panel() { # RW_DIR ADMIN_FILE [VAR=value...]
   local dir="$1" admin="$2"
@@ -348,7 +356,8 @@ jq -e --arg p "https://$SUB_DOMAIN/" '.header == null and .page == $p' "$WORK/su
 https_get "$SUB_DOMAIN" -D "$WORK/root.headers" | tee "$WORK/root.txt"; echo
 grep -qi '^content-type: text/plain; charset=utf-8' "$WORK/root.headers" || fail "note is not utf-8 text"
 grep -q "кто дал вам ссылку" "$WORK/root.txt" || fail "no note at https://$SUB_DOMAIN/"
-pass "no support-url header, the page's support button opens the note on https://$SUB_DOMAIN/"
+jq -e '.supportUrl == ""' <<<"$(page_config "$SUB_DOMAIN")" >/dev/null || fail "a support link on Kirov VPN's page without SUPPORT_URL"
+pass "no support-url header, the page's support button opens the note on https://$SUB_DOMAIN/; none on Kirov VPN's page"
 
 step "install-panel.sh with a new SUB_DOMAIN and SUPPORT_URL (and a branch's builds chosen): Caddy serves the new name"
 install_panel "$WORK/opt" "$WORK/admin.txt" SUB_DOMAIN="$SUB_DOMAIN2" SUPPORT_URL="$SUPPORT" RELEASE_TAG="$RELEASE_OLD" \
@@ -360,6 +369,7 @@ if https_get "$SUB_DOMAIN" -o /dev/null 2>/dev/null; then fail "Caddy still serv
 grep -qx "SUB_PUBLIC_DOMAIN=$SUB_DOMAIN2" "$WORK/opt/.env" || fail "panel .env not updated"
 support_links | tee "$WORK/support-1.json"
 jq -e --arg s "$SUPPORT" '.header == $s and .page == $s' "$WORK/support-1.json" >/dev/null || fail "SUPPORT_URL not applied"
+jq -e --arg s "$SUPPORT" '.supportUrl == $s' <<<"$(page_config "$SUB_DOMAIN2")" >/dev/null || fail "SUPPORT_URL not on Kirov VPN's page"
 pass "https://$SUB_DOMAIN2 served with a certificate, the old name is not; SUPPORT_URL in the header and on the page"
 
 step "install-panel.sh back to $SUB_DOMAIN with SUPPORT_URL removed (settings converge)"
@@ -369,6 +379,7 @@ https_get "$SUB_DOMAIN" -o /dev/null || fail "Caddy does not serve $SUB_DOMAIN a
 if https_get "$SUB_DOMAIN2" -o /dev/null 2>/dev/null; then fail "Caddy still serves $SUB_DOMAIN2"; fi
 support_links | tee "$WORK/support-2.json"
 cmp -s "$WORK/support-0.json" "$WORK/support-2.json" || fail "support link did not return to the state without SUPPORT_URL"
+jq -e '.supportUrl == ""' <<<"$(page_config "$SUB_DOMAIN")" >/dev/null || fail "SUPPORT_URL left on Kirov VPN's page"
 grep -qx "RELEASE_TAG=$RELEASE_OLD" "$CONF" || fail "a release chosen on purpose was not kept"
 if grep -q "стабильные" "$WORK/install-4.log"; then fail "a release chosen on purpose was moved to stable"; fi
 pass "back on $SUB_DOMAIN; support link as without SUPPORT_URL again; the chosen $RELEASE_OLD stays"
@@ -386,12 +397,14 @@ retry 45 node_up || { kp list-nodes; fail "node did not connect"; }
 kp list-nodes
 pass "node connected"
 
-step "idle connections: the node's Xray keeps them 30 minutes (policy of the profile)"
+step "the node's Xray: idle connections kept 30 minutes, no access log, masked addresses (from the profile)"
 PROFILE_UUID="$(api /api/config-profiles | jq -r 'first(.response.configProfiles[] | select(.name == "KlausVPN")) | .uuid')"
-api "/api/config-profiles/$PROFILE_UUID" | jq -c '.response.config.policy' | tee "$WORK/profile-policy.json"
-jq -e '.levels["0"].connIdle == 1800' "$WORK/profile-policy.json" >/dev/null || fail "no idle policy in the profile"
+api "/api/config-profiles/$PROFILE_UUID" | jq -c '.response.config | {policy, log}' | tee "$WORK/profile-policy.json"
+jq -e '.policy.levels["0"].connIdle == 1800' "$WORK/profile-policy.json" >/dev/null || fail "no idle policy in the profile"
+jq -e '.log.access == "none" and .log.maskAddress == "full"' "$WORK/profile-policy.json" >/dev/null ||
+  fail "the profile lets the servers log who connected"
 # What the node's Xray really runs, read the way Xray itself reads it. Only
-# the policy is printed: the config holds the keys.
+# the policy and the log settings are printed: the config holds the keys.
 node_policy() {
   docker exec remnanode node -e '
     const fs = require("fs"), http = require("http");
@@ -400,13 +413,17 @@ node_policy() {
               path: "/internal/get-config?token=" + env("INTERNAL_REST_TOKEN")}, (r) => {
       let b = "";
       r.on("data", (d) => (b += d));
-      r.on("end", () => console.log(JSON.stringify(JSON.parse(b).policy || null)));
+      r.on("end", () => {
+        const c = JSON.parse(b);
+        console.log(JSON.stringify({policy: c.policy || null, log: c.log || null}));
+      });
     }).on("error", (e) => { console.error(e.message); process.exit(1); });' > "$WORK/node-policy.json" 2>&1 &&
-    jq -e '.levels["0"].connIdle == 1800' "$WORK/node-policy.json" >/dev/null
+    jq -e '.policy.levels["0"].connIdle == 1800 and .log.access == "none" and .log.maskAddress == "full"' \
+      "$WORK/node-policy.json" >/dev/null
 }
-retry 10 node_policy || { cat "$WORK/node-policy.json"; fail "the node's Xray closes idle connections sooner"; }
+retry 10 node_policy || { cat "$WORK/node-policy.json"; fail "the node's Xray closes idle connections sooner or logs who connected"; }
 cat "$WORK/node-policy.json"
-pass "connIdle 1800 in the profile and in the node's running Xray (next to its own statistics settings)"
+pass "connIdle 1800 (next to the node's own statistics settings), no access log and masked addresses in the profile and in the node's running Xray"
 
 step "the panel's own Telegram messages about servers reach the chat"
 panel_msgs() { mock /_mock/tg/sent | jq --arg c "$TG_CHAT" '[.[] | select(.chat_id == $c and (.text | test("#node")))]'; }
@@ -450,24 +467,18 @@ grep -Eq "^vless://[0-9a-f-]+@127\.0\.0\.1:$VPN_PORT\?.*security=reality.*pbk=.*
   fail "no vless reality link named Германия"
 pass "base64 list with a vless REALITY link; report and app URLs in the headers"
 
-step "(b) a browser gets the page with the Kirov VPN button"
-sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' -c "$WORK/cookies" > "$WORK/b.html"
+step "(b) a browser gets Kirov VPN's own page"
+sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' > "$WORK/b.html"
 grep -q "^HTTP/[0-9.]* 200" "$WORK/last.headers" || fail "no HTML page"
 grep -qi '^content-type: text/html' "$WORK/last.headers" || fail "no HTML page"
 grep -o '<title>[^<]*</title>' "$WORK/b.html"
-# The page loads its app list with the session cookie it just set.
-sub_get "$UA_BROWSER" "https://$SUB_DOMAIN/assets/.app-config-v2.json" -b "$WORK/cookies" > "$WORK/b.config.json"
-jq -r '.platforms.android.apps[0] | "first Android app: \(.name) (featured: \(.featured))",
-  (.blocks[].buttons[] | "  \(.type): \(.link)  «\(.text.ru)»")' "$WORK/b.config.json"
-jq -e '.platforms.android.apps[0].name == "Kirov VPN" and
-  ([.platforms.android.apps[0].blocks[].buttons[] | select(.type == "subscriptionLink" and .link == "klausvpn://add/{{SUBSCRIPTION_LINK}}")] | length == 1) and
-  ([.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external" and .link == "https://example.com/KirovVPN.apk")] | length == 1) and
-  ([.platforms.android.apps[].name] | index("Happ") != null)' "$WORK/b.config.json" >/dev/null || fail "Kirov VPN button"
-jq -r '"support button: \(.brandingSettings.supportUrl)"' "$WORK/b.config.json"
-jq -e --arg p "https://$SUB_DOMAIN/" '.brandingSettings.supportUrl == $p' "$WORK/b.config.json" >/dev/null || fail "page support link"
-if grep -q 'dummy\.docs\.rw' "$WORK/b.html" "$WORK/b.config.json"; then fail "placeholder support link on the page"; fi
+# The page makes its button from its own address: klausvpn://add/ + the link.
+grep -q 'klausvpn://add/' "$WORK/b.html" || fail "no Kirov VPN button on the page"
+page_config "$SUB_DOMAIN" | tee "$WORK/b.config.json"
+jq -e '.apkUrl == "https://example.com/KirovVPN.apk" and .supportUrl == ""' "$WORK/b.config.json" >/dev/null || fail "page settings"
+if grep -Eq '(src|href)="https?://' "$WORK/b.html"; then fail "the page loads something from another site"; fi
 echo "the page turns the button into: klausvpn://add/$SUB"
-pass "HTML page; Kirov VPN first with klausvpn://add/{{SUBSCRIPTION_LINK}} and the APK button, default apps kept"
+pass "Kirov VPN's page with the klausvpn://add/ button, APK_URL and no SUPPORT_URL in its settings, nothing from other sites"
 
 step "publish-apk: from the GitHub release to https://$SUB_DOMAIN/app/ (checksum verified)"
 page_apk_buttons() { # -> the Kirov VPN block's download buttons in the panel's page settings
@@ -577,8 +588,8 @@ for f in KirovVPN.apk "KirovVPN-$APK_VERSION.apk"; do
   cmp -s "$WORK/last.body" "$APK" || fail "$f differs from the release"
   grep -qi '^content-type: application/vnd.android.package-archive' "$WORK/apk.headers" || fail "$f content type"
 done
-# The page restarts with its download button.
-page_up() { sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' -f -o /dev/null 2>/dev/null; }
+# The subscription page restarts with its new settings.
+page_up() { sub_get "$UA_APP" "$SUB" -f -o /dev/null 2>/dev/null; }
 retry 30 page_up || fail "subscription page did not come back"
 kp publish-apk | tee "$WORK/publish-2.log"
 grep -q "уже опубликована" "$WORK/publish-2.log" || fail "the same build downloaded again"
@@ -586,21 +597,26 @@ echo "download buttons now: $(page_apk_buttons)"
 [ "$(page_apk_buttons)" = "[{\"link\":\"https://$SUB_DOMAIN/app/KirovVPN.apk\",\"text\":\"Скачать приложение\"}]" ] ||
   fail "no download button for the published APK"
 install_tip || fail "no install tip for Samsung and Huawei next to the download button"
-# What a friend's browser gets.
-sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' -c "$WORK/cookies2" -o /dev/null
-sub_get "$UA_BROWSER" "https://$SUB_DOMAIN/assets/.app-config-v2.json" -b "$WORK/cookies2" > "$WORK/b2.config.json"
-jq -e --arg a "https://$SUB_DOMAIN/app/KirovVPN.apk" \
-  '[.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external" and .link == $a)] | length == 1' \
-  "$WORK/b2.config.json" >/dev/null || fail "the page does not show the download button"
+# What a friend's browser gets: without APK_URL, Kirov VPN's page offers the
+# build it finds on /app/.
+jq -e '.apkUrl == ""' <<<"$(page_config "$SUB_DOMAIN")" >/dev/null || fail "APK_URL left on Kirov VPN's page"
+[ "$(sub_code app/version.json)" = "200" ] || fail "the page finds no published app"
 pass "old default moved to the $RELEASE release; a missing release is quiet for the timer, an unseen repository is not; wrong checksum and temporary key refused; the page entry, remark and build of the former name taken over; replaced builds kept 13 h, then a redirect to the current one (also from the former name); KirovVPN.apk, KirovVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»; the Samsung and Huawei install tip with and without it"
 
-step "(c) the device is recorded (the limit itself is off)"
+step "(c) the device is recorded without the friend's IP (the limit itself is off); no history, no page log"
 USER_ID="$(api "/api/users/by-username/friend_1" | jq -r '.response.id')"
-api "/api/hwid/devices/$USER_ID" | jq -c '.response.devices[] | {hwid, platform, osVersion, deviceModel, userAgent}' | tee "$WORK/c.devices"
+api "/api/hwid/devices/$USER_ID" | jq -c '.response.devices[] | {hwid, platform, osVersion, deviceModel, userAgent, requestIp}' | tee "$WORK/c.devices"
 grep -q "\"hwid\":\"$HWID\"" "$WORK/c.devices" || fail "device not recorded"
+# Caddy gives the page 127.0.0.1 instead of the friend's address.
+jq -se 'all(.requestIp == "127.0.0.1")' "$WORK/c.devices" >/dev/null || fail "the panel got the friend's IP"
 api /api/subscription-settings | jq -c '.response.hwidSettings'
 kp list-users
-pass "device recorded"
+srh="$(docker exec remnawave-db psql -qAt -U "$(sed -n 's/^POSTGRES_USER=//p' "$WORK/opt/.env")" \
+  -d "$(sed -n 's/^POSTGRES_DB=//p' "$WORK/opt/.env")" -c 'select count(*) from user_subscription_request_history')"
+[ "$srh" = "0" ] || fail "the panel keeps a history of subscription downloads ($srh)"
+[ "$(docker inspect -f '{{.HostConfig.LogConfig.Type}}' remnawave-subscription-page)" = "none" ] ||
+  fail "the subscription page keeps a log"
+pass "device recorded with 127.0.0.1 instead of the friend's IP; no history of subscription downloads; no log of the page"
 
 step "(d) libxray parses the subscription and fetches a page through the node"
 retry 5 "$WORK/e2e" check -sub "$SUB" -resolve "$SUB_DOMAIN:127.0.0.1" -cacert "$WORK/caddy-root.crt" \
