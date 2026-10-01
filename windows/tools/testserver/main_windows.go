@@ -6,6 +6,10 @@
 // connections are bound to the physical network the way the service's
 // are (netbind), or they would loop back into the tunnel. Its DNS is DoH,
 // which the tunnel's DNS filter leaves alone.
+//
+// The app sends most sites by address, so the server reads the site's name
+// from the connection and sends the test site, gstatic.com, through an
+// outbound of that name: its access log then names the site either way.
 package main
 
 import (
@@ -62,9 +66,14 @@ func main() {
 	    "listen": "127.0.0.1", "port": %d, "protocol": "vless",
 	    "settings": {"clients": [{"id": %q, "flow": "xtls-rprx-vision"}], "decryption": "none"},
 	    "streamSettings": {"network": "raw", "security": "reality", "realitySettings": {
-	      "target": %q, "serverNames": ["example.com"], "privateKey": %q, "shortIds": ["ab12"]}}
+	      "target": %q, "serverNames": ["example.com"], "privateKey": %q, "shortIds": ["ab12"]}},
+	    "sniffing": {"enabled": true, "destOverride": ["tls", "http"], "routeOnly": true}
 	  }],
-	  "outbounds": [{"protocol": "freedom", "settings": {"domainStrategy": "UseIPv4"}}]
+	  "outbounds": [
+	    {"protocol": "freedom", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4"}}},
+	    {"tag": "gstatic", "protocol": "freedom", "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4"}}}
+	  ],
+	  "routing": {"rules": [{"domain": ["domain:gstatic.com"], "outboundTag": "gstatic"}]}
 	}`, *logFile, port, id, target, b64(priv.Bytes()))
 	inst, err := core.StartInstance("json", []byte(cfg))
 	if err != nil {

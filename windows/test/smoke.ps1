@@ -73,8 +73,9 @@ function DirectDns {
 
 function ServiceProcess { Get-Process -Id (Get-CimInstance Win32_Service -Filter "Name='KirovVPN'").ProcessId }
 
-# Lines of the server's access log for gstatic: how often the test site
-# was reached through the server.
+# Lines of the server's access log for gstatic, by name or by the outbound
+# the server sends it through: how often the test site was reached through
+# the server.
 function Through { @(Select-String -Path "$work\server.log" -Pattern 'gstatic' -ErrorAction SilentlyContinue).Count }
 
 # Saves settings and waits until the tunnel has restarted with them.
