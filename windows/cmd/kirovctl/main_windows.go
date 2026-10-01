@@ -3,6 +3,7 @@
 // shipped.
 //
 //	kirovctl wait-service    wait until the service answers
+//	kirovctl pipe-sddl       print the pipe's owner, permissions and label
 //	kirovctl status          print the status
 //	kirovctl import          add the keys read from standard input
 //	kirovctl connect         connect and wait until connected
@@ -20,16 +21,31 @@ import (
 	"time"
 
 	"github.com/klausms17/vpn/windows/internal/ipc"
+	"golang.org/x/sys/windows"
 )
 
 const timeout = 90 * time.Second
 
 func main() {
 	if len(os.Args) != 2 {
-		fail(errors.New("usage: kirovctl wait-service | status | import | connect | disconnect"))
+		fail(errors.New("usage: kirovctl wait-service | pipe-sddl | status | import | connect | disconnect"))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	if os.Args[1] == "pipe-sddl" {
+		conn, err := ipc.Dial(ctx)
+		if err != nil {
+			fail(err)
+		}
+		defer conn.Close()
+		sd, err := windows.GetSecurityInfo(windows.Handle(conn.Fd()), windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.LABEL_SECURITY_INFORMATION)
+		if err != nil {
+			fail(err)
+		}
+		fmt.Println(sd.String())
+		return
+	}
 	if os.Args[1] == "wait-service" {
 		for {
 			if conn, err := ipc.Dial(ctx); err == nil {

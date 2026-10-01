@@ -86,6 +86,8 @@ try {
   Check ($run.'Kirov VPN' -like '*KirovVPN.exe" --tray') 'the tray icon starts at logon'
   $acl = (Get-Acl $data).Access | ForEach-Object { $_.IdentityReference.Value }
   Check (-not ($acl | Where-Object { $_ -notmatch 'SYSTEM|Administrators|Администраторы' })) "only SYSTEM and administrators may open the data folder ($($acl -join ', '))"
+  $sddl = "$(Ctl pipe-sddl)"
+  Check ($sddl -match '^O:SY' -and $sddl -match ';;;IU\)' -and $sddl -match 'S:\(ML;;NWNRNX;;;ME\)') "the pipe is SYSTEM's, for signed-in users and not for sandboxes ($sddl)"
   Write-Host '::endgroup::'
 
   Write-Host '::group::The window loads'
