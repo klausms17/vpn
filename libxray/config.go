@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -75,6 +76,11 @@ type BuildOptions struct {
 	DirectRules []string `json:"directRules"`
 	ProxyRules  []string `json:"proxyRules"`
 	BlockRules  []string `json:"blockRules"`
+	// Programs, by file name ("qbittorrent.exe"), whose connections go
+	// directly or through the proxy whatever they connect to. Xray finds
+	// the program of a connection in the system's tables (Windows).
+	DirectPrograms []string `json:"directPrograms"`
+	ProxyPrograms  []string `json:"proxyPrograms"`
 
 	LogLevel string `json:"logLevel"` // none|error|warning|info|debug
 	LogFile  string `json:"logFile"`
@@ -329,19 +335,24 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 	if !o.IPv6 {
 		rules = append(rules, rule{"ip": []string{"::/0"}, "outboundTag": blockTag})
 	}
-	// 4. User rules.
-	for _, ur := range []struct {
-		entries []string
-		tag     string
-	}{{o.BlockRules, blockTag}, {o.DirectRules, DirectTag}, {o.ProxyRules, ProxyTag}} {
-		domains, ips := splitUserRules(ur.entries)
-		if len(domains) > 0 {
-			rules = append(rules, rule{"domain": domains, "outboundTag": ur.tag})
+	// 4. User rules: blocked sites, then programs, then sites.
+	rules = append(rules, userRules(o.BlockRules, blockTag)...)
+	for _, up := range []struct {
+		names []string
+		tag   string
+	}{{o.DirectPrograms, DirectTag}, {o.ProxyPrograms, ProxyTag}} {
+		var names []string
+		for _, n := range up.names {
+			if n = programName(n); n != "" && !slices.Contains(names, n) {
+				names = append(names, n)
+			}
 		}
-		if len(ips) > 0 {
-			rules = append(rules, rule{"ip": ips, "outboundTag": ur.tag})
+		if len(names) > 0 {
+			rules = append(rules, rule{"process": names, "outboundTag": up.tag})
 		}
 	}
+	rules = append(rules, userRules(o.DirectRules, DirectTag)...)
+	rules = append(rules, userRules(o.ProxyRules, ProxyTag)...)
 	// 5. The mode itself. Known limitation: a UDP socket is routed once, by
 	// its first packet (Xray's full-cone NAT keys a flow by the app's port
 	// only). If a call, game or DHT socket first talks to a Russian IP, its
@@ -495,62 +506,121 @@ func buildDNS(o *BuildOptions, localNames []string) map[string]any {
 
 var domainRe = regexp.MustCompile(`^[a-z0-9\p{L}_]([a-z0-9\p{L}_-]*[a-z0-9\p{L}_])?(\.[a-z0-9\p{L}_]([a-z0-9\p{L}_-]*[a-z0-9\p{L}_])?)*\.?$`)
 
+// userRules routes the domains and addresses of entries to tag.
+func userRules(entries []string, tag string) []rule {
+	var rules []rule
+	domains, ips := splitUserRules(entries)
+	if len(domains) > 0 {
+		rules = append(rules, rule{"domain": domains, "outboundTag": tag})
+	}
+	if len(ips) > 0 {
+		rules = append(rules, rule{"ip": ips, "outboundTag": tag})
+	}
+	return rules
+}
+
 // splitUserRules converts user entries into Xray domain and IP matchers,
 // silently dropping anything invalid so a typo can never stop the VPN.
 func splitUserRules(entries []string) (domains, ips []string) {
 	for _, e := range entries {
-		e = strings.TrimSpace(strings.ToLower(e))
-		if e == "" || strings.HasPrefix(e, "#") {
-			continue
+		domain, ip := userRule(e)
+		if domain != "" {
+			domains = append(domains, domain)
 		}
-		if prefix, rest, ok := strings.Cut(e, ":"); ok {
-			switch prefix {
-			case "domain", "full", "keyword":
-				if rest != "" && (prefix == "keyword" || domainRe.MatchString(rest)) {
-					domains = append(domains, prefix+":"+rest)
-				}
-				continue
-			case "regexp":
-				if _, err := regexp.Compile(rest); err == nil && rest != "" {
-					domains = append(domains, e)
-				}
-				continue
-			case "http", "https":
-				// A pasted URL: keep the host.
-				if h := hostFromURL(e); h != "" {
-					domains = append(domains, "domain:"+h)
-				}
-				continue
-			}
-		}
-		if pfx, err := netip.ParsePrefix(e); err == nil {
-			if pfx.Addr().Is4In6() {
-				// Xray reads "::ffff:1.2.3.4/128" as IPv4 and then refuses
-				// the length: write it as IPv4, and drop a prefix shorter
-				// than the mapped range.
-				if pfx.Bits() < 96 {
-					continue
-				}
-				pfx = netip.PrefixFrom(pfx.Addr().Unmap(), pfx.Bits()-96)
-			}
-			ips = append(ips, pfx.Masked().String())
-			continue
-		}
-		if addr, err := netip.ParseAddr(e); err == nil {
-			// Xray refuses a zone ("fe80::1%wlan0", even "fe80::1%wlan0/64"),
-			// and link-local addresses never enter the tunnel anyway.
-			if addr.Zone() == "" {
-				ips = append(ips, addr.Unmap().String())
-			}
-			continue
-		}
-		e = strings.TrimPrefix(e, "*.")
-		e = strings.TrimPrefix(e, ".")
-		if domainRe.MatchString(e) {
-			domains = append(domains, "domain:"+strings.TrimSuffix(e, "."))
+		if ip != "" {
+			ips = append(ips, ip)
 		}
 	}
 	return domains, ips
+}
+
+// UserRuleEntry checks a site the user typed for the rule lists of
+// BuildOptions: a domain ("example.com", "*.example.com"), an address or a
+// network, a link (its host is kept) or one of Xray's forms ("domain:",
+// "full:", "keyword:", "regexp:"). It returns the entry as it is to be
+// saved, or "" if it is none of those.
+func UserRuleEntry(entry string) string {
+	domain, ip := userRule(entry)
+	switch {
+	case ip != "":
+		return ip
+	case domain == "":
+		return ""
+	}
+	e := strings.TrimSpace(strings.ToLower(entry))
+	if prefix, _, ok := strings.Cut(e, ":"); ok && (prefix == "domain" || prefix == "full" || prefix == "keyword" || prefix == "regexp") {
+		return e
+	}
+	return strings.TrimPrefix(domain, "domain:")
+}
+
+// userRule converts one user entry into an Xray domain or IP matcher; both
+// are "" for an entry that is not valid.
+func userRule(e string) (domain, ip string) {
+	e = strings.TrimSpace(strings.ToLower(e))
+	if e == "" || strings.HasPrefix(e, "#") {
+		return "", ""
+	}
+	if prefix, rest, ok := strings.Cut(e, ":"); ok {
+		switch prefix {
+		case "domain", "full", "keyword":
+			if rest != "" && (prefix == "keyword" || domainRe.MatchString(rest)) {
+				return prefix + ":" + rest, ""
+			}
+			return "", ""
+		case "regexp":
+			if _, err := regexp.Compile(rest); err == nil && rest != "" {
+				return e, ""
+			}
+			return "", ""
+		case "http", "https":
+			// A pasted URL: keep the host.
+			if h := hostFromURL(e); h != "" {
+				return "domain:" + h, ""
+			}
+			return "", ""
+		}
+	}
+	if pfx, err := netip.ParsePrefix(e); err == nil {
+		if pfx.Addr().Is4In6() {
+			// Xray reads "::ffff:1.2.3.4/128" as IPv4 and then refuses
+			// the length: write it as IPv4, and drop a prefix shorter
+			// than the mapped range.
+			if pfx.Bits() < 96 {
+				return "", ""
+			}
+			pfx = netip.PrefixFrom(pfx.Addr().Unmap(), pfx.Bits()-96)
+		}
+		return "", pfx.Masked().String()
+	}
+	if addr, err := netip.ParseAddr(e); err == nil {
+		// Xray refuses a zone ("fe80::1%wlan0", even "fe80::1%wlan0/64"),
+		// and link-local addresses never enter the tunnel anyway.
+		if addr.Zone() == "" {
+			return "", addr.Unmap().String()
+		}
+		return "", ""
+	}
+	e = strings.TrimPrefix(e, "*.")
+	e = strings.TrimPrefix(e, ".")
+	if domainRe.MatchString(e) {
+		return "domain:" + strings.TrimSuffix(e, "."), ""
+	}
+	return "", ""
+}
+
+// programName is the name a process rule matches for a program the user
+// gave by its file name ("Telegram.exe"), or "" for anything that is not
+// a plain file name.
+func programName(name string) string {
+	name = strings.TrimSpace(name)
+	if len(name) > 4 && strings.EqualFold(name[len(name)-4:], ".exe") {
+		name = name[:len(name)-4]
+	}
+	if name == "" || len(name) > 255 || strings.ContainsAny(name, `/\:*?"<>|`) || strings.TrimLeft(name, ".") == "" {
+		return ""
+	}
+	return name
 }
 
 func hostFromURL(s string) string {

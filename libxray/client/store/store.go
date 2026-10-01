@@ -121,8 +121,11 @@ func (s *Store[T]) Update(transform func(T) T) (T, error) {
 	return next, s.save(after)
 }
 
+// decode reads data over the default, so that fields the file lacks (it
+// was written before they existed) keep their defaults, as kotlinx
+// serialization does on Android.
 func (s *Store[T]) decode(data []byte) (T, error) {
-	var v T
+	v := s.def()
 	if s.codec != nil {
 		plain, err := s.codec.Open(data)
 		if err != nil {

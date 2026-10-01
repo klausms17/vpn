@@ -237,6 +237,29 @@ func TestMissingFileStartsFromTheDefault(t *testing.T) {
 	}
 }
 
+func TestFieldsTheFileLacksKeepTheirDefaults(t *testing.T) {
+	type settings struct {
+		Mode string `json:"mode"`
+		On   bool   `json:"on"`
+	}
+	path := filepath.Join(t.TempDir(), "settings.json")
+	s := New(path, func() settings { return settings{Mode: "ru_direct", On: true} }, nil, func(string) {})
+	// Written by a version that had only the mode.
+	if err := os.WriteFile(path, []byte(`{"mode":"global"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ReadStrict(); err != nil || got != (settings{Mode: "global", On: true}) {
+		t.Errorf("%+v %v", got, err)
+	}
+	// A field the file has wins over its default.
+	if err := os.WriteFile(path, []byte(`{"mode":"global","on":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Read(); got.On {
+		t.Errorf("%+v", got)
+	}
+}
+
 // xorCodec stands in for DPAPI: what it sealed it opens, anything else fails.
 type xorCodec struct{}
 

@@ -1,8 +1,6 @@
 package tunnel
 
 import (
-	"bytes"
-	"io"
 	"os"
 	"sync"
 
@@ -30,7 +28,7 @@ func TrimLog(path string, maxBytes int64, keepBytes int) bool {
 	defer trimMu.Unlock()
 	old := path + ".1"
 	if st, err := os.Stat(old); err == nil && st.Size() > maxBytes {
-		if end, err := LastBytes(old, keepBytes); err == nil {
+		if end, err := fsx.LastBytes(old, keepBytes); err == nil {
 			_ = os.WriteFile(old, end, 0o600)
 		}
 	}
@@ -38,7 +36,7 @@ func TrimLog(path string, maxBytes int64, keepBytes int) bool {
 	if err != nil || st.Size() <= maxBytes {
 		return false
 	}
-	end, err := LastBytes(path, keepBytes)
+	end, err := fsx.LastBytes(path, keepBytes)
 	if err != nil {
 		return false
 	}
@@ -51,28 +49,4 @@ func TrimLog(path string, maxBytes int64, keepBytes int) bool {
 		return false
 	}
 	return os.Truncate(path, 0) == nil
-}
-
-// LastBytes returns at most the last limit bytes of the file at path,
-// starting at a line.
-func LastBytes(path string, limit int) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	// One byte more, to see whether the kept part begins a line.
-	start := max(st.Size()-int64(limit)-1, 0)
-	buf := make([]byte, st.Size()-start)
-	if _, err := f.ReadAt(buf, start); err != nil && err != io.EOF {
-		return nil, err
-	}
-	if start > 0 {
-		buf = buf[bytes.IndexByte(buf, '\n')+1:]
-	}
-	return buf, nil
 }

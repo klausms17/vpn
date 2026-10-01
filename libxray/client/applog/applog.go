@@ -64,3 +64,20 @@ func (l *Log) line(level byte, msg string) {
 	_, _ = f.Write(b.Bytes())
 	_ = f.Close()
 }
+
+// Tail returns the end of the log at path for the user to read or send: at
+// most limit bytes, from a line start, of the file it moved to ("<path>.1")
+// and of the log itself. IP addresses are masked again, and with hosts host
+// names too (for the core's log, which names sites).
+func Tail(path string, limit int, hosts bool) string {
+	cur, _ := fsx.LastBytes(path, limit)
+	var old []byte
+	if room := limit - len(cur); room > 0 {
+		old, _ = fsx.LastBytes(path+".1", room)
+	}
+	text := redact.IPs(string(old) + string(cur))
+	if hosts {
+		text = redact.Hosts(text)
+	}
+	return text
+}

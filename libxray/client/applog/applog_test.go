@@ -52,3 +52,19 @@ func TestIPAddressesAreMasked(t *testing.T) {
 		t.Errorf("log %q", data)
 	}
 }
+
+func TestTailJoinsTheMovedLogAndMasks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "xray.log")
+	os.WriteFile(path+".1", []byte("old line\nfailed to dial 203.0.113.7:443\n"), 0o600)
+	os.WriteFile(path, []byte("lookup rutracker.org failed\n"), 0o600)
+	if got := Tail(path, 1<<10, true); got != "old line\nfailed to dial [IP]:443\nlookup [host] failed\n" {
+		t.Errorf("core log %q", got)
+	}
+	// Without hosts the names stay; the limit keeps the newest lines.
+	if got := Tail(path, 60, false); got != "failed to dial [IP]:443\nlookup rutracker.org failed\n" {
+		t.Errorf("app log %q", got)
+	}
+	if got := Tail(filepath.Join(t.TempDir(), "missing.log"), 100, false); got != "" {
+		t.Errorf("missing log %q", got)
+	}
+}
