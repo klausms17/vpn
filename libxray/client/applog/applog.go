@@ -6,14 +6,13 @@ package applog
 
 import (
 	"bytes"
-	"net/netip"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/klausms17/vpn/libxray/internal/fsx"
+	"github.com/klausms17/vpn/libxray/internal/redact"
 )
 
 // MaxBytes is the size above which the log moves to "<name>.1".
@@ -49,7 +48,7 @@ func (l *Log) line(level byte, msg string) {
 	b.WriteByte(' ')
 	b.WriteByte(level)
 	b.WriteByte(' ')
-	b.WriteString(MaskIPs(msg))
+	b.WriteString(redact.IPs(msg))
 	b.WriteByte('\n')
 
 	l.mu.Lock()
@@ -64,23 +63,4 @@ func (l *Log) line(level byte, msg string) {
 	}
 	_, _ = f.Write(b.Bytes())
 	_ = f.Close()
-}
-
-// Candidates only: netip decides, so times and version numbers stay.
-var (
-	ipv4Like = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
-	ipv6Like = regexp.MustCompile(`(?i)[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}(?:%\w+)?`)
-)
-
-// MaskIPs replaces the IP addresses in text with "[IP]".
-func MaskIPs(text string) string {
-	for _, re := range []*regexp.Regexp{ipv4Like, ipv6Like} {
-		text = re.ReplaceAllStringFunc(text, func(s string) string {
-			if _, err := netip.ParseAddr(s); err == nil {
-				return "[IP]"
-			}
-			return s
-		})
-	}
-	return text
 }

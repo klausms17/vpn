@@ -375,9 +375,9 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 	if logLevel == "" {
 		logLevel = "warning"
 	}
-	// No access or DNS log, and IP addresses masked: the log is for errors,
-	// not a record of what the user visited.
-	logCfg := map[string]any{"loglevel": logLevel, "access": "none", "dnsLog": false, "maskAddress": "full"}
+	// No access or DNS log: the log is for errors, not a record of what the
+	// user visited (see redactedFileLog).
+	logCfg := map[string]any{"loglevel": logLevel, "access": "none", "dnsLog": false}
 	if o.LogFile != "" {
 		logCfg["error"] = o.LogFile
 	}
