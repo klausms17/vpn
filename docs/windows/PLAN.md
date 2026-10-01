@@ -116,10 +116,10 @@ Android's UI process does imports, pings, subscription adds and update checks it
   - The heavy request, `import`, runs one at a time and fetches at most 16 certificates (four at once), each a connection outside the tunnel to whatever the key names.
   - Saved servers are capped at 1000 and their names at 100 characters, so the server list always fits in one message.
   - The window waits longer and longer before dialling again after a failed dial or a connection that ended at once.
-- **Operations** (phase 1 has `status`, `import`, `connect` and `disconnect`):
+- **Operations** (built so far: `status`, `import`, `connect`, `disconnect`, `select`, `rename`, `delete`, `ping`, `setSettings`, `logs`; events `hello`, `status`, `profiles`, `pings`, `settings`; protocol version 2):
   - connection: `status`, `connect {picked}`, `disconnect`, `reconnect {picked}`, `select`;
   - servers: `import {text}` (at most 256 KB, Android's cap), `refresh {subscription}`, `rename`, `delete`, `ping {ids}`, `pingAll`;
-  - settings and help: `settings`/`setSettings`, `logs` (the sections of Android's «Журнал»), `updateGeo`, `checkUpdate`, `installUpdate`, `diag`.
+  - settings and help: `settings`/`setSettings` (at most 1000 sites a list and 200 programs a list, each checked; programs by file name only), `logs` (the sections of Android's «Журнал»), `updateGeo`, `checkUpdate`, `installUpdate`, `diag`.
 - **Never accepted from the pipe:**
   - a file path (logs are returned as text, «Сохранить в файл» writes from the window);
   - a URL to download and run;
@@ -177,9 +177,10 @@ Android's UI process does imports, pings, subscription adds and update checks it
 3. Publish CONNECTED and run the START check.
 4. Stop does the same in reverse; Xray removes the filters, routes and adapter, and flushes the DNS cache.
 
-**Start failures** follow Android's `StartFailurePolicy`, with the same retries after 1.5 s and 5 s. "Another VPN active" becomes:
-- creating the adapter failed because another program holds the name;
-- or the routes could not be set.
+**Start failures** follow Android's `StartFailurePolicy` for a config that cannot be built. A core that fails to start is different on Windows: Xray sets up the adapter, its addresses and the filters in steps that fail now and then for a moment, most of all right after boot or sleep (the owner's first try showed it).
+- A start the user asked for is tried twice more (after 1.5 s and 5 s), quietly; one nobody asked for (boot, sleep, a reset) keeps trying for about two minutes (1.5, 5, 15, 30 and 60 s). Then the error shows and `should_run` is cleared, as on Android.
+- The error says what to do (`internal/service/explain.go`): another program's connected adapter holds the tunnel's address (named; "another VPN active", not retried); IPv6 is switched off in Windows (`DisabledComponents`; Xray configures the adapter's IPv6 interface even without IPv6 routes, so it cannot start); the adapter was not ready; the WFP filters failed. The core's own words go to the log.
+- Before each start the tunnel's address is taken off adapters that are not connected, as WireGuard does (`tunaddr_windows.go`).
 
 ### 2.5 Network changes, sleep and restarts
 
@@ -202,13 +203,13 @@ Android's UI process does imports, pings, subscription adds and update checks it
   - A bug in one of the engine's jobs does not take the service down: the panic is logged with its stack, the tunnel goes down and the window shows «Внутренняя ошибка Kirov VPN. Подключитесь снова.» (phase 1).
 - **Boot.** The service starts at boot (automatic, not delayed) and reconnects if the VPN was on (`should_run`). This replaces Android's always-on VPN and sticky restart.
   - Early in boot the adapter's IP interface may not exist yet. Xray retries for 15 seconds, and the service retries the start after that, as WireGuard does.
-  - The setting «Подключаться при включении компьютера» is on by default.
+  - The setting «Подключаться при запуске Windows» is on by default. Off, a service started within 5 minutes of boot clears `should_run` instead of resuming; a restart after a crash or an update still resumes.
 - **Hung service.** A watchdog in the service exits the process when its main loop stops responding. The WFP filters go with it, so a hang can never leave the PC without DNS.
 
 ### 2.6 What is not ported, and why
 
-- **Per-app bypass** («Российские сервисы», «Другие приложения»): Android lists app packages. On a PC Russian banks and services are mostly websites, which ru_direct already sends directly. Per-program rules come in phase 4 (row 15).
-- **Background and battery settings, OEM autostart, notification permission:** not meaningful on Windows. «Запускать Kirov VPN при входе» and «Подключаться при включении компьютера» replace them.
+- **Per-app bypass** («Российские сервисы», «Другие приложения»): Android lists app packages. On a PC Russian banks and services are mostly websites, which ru_direct already sends directly. Windows has per-program rules instead (built 1 Oct 2026, see section 10): «Программы без VPN» and «Программы через VPN», by file name, through Xray `process` rules, and «Торренты без VPN», on by default, for the common torrent clients (fast, and the server gets no complaints from rights holders).
+- **Background and battery settings, OEM autostart, notification permission:** not meaningful on Windows. The installer starts the tray icon at every sign-in, and «Подключаться при запуске Windows» replaces them.
 - **Private DNS hint:** Android only. Windows' encrypted DNS is handled by the WFP filters.
 - **Lockdown warning:** there is no system lockdown on Windows. A real kill switch («Блокировать интернет без VPN», persistent WFP filters) is optional, in phase 7.
 - **Camera QR:** replaced by QR from an image file, the clipboard or a screenshot (phase 3).
@@ -220,7 +221,7 @@ Android's UI process does imports, pings, subscription adds and update checks it
 | Home: big button, status line with colours, session timer, notices in priority order, auto-ping of the shown server | The same in the window, the orb of `klaus-page.html` as the button; tray icon in four states with the status as its tooltip | 1 (minimal), 3 |
 | Europe map with a pin on the server's country | The same map, redrawn in the light style, if it fits; otherwise a flag and country name | 3 |
 | Flags from the emoji in server names | A bundled SVG flag set (for example Twemoji, CC-BY 4.0, credited on «Лицензии»), because Windows draws flag emoji as two letters | 3 |
-| Server list: «Мои ключи» and one group per subscription with usage, notice, announce, refresh, «Проверить все серверы», ping grades, rename, copy key, delete | The same; right-click menu instead of long-press; copied keys excluded from clipboard history | 2, 3 |
+| Server list: «Мои ключи» and one group per subscription with usage, notice, announce, refresh, «Проверить все серверы», ping grades, rename, copy key, delete | The same; a «⋯» menu per server instead of long-press; copied keys excluded from clipboard history. Built: «Серверы» with select, check, «Проверить все», grades, rename, delete | 1 (keys), 2, 3 |
 | Add: paste, QR camera, manual entry, several keys, 256 KB cap, subscription link | Paste (also Ctrl+V anywhere in the window), manual entry, QR from an image file, a clipboard image or a screenshot (pure-Go decoder), drag and drop of text or an image | 2, 3 |
 | `klausvpn://add/…`, `import/…`, `install-config?url=` and the share intent, with the confirmation dialog | The same parser behind a registered protocol; the second launch hands the link to the running window, which asks «Добавить ключи или подписку?» | 2 |
 | Subscription requests with User-Agent and device headers; the response headers it reads; the merge rules; certificate pins | The same, in Go (section 5.2) | 2 |
@@ -228,8 +229,9 @@ Android's UI process does imports, pings, subscription adds and update checks it
 | Health checks, stall check, failover search, server switching, way back home, budgets, block reports, subscription refresh owed through the tunnel | The same rules and constants in Go; triggers per section 2.5 | 2 (logic), 4 (signals) |
 | Notifications (status, errors) | Tray tooltip and icon; toasts for errors and notices (toasts need a Start-menu shortcut with an AppUserModelID, made by the installer) | 3 |
 | Quick Settings tile, widget with ping | Tray menu: «Подключить» / «Отключить», server, «Проверить отклик», «Открыть», «Выход» | 3 |
-| Settings: «Надёжность» | «Подключаться при включении компьютера», «Запускать Kirov VPN при входе», notifications state | 3, 4 |
-| «Сообщить о проблеме»: the log sections | «Журнал» with «Компьютер» (Windows version and build, model, app version, WebView2 version, adapter and filter state, other VPN adapters found), service, window, Xray and crash logs; «Копировать» and «Сохранить в файл» | 3 |
+| Settings: «Надёжность» | «Подключаться при запуске Windows» (built); «Запускать Kirov VPN при входе», notifications state | 1, 3, 4 |
+| — | «Настройки» (built): the mode, sites directly, through the VPN or blocked, programs directly or through the VPN, «Торренты без VPN» | 1 |
+| «Сообщить о проблеме»: the log sections | «Журнал» with «Компьютер» (Windows version and build, model, app version, WebView2 version, adapter and filter state, other VPN adapters found), service, window, Xray and crash logs; «Копировать» and «Сохранить в файл». Built: the service, the core and the window, masked, with «Скопировать» | 1, 3 |
 | «Обновить списки» (about 90 MB, through the server, then directly) | The same, by the service | 4 |
 | Version, «Лицензии» | The same, plus wintun, Wails, WebView2 loader, Go and flag licences | 3 |
 | Update card (`version.json`, every 12 h, «Позже») | The same card; «Обновить» installs silently (section 7.3) | 5 |
@@ -512,6 +514,12 @@ Each phase ends in an installer built by CI that the owner installs and tries.
      - Wi-Fi ↔ cable, sleep and wake;
      - the network icon has no "no internet" mark;
      - the window's colours and text.
+   - Added on 1 Oct 2026 after the owner's first try, ahead of phases 2–4:
+     - the retries and explanations of a core that fails to start (section 2.4);
+     - three tabs in the window: VPN, «Серверы» (the list with each server's check, graded as Android's `pingGrade`, select, rename, delete, check all) and «Настройки»;
+     - settings, sealed with DPAPI (`data\settings.json`): Android's three modes, the user's sites directly, through the VPN or blocked (checked by libxray's `UserRuleEntry`), programs directly or through the VPN (picked from the disk) with torrents directly by default, and connecting at boot; a change restarts a running tunnel once, 0.8 s after the last of a burst;
+     - «Журнал»: the ends of the service's, the core's and the window's logs, with addresses and host names taken out, and «Скопировать»;
+     - the smoke test checks the server, the journal, a site and a program sent directly, a crash of the service, and another adapter holding the tunnel's address.
 2. **Subscriptions and the Android logic.**
    - Work: section 5.2 with its tests; the service runs it; servers and subscriptions in the window (add by link, refresh, select, ping, delete); `klausvpn://` registered.
    - CI proves: Go tests green on Linux; the smoke test adds a subscription from a local server.
@@ -524,7 +532,7 @@ Each phase ends in an installer built by CI that the owner installs and tries.
    - Work:
      - the triggers of section 2.5; stall check; way back home; recovery and `RestartGuard`; the watchdog; «Обновить списки»; idle CPU and memory budget;
      - a server switch without a break: the proxy outbounds replaced in the running core (row 25), so browsers see no «Сеть изменилась»; network resets behind a WFP hold or a kept adapter;
-     - «Программы без VPN» (row 15): banking clients, 1C, games with Russian servers and torrents go directly, through Xray `process` rules;
+     - «Программы без VPN» (row 15): built early (phase 1); left for this phase are more presets (1C, banking clients, games with Russian servers);
      - Wi-Fi that needs a sign-in (hotels, cafés): seen by the captive probe of section 2.5, the tunnel pauses for a minute by itself, the sign-in page opens, and the tunnel comes back once the internet works;
      - heavy downloads directly: Windows Update, Steam, Epic and driver downloads, by domain lists, so they are faster and cost the server nothing.
    - CI proves: unit tests for every trigger; the smoke test switches the runner's routes and checks a reset in place; a hot swap keeps a running download alive.

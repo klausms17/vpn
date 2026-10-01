@@ -48,11 +48,18 @@ and give step-by-step instructions for anything he must do himself.
     `TunnelEngine`), `internal/netbind` (keeps the service's own sockets
     and DNS outside the tunnel), `internal/ipc` (the protected pipe to the
     window) and `internal/winsys` (the data folder
-    `C:\Program Files\Kirov VPN\Data`, DPAPI).
+    `C:\Program Files\Kirov VPN\Data`, DPAPI). In `internal/service`:
+    `handler.go` answers the window, `settings.go` checks the settings
+    and holds the torrent clients, `pinger.go` checks servers,
+    `explain.go` turns the core's start errors into advice and
+    `tunaddr_windows.go` finds or frees an adapter holding the tunnel's
+    address.
   - `cmd/kirovvpn`: the tray icon and window (Wails v3, `internal/ui`; the
-    page is `internal/ui/frontend`). It holds no keys.
+    page is `internal/ui/frontend`, `origin.go` refuses calls from any
+    other page). It holds no keys.
   - `installer/KirovVPN.iss` (Inno Setup), `test/smoke.ps1` (CI only),
-    `tools/` (icons, exe resources, a test server).
+    `cmd/kirovctl` (the smoke test's pipe client, never shipped), `tools/`
+    (icons, exe resources, a test server, `othervpn` for CI).
 - `libxray/client/`: the Android logic ported to Go with its tests (model,
   store, key import, log, tunnel rules), used by Windows and later iOS.
   `libxray/internal/privileged` is the allowlist of what the Windows
@@ -87,7 +94,7 @@ and give step-by-step instructions for anything he must do himself.
 - `scripts/`: `build-libxray.sh` (AAR), `build-libxray-ios.sh`,
   `fetch-geo.sh`, `prepare-geo.sh`.
 - `docs/windows/PLAN.md`: the plan for the Windows app (section 1 lists
-  what was checked and decided; nothing is built yet).
+  what was checked and decided; section 10 the phases and what is built).
 - `docs/README.ru.md`: the owner's full guide in Russian: install, servers,
   whitelist mode, reliability, signing, panel and distribution.
 - `tools/jvm-check/`: a local compile-and-test of the plain Kotlin code
