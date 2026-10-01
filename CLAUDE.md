@@ -42,6 +42,18 @@ and give step-by-step instructions for anything he must do himself.
     `GeoFiles`, `ProfilesOps`.
   - `widget/`, `core/` (`XrayCore`, `CoreHandle`, `DirectNet`,
     `CoreErrors`) and `util/`.
+- `windows/`: the Windows app, a Go module of its own on top of `libxray`.
+  - `cmd/kirovvpn-service`: the service (LocalSystem). `internal/service`
+    wires `internal/engine` (start, stop and retries, Android's
+    `TunnelEngine`), `internal/netbind` (keeps the service's own sockets
+    and DNS outside the tunnel), `internal/ipc` (the protected pipe to the
+    window) and `internal/winsys` (data folder, DPAPI).
+  - `cmd/kirovvpn`: the tray icon and window (Wails v3, `internal/ui`; the
+    page is `internal/ui/frontend`). It holds no keys.
+  - `installer/KirovVPN.iss` (Inno Setup), `test/smoke.ps1` (CI only),
+    `tools/` (icons, exe resources, a test server).
+- `libxray/client/`: the Android logic ported to Go with its tests (model,
+  store, key import, log, tunnel rules), used by Windows and later iOS.
 - `ios/`: the iPhone app. `project.yml` is the XcodeGen spec; `App/`,
   `PacketTunnel/` and `Shared/` hold the code. The plan is in
   `docs/ios/PLAN.md` and the drafts for later phases are in
@@ -90,6 +102,12 @@ and give step-by-step instructions for anything he must do himself.
     friends, only for a `v*` tag or a manual run with "stable" ticked.
   - A push cancels the branch's running build. A build takes about 10–15
     minutes.
+  - `windows.yml` builds the Windows programs on Linux, runs libxray's
+    tests on a Windows runner, builds the installer, installs it there,
+    connects through a local REALITY server, checks DNS and IPv6, restarts
+    the tunnel 50 times and uninstalls. It publishes
+    `windows-build-<branch>` with `KirovVPN-Setup-1.0.<run>.exe`, and
+    `windows-stable` for a `v*` tag or a manual run with "stable" ticked.
   - `ios.yml` (Linux) runs the Go iOS checks. `ios-app.yml` (macOS) builds
     the unsigned app and checks the extension, its geo files and bitcode.
     The repository is public, so macOS minutes cost nothing.
@@ -103,6 +121,9 @@ and give step-by-step instructions for anything he must do himself.
   - iOS compile check of the core:
     `GOOS=ios GOARCH=arm64 CGO_ENABLED=0 go build .` and
     `GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go vet -tags ios .`
+  - Windows: `cd windows && go vet ./... && GOOS=windows go vet ./... && go test -race ./...`,
+    and `cd libxray && go test -race ./client/...`. The installer, the
+    core's tests on Windows and the smoke test run only in `windows.yml`.
   - Panel: start Docker (`dockerd &`; install `iproute2` if `ip` is
     missing), then `WORK=/tmp/rw bash server/remnawave/test/run-local.sh`.
     It takes about 25 minutes and must end with `ALL CHECKS PASSED`.
@@ -137,8 +158,9 @@ and give step-by-step instructions for anything he must do himself.
   UI into `UiSession` and `TunnelController`. The latest build is
   `KirovVPN-1.0.54.apk` on the `build-claude-compassionate-mayer-6jph8m`
   release, signed with a temporary key.
-- **Windows:** `docs/windows/PLAN.md` was written on 1 Oct 2026 from five
-  research reports; nothing is built yet.
+- **Windows:** phase 1 of `docs/windows/PLAN.md` is built (1 Oct 2026):
+  the service with Xray's TUN and WFP leak filters, the window and tray,
+  the installer and `windows.yml`. The owner has not tried it yet.
 - **iPhone:** phases 1–2 of `docs/ios/PLAN.md` are done. The Go core builds
   for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
   passes its checks (geo files in the extension, no bitcode). The app is
@@ -170,7 +192,9 @@ and give step-by-step instructions for anything he must do himself.
    is professional, fast and maintainable. The plan is
    `docs/windows/PLAN.md` (checked 1 Oct 2026); build it in its phases,
    each ending in a CI-built installer the owner tries. Phase 1, the tunnel
-   on the owner's PC, is next. In brief:
+   on the owner's PC, is built; the owner tries its installer (the checks
+   are in the plan's section 10), then phase 2 (subscriptions and the
+   Android logic). In brief:
    - Go only. An elevated service (LocalSystem) holds libxray and the
      Android logic, ported to `libxray/client/` with its JVM tests. A
      per-user tray icon and window (Wails v3, a pinned beta, on WebView2)

@@ -1,11 +1,11 @@
 # Kirov VPN for Windows: implementation plan (checked 1 Oct 2026)
 
-**Status (1 Oct 2026):** plan only, nothing is built yet. Phase 1 (section 10) is next. Five research reports went into it: the Android app's features, libxray and Xray on Windows, the panel side, Windows networking and services, and the UI, installer, signing and CI. Section 1 lists where they disagreed and what decided it.
+**Status (1 Oct 2026):** phase 1 (section 10) is built and checked by `windows.yml`; the owner tries its installer next. The sections below describe it as built. Five research reports went into it: the Android app's features, libxray and Xray on Windows, the panel side, Windows networking and services, and the UI, installer, signing and CI. Section 1 lists where they disagreed and what decided it.
 
 ## 0. Decisions in brief
 
 - **Target.** Windows 10 (1809 or later; tested on 22H2) and Windows 11, x64 first. arm64 builds come from the same sources in phase 6.
-- **Same functions as Android, Windows-shaped.** Section 3 maps every Android feature. The tray icon replaces the notification, tile and widget. Per-program bypass and the mobile whitelist mode come later or not at all.
+- **Same functions as Android, Windows-shaped.** Section 3 maps every Android feature. The tray icon replaces the notification, tile and widget. Per-program bypass comes in phase 4; the mobile whitelist mode not at all.
 - **Two programs, both Go.**
   - `KirovVPNService.exe`: a Windows service running as LocalSystem. It owns the store, the core and every rule of the Android VPN process: health checks, stall detection, failover, server switching, subscription refresh, block reports and network changes.
   - `KirovVPN.exe`: one per signed-in user, unprivileged. It is the tray icon and the window (Wails v3 on WebView2, plain HTML/CSS/JS without npm, in the look of `server/remnawave/klaus-page.html`). It holds no keys and does no networking; it talks to the service over a named pipe.
@@ -42,18 +42,18 @@ The proposal is item 2 of "Next steps" in `CLAUDE.md`.
 | 1 | Go, libxray as a plain package | proposal | `GOOS=windows GOARCH=amd64` and `arm64`, `CGO_ENABLED=0`: `go build .`, `go vet ./...` and `go test -c` of libxray all pass unchanged. | Yes. No gomobile on Windows. |
 | 2 | wintun into the same netstack | proposal | Xray `proxy/tun/tun_windows.go`: wintun adapter with an md5(name) GUID, 8 MiB ring; `gateway` → addresses, `autoSystemRoutingTable` → on-link routes with metric 0, interface metric 0, MTU, `dns` → adapter DNS. libxray's tun settings carry only `name` and `mtu`, because Android's VpnService owns the interface. | Yes. The Windows config adds `gateway`, `dns` and the 65 IPv4 routes of `TunSettings`, so LAN stays outside as on Android. IPv6 per row 20. |
 | 3 | Does Xray block leaks on Windows? | core report: no WFP code anywhere; UI and network reports: Xray's TUN has WFP leak blocking | All are right. The pinned Xray (8 Sep 2026, `52a412d9e2f5`, v26.9.9) has none. v26.9.30 (30 Sep 2026, `b26a91de4f32`, XTLS/Xray-core PR 6853) adds `tun_windows_wfp.go` and the option `autoSystemWfpBlockLeak` (`"dns"`, `"misconfigtun"`). It also reuses an existing adapter by name (PR 6811), keeps Xray's own lookups off the tunnel's DNS (`internet.SkipDNSServers`), turns off DNS registration of the adapter, and flushes the DNS cache at start and stop. v2rayN switched it on on 1 Oct 2026. | Move to Xray ≥ v26.9.30 and wireguard/windows v1.1.1, which fixes a winipcfg callback deadlock (section 5.1). Use both values and rely on Xray for the details: for example, DNS-over-HTTPS of Windows 11's DNS Client is covered there. |
-| 4 | Xray's own socket binder (`autoOutboundsInterface`) | core and network reports | It is turned on automatically whenever `autoSystemRoutingTable` is set (`infra/conf/tun.go:38-40`). Problems, unchanged in v26.9.30: <br>• any Wi-Fi default route wins over a lower-metric Ethernet one (`findOutboundInterface`, since PR 6478); <br>• it uses the IPv4 interface metric for both families; <br>• each Start appends one more global controller; <br>• after Stop it keeps binding to the last interface, so pings made while disconnected can leave through a network that is gone. <br>Windows itself, WireGuard, sing-tun and Tailscale all pick the lowest metric. | Turn it off (`"autoOutboundsInterface": ""`). libxray registers one binder of its own: <br>• per address family, the lowest route-plus-interface metric among connected interfaces, skipping ours (wireguard-windows' `findDefaultLUID`); <br>• for TCP, it binds only when Windows would send the destination into our tunnel (`GetBestInterfaceEx`, Tailscale's "bind by route"), so a corporate VPN or a second NIC keeps its routes; <br>• active only while the tunnel runs; it refuses the dial when no interface is known. <br>Offer the metric fix upstream. |
-| 5 | The service's own DNS lookups | (found while checking 4) | Xray dials an outbound whose server is a domain with Go's default resolver (`system_dialer.go:144`). Go on Windows uses Windows' resolver unless `PreferGo` is set (`net/conf.go:166-176`), and Windows sends the query to the adapter with metric 0: the tunnel's 198.18.0.2. The answer would need DoH through the very proxy being dialed. Xray v26.9.30 fixes this only together with its own binder (`resolveOnOwn`). | While the tunnel runs, `net.DefaultResolver` uses `PreferGo` with the bound dial and skips `internet.IsSkippedDNSServer`. Go then reads only adapters that have a gateway (`net/dnsconfig_windows.go:35-38`). Profile outbounds also get `sockopt.domainStrategy` with a `localhost` DNS entry for their server names, so the answer is cached. |
+| 4 | Xray's own socket binder (`autoOutboundsInterface`) | core and network reports | It is turned on automatically whenever `autoSystemRoutingTable` is set (`infra/conf/tun.go:38-40`). Problems, unchanged in v26.9.30: <br>• any Wi-Fi default route wins over a lower-metric Ethernet one (`findOutboundInterface`, since PR 6478); <br>• it uses the IPv4 interface metric for both families; <br>• each Start appends one more global controller; <br>• after Stop it keeps binding to the last interface, so pings made while disconnected can leave through a network that is gone. <br>Windows itself, WireGuard, sing-tun and Tailscale all pick the lowest metric. | Turn it off (`"autoOutboundsInterface": ""`). The service registers one binder of its own (`windows/internal/netbind`): <br>• per address family, the lowest route-plus-interface metric among connected interfaces, skipping ours (wireguard-windows' `findDefaultLUID`); <br>• for TCP, it binds only when Windows would send the destination into our tunnel (`GetBestInterfaceEx`, Tailscale's "bind by route"), so a corporate VPN or a second NIC keeps its routes; <br>• active only while the tunnel runs, and binding every socket while the core starts; <br>• with no interface known, it binds the socket to loopback and refuses the dial, so even a dialer that ignores the error (Xray's) cannot loop. <br>Offer the metric fix upstream. |
+| 5 | The service's own DNS lookups | (found while checking 4) | Xray dials an outbound whose server is a domain with Go's default resolver (`system_dialer.go:144`). Go on Windows uses Windows' resolver unless `PreferGo` is set (`net/conf.go:166-176`), and Windows sends the query to the adapter with metric 0: the tunnel's 198.18.0.2. The answer would need DoH through the very proxy being dialed. Xray v26.9.30 fixes this only together with its own binder (`resolveOnOwn`). | `net.DefaultResolver` uses Go's resolver for good, set once at start so that no lookup races with a change. Its dial skips `internet.IsSkippedDNSServer` and, while the tunnel runs, is bound. Go reads only adapters that have a gateway (`net/dnsconfig_windows.go:35-38`). Profile outbounds also get `sockopt.domainStrategy` with a `localhost` DNS entry for the running profile's server names, so the answer is cached. |
 | 6 | An elevated service with a per-user window | proposal | Microsoft: WebView2 "cannot be run as a system user" and should live in a non-elevated process. Creating a wintun adapter, routes and WFP filters needs admin or SYSTEM. | Yes: the split is required, not only tidy. |
-| 7 | Named pipe with an ACL | proposal | Both `golang.zx2c4.com/wireguard/ipc/namedpipe` (already a dependency; MIT) and `github.com/Microsoft/go-winio` v0.6.2 (MIT) take a security descriptor. `GENERIC_WRITE` includes `FILE_APPEND_DATA`, which for a pipe is `FILE_CREATE_PIPE_INSTANCE`: a client could add instances and pose as the server. Clash Verge's service had a world-reachable endpoint (CVE-2026-26422) and earlier ran a caller-given binary as SYSTEM (CVE-2025-50505). Its fix uses the mask `0x12019b` and checks the server's PID against the Service Control Manager. Tailscale puts its pipe under `ProtectedPrefix\Administrators`, where only administrators can create pipes. | Name `\\.\pipe\ProtectedPrefix\Administrators\KirovVPN\control`. SDDL `O:SYG:SYD:P(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12019b;;;IU)`. The window dials with `0x120083` and identification-level impersonation, then checks that the server PID is the KirovVPN service's. The service never takes paths, binaries, URLs or raw Xray JSON. Section 2.3. |
-| 8 | Wails on WebView2 | proposal | v2.16.0 (14 Sep 2026) is stable but has no tray (request #4990 is stale). v3.0.0-beta.26 (25 Sep 2026) has tray, single instance with argument forwarding, hidden start, `-tags server` for headless tests, no npm needed (`wails3 generate runtime`), windows/arm64, and about 10 MB binaries. Open v3 bug: the tray's right-click menu does not open on Windows (#6161; fix in PR #6162). | Wails v3, pinned to one exact beta. Left-click opens the window, which holds every control, so nothing depends on the menu. Carry PR #6162 with a `replace` until it ships. Fallback: `wailsapp/go-webview2` + `fyne-io/systray`. |
+| 7 | Named pipe with an ACL | proposal | Both `golang.zx2c4.com/wireguard/ipc/namedpipe` (already a dependency; MIT) and `github.com/Microsoft/go-winio` v0.6.2 (MIT) take a security descriptor. `GENERIC_WRITE` includes `FILE_APPEND_DATA`, which for a pipe is `FILE_CREATE_PIPE_INSTANCE`: a client could add instances and pose as the server. Clash Verge's service had a world-reachable endpoint (CVE-2026-26422) and earlier ran a caller-given binary as SYSTEM (CVE-2025-50505). Its fix uses the mask `0x12019b` and checks the server's PID against the Service Control Manager. Tailscale puts its pipe under `ProtectedPrefix\Administrators`, where only administrators can create pipes. | Name `\\.\pipe\ProtectedPrefix\Administrators\KirovVPN\control`. SDDL `O:SYG:SYD:P(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12019b;;;IU)`. The window dials with `0x120083` and identification-level impersonation, then checks that the pipe belongs to SYSTEM: only administrators and SYSTEM can create a pipe under that prefix, and an administrator owns the PC anyway. The service never takes paths, binaries, URLs or raw Xray JSON. Section 2.3. |
+| 8 | Wails on WebView2 | proposal | v2.16.0 (14 Sep 2026) is stable but has no tray (request #4990 is stale). v3.0.0-beta.26 (25 Sep 2026) has tray, single instance with argument forwarding, hidden start, `-tags server` for headless tests, no npm needed (`wails3 generate runtime`), windows/arm64, and about 10 MB binaries. Open v3 bug: the tray's right-click menu does not open on Windows (#6161; fix in PR #6162). | Wails v3, pinned to one exact beta. Left-click opens the window, which holds every control. Until a release carries PR #6162, the app shows the tray menu itself through Wails' `WndProcInterceptor` (`internal/ui/traymenu_windows.go`). Fallback: `wailsapp/go-webview2` + `fyne-io/systray`. |
 | 9 | Installer adds service, protocol and autostart | proposal | `windows-2025` (= `windows-latest`) has Inno Setup 6.7.1 and WiX 3.14 (out of community support since Feb 2025), no NSIS; `windows-11-arm` has Inno Setup only. Inno has a Russian translation, Restart Manager, silent mode, and hardening for running as SYSTEM (6.5–6.7). | Inno Setup. The service exe installs and removes the service itself (`install` / `uninstall`), so the installer stays small. |
 | 10 | Updates from `/app/version.json`, extended | proposal | `android.yml` deletes and recreates `stable` and `build-<branch>` as a whole, so a Windows asset uploaded by another workflow would vanish. `klaus-panel publish-apk` rewrites `version.json` with `jq -n`, and `refresh_version_json` breaks on a missing `.apk`. Android reads only the top-level `versionCode`, `apk` and `versionName`. | Own releases (`windows-build-<branch>`, `windows-stable`) and own files under `/app/windows/`: a `version.json` made and signed in CI, found relative to the `klaus-app-url` header (the iOS plan's precedent). The Android file stays as it is. |
 | 11 | Look of `klaus-page.html` | proposal | Tokens: `--ice #EEF3F9`, `--ink #0E1726`, `--slate #556173`, `--mist #7D8799`, `--blue #0A74FF`, `--blue-deep #0659D6`, `--mint #2FC8A8`; glass sheets with `backdrop-filter`, which WebView2 (Chromium) draws. Windows has no colour flag emoji (Segoe UI Emoji shows two letters instead). | Reuse the tokens and components; the orb becomes the big button. Flags come from a bundled SVG set (section 3). |
 | 12 | `KlausVPN/<ver> (Windows)` and the panel | proposal | The response rule matches `user-agent` against `^KlausVPN/`, case-sensitive (`klaus-panel:304-313`). Nothing keys on `(Android)` or on the device headers. Browser words in the User-Agent would get the web page. | Same treatment as Android. A PC counts as one more device under the HWID limit; the texts of `hwid-limit` and the guide say so. |
 | 13 | `x-hwid` from MachineGuid | proposal | MachineGuid is per Windows installation, readable by any user, and duplicated on cloned images. | Android's recipe on MachineGuid. If it is missing or invalid, a random id kept in the service's data folder, as Android does for a bad ANDROID_ID. |
 | 14 | Unsigned at first | proposal | SmartScreen (Microsoft, 4 May 2026): "EV certificates no longer bypass SmartScreen"; unsigned files build reputation per version from zero. Smart App Control blocks unsigned executables with no per-app exception. Azure Artifact Signing takes individuals only in the US and Canada. Certum suspended issuance for Russia and Belarus in 2022. SignPath Foundation is free but needs an OSI licence; the repository has none. | Unsigned for the owner's tests and the first friends. A Russian guide covers the Edge warning, SmartScreen, UAC and Smart App Control. The owner decides on a licence and SignPath before a wide rollout (phase 6). |
-| 15 | Per-program "apps without VPN" later | proposal | Xray routing has a `process` condition; on Windows it looks up the owner of a connection through `GetExtendedTcpTable`/`GetExtendedUdpTable` (`common/net/find_process_windows.go`). It only picks direct or proxy: the traffic still enters the tunnel. | Later (phase 7), as `process` rules to `direct`. No kernel driver. |
+| 15 | Per-program "apps without VPN" later | proposal | Xray routing has a `process` condition; on Windows it looks up the owner of a connection through `GetExtendedTcpTable`/`GetExtendedUdpTable` (`common/net/find_process_windows.go`). It only picks direct or proxy: the traffic still enters the tunnel. | Phase 4, at the owner's request (1 Oct 2026): `process` rules to `direct`. No kernel driver. |
 | 16 | No mobile whitelist mode | proposal | The Android logic marks "mobile data" from the cellular transport. On Windows only WWAN adapters are mobile; a phone used as a hotspot looks like Wi-Fi. | The shared logic keeps the flag; Windows sets it only for WWAN. No UI for it. |
 | 17 | Xray's Windows TUN maturity | core report | Two suspected bugs, both still in v26.9.30: <br>• The family loop calls `IPInterface(AF_INET6)` unconditionally (`tun_windows.go:179` in v26.9.30), so a PC with IPv6 disabled system-wide (`DisabledComponents`, which "optimizer" tools set) may not start the tunnel at all. <br>• `ReadPacket`/`Wait` do not lock against `Close` → `session.End()`, which can leave a stuck reader thread per Stop. | Phase 1 runs 50 Start/Stop cycles on the runner with a thread count. `DisabledComponents` needs a reboot, which a hosted runner cannot do, so test it on a VM or the owner's spare PC. Offer upstream a fix that skips a family with nothing configured. Use a `replace` to a fork only if upstream is slow. |
 | 18 | One process holds the core and all probes | Android report | A temporary core takes over Xray's global log handler and system dialer (`libxray.go:415-443`). Android escapes this with two processes; the Windows service is one. | One "core broker" in the service decides: while the tunnel runs, probes use `Controller.ProbeOutbounds` and downloads `FetchThroughTunnel`; temporary cores only while it is down. A test enforces it. |
@@ -61,7 +61,7 @@ The proposal is item 2 of "Next steps" in `CLAUDE.md`.
 | 20 | IPv6 into the tunnel, as on Android? | network report | gVisor answers a TCP handshake before Xray has chosen an outbound (Xray README, "Limitation"). An IPv6 connection to the refused `::/0` therefore "succeeds" and is then reset, which can stop a browser from falling back to IPv4. Android lives with it, because Xray's DNS gives no AAAA answers there. On Windows, `"misconfigtun"` blocks a family that has no tunnel routes at connect time. Microsoft advises against `DisabledComponents`. | IPv4 routes only, plus `"misconfigtun"`. A later IPv6 option (for servers with IPv6) routes `::/0` into the tunnel and drops it. |
 | 21 | Windows' "no internet" mark (NCSI) | network report | Windows probes `www.msftconnecttest.com/connecttest.txt` (and `dns.msftncsi.com` before Windows 11) on each interface. With a full tunnel, the physical interface reports no route, so the tunnel interface must pass the probe itself. If the server is down, Windows would mark the PC offline, and Store, Office or OneDrive stop working, while Russian sites still work directly. | The Windows config sends `msftconnecttest.com` and `msftncsi.com` directly. The adapter GUID stays stable (md5 of the name), so Windows keeps one network profile for it. Phase 1 checks the tray icon. |
 | 22 | Wintun version | network report | The newest tag is still 0.14.1 (17 Oct 2021); Xray's own CI pins it with SHA-256 `07c25618…`. Two race fixes landed on master in Feb–Mar 2026 (ring overrun under parallel UDP; a missed wake-up that stalls traffic 4–5 s), in no tagged or signed build yet. | Ship 0.14.1. The stall check tolerates hiccups of about 5 s. Watch for a newer signed build. |
-| 23 | Russian VPN detection on PCs | network report | The Mintsifry methodology (Apr 2026, from news summaries) has companies check desktops for virtual adapters (`IF_TYPE_PROP_VIRTUAL`: wintun's `*IfType` is 53), routes, DNS and unusual MTUs. Russian apps scan 127.0.0.1 for open proxies to learn the server's IP (Habr, Mar–Apr 2026). | No local listener of any kind: no SOCKS or HTTP inbound, no Xray API, no pprof. MTU 1500. The adapter itself cannot be hidden. Per-program routes (phase 7) can send Russian programs directly. |
+| 23 | Russian VPN detection on PCs | network report | The Mintsifry methodology (Apr 2026, from news summaries) has companies check desktops for virtual adapters (`IF_TYPE_PROP_VIRTUAL`: wintun's `*IfType` is 53), routes, DNS and unusual MTUs. Russian apps scan 127.0.0.1 for open proxies to learn the server's IP (Habr, Mar–Apr 2026). | No local listener of any kind: no SOCKS or HTTP inbound, no Xray API, no pprof. MTU 1500. The adapter itself cannot be hidden. Per-program routes (phase 4) can send Russian programs directly. |
 | 24 | Core in the service, or in a child process | network report | A child process (WireGuard runs one service per tunnel) would isolate Xray crashes and reset its process-wide state on every restart. It costs a second IPC channel. Android's `:vpn` process holds core and logic together. | One process, like Android's `:vpn`. The binder and resolver are ours, registered once, and the broker of row 18 handles the rest. Revisit only if Xray crashes show up in the field. |
 | 25 | Restarting the core on every server switch | network report | Each Stop removes the adapter, routes and filters; Start brings them back (section 2.4, point 8). Xray's outbound manager can replace the proxy outbounds in a running instance. | Phase 4 measures how long the gap is and what leaks during it. Server switches then replace the outbounds without a restart, and network resets restart the core (Android's behaviour) behind a WFP hold if needed. |
 
@@ -91,7 +91,7 @@ Android's UI process does imports, pings, subscription adds and update checks it
   - The service is the only writer, so no cross-process file lock is needed.
 - **`%LOCALAPPDATA%\Kirov VPN\`** (per user): `ui.log`, `ui.json` (dismissed update, window position, "do not start at logon"), and the WebView2 user data folder. The default folder next to the exe is not writable under Program Files.
 - **Privacy, as on Android:** no keys, links, IPs or server hostnames in any log; Go error texts never quote link bodies.
-- **Replacing files.** Go opens files without `FILE_SHARE_DELETE` and `os.Rename` does not retry, so an antivirus reading a file makes replacing it fail. A `replaceFile` helper retries for about 2 seconds; it is used for geo files, downloads and log rotation.
+- **Replacing files.** Go opens files without `FILE_SHARE_DELETE` and `os.Rename` does not retry, so an antivirus reading a file makes replacing it fail. `fsx.Replace` retries for about 2 seconds; it is used for geo files, downloads, saved data and log rotation.
 
 ### 2.3 Service and window: the pipe
 
@@ -101,13 +101,14 @@ Android's UI process does imports, pings, subscription adds and update checks it
   - SDDL: `O:SYG:SYD:P(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12019b;;;IU)`.
     - Interactive users get read and write without `FILE_APPEND_DATA`, which for pipes is `FILE_CREATE_PIPE_INSTANCE`, so they can talk but cannot add instances.
     - Network logons are denied explicitly.
-- **The window's side.** It dials with access `0x120083` at identification impersonation level. It checks that the server process (`GetNamedPipeServerProcessId`) is the running KirovVPN service, as `QueryServiceStatusEx` reports it.
-- **The service's side.** It reads the caller's user and session from its token: `ImpersonateNamedPipeClient` on a locked thread, then `RevertToSelf`; if that fails, the process exits. It uses them for logs and for answering the right session; caller identity grants no extra rights.
+- **The window's side.** It dials with access `0x120083` at identification impersonation level, overlapped, and checks that the pipe belongs to SYSTEM. `namedpipe`'s own dial asks for `GENERIC_WRITE`, which the ACL refuses users, so the window opens the pipe itself (`ipc.Dial`).
+- **The service's side** (phase 3, for toasts in the right session). It reads the caller's user and session from its token: `ImpersonateNamedPipeClient` on a locked thread, then `RevertToSelf`; if that fails, the process exits. Caller identity grants no extra rights.
 - **Messages.** Newline-delimited JSON.
-  - Requests `{id, op, args}` get `{id, ok, result | error}`.
-  - Events are pushed to subscribed windows: `status` (Android's `onStatus`: state, profile id and name, message, connected since), `profiles` (Android's `onProfilesChanged`), `busy` (the busy captions), `toast`.
-  - The protocol is versioned; a window of another version is told to restart after an update.
-- **Operations:**
+  - Requests `{id, op, args}` get `{id, result}` or `{id, error}`; the error is a Russian text the window shows as it is.
+  - Events go to every window: `hello` (the protocol version), `status` (Android's `onStatus`: state, profile id and name, message, connected since), `profiles` (Android's `onProfilesChanged`, without keys or links); later `busy` (the busy captions) and `toast`. A new window gets `hello`, `status` and `profiles` first.
+  - The protocol is versioned; a window of another version asks to be restarted after an update.
+  - Limits: 32 connections, 8 requests running per connection (more are told to wait), 64 queued messages (a window that reads no more is dropped), 2 MB per line.
+- **Operations** (phase 1 has `status`, `import`, `connect` and `disconnect`):
   - connection: `status`, `connect {picked}`, `disconnect`, `reconnect {picked}`, `select`;
   - servers: `import {text}` (at most 256 KB, Android's cap), `refresh {subscription}`, `rename`, `delete`, `ping {ids}`, `pingAll`;
   - settings and help: `settings`/`setSettings`, `logs` (the sections of Android's «Журнал»), `updateGeo`, `checkUpdate`, `installUpdate`, `diag`.
@@ -132,13 +133,13 @@ Android's UI process does imports, pings, subscription adds and update checks it
    - `autoSystemWfpBlockLeak`: `["dns", "misconfigtun"]`.
 
    The more specific routes beat the physical default route whatever its metric.
-2. **Binder.** libxray (Windows only) registers one dialer controller once per process.
+2. **Binder.** The service (`windows/internal/netbind`) registers one dialer controller once per process. The engine switches it on before the core starts and tells it once the core runs (`Activate`, `Settle`).
    - While the tunnel runs, it binds every socket of the service to the current physical interface with `IP_UNICAST_IF` / `IPV6_UNICAST_IF`. That covers the proxy, direct traffic to Russian sites, DNS to Yandex, probes, temporary cores, and libxray's own HTTP clients through a `direct` dialer.
    - It picks the default route with the lowest route-plus-interface metric per family, skipping our adapter (row 4 of section 1). Route, interface and address change callbacks keep the choice current, debounced. A callback is never unregistered from inside a callback, which Microsoft documents as a deadlock.
-   - It skips loopback, and refuses the dial if no physical interface is known.
-   - A TCP dial whose destination Windows would not send into our tunnel (a corporate VPN, a second NIC) is left alone.
+   - It skips loopback. If no physical interface is known, it binds the socket to loopback and refuses the dial.
+   - Once the core runs, a dial whose destination Windows would not send into our tunnel (a corporate VPN, a second NIC) is left alone. While it starts, every socket is bound.
    - While the tunnel is down it does nothing, so sockets follow the normal routes.
-3. **Resolver.** While the tunnel runs, `net.DefaultResolver` uses `PreferGo` with the bound dial and skips the tunnel's DNS servers (`internet.IsSkippedDNSServer`). libxray restores the previous resolver at Stop. Xray's own version of this (`resolveOnOwn`) runs only with Xray's binder, which is off.
+3. **Resolver.** `net.DefaultResolver` uses `PreferGo` for good, set once when the service starts, so no lookup races with a change. Its dial skips the tunnel's DNS servers (`internet.IsSkippedDNSServer`) and goes through the binder. Xray's own version of this (`resolveOnOwn`) runs only with Xray's binder, which is off.
 4. **DNS for apps,** unchanged from Android: port 53 into the tunnel goes to Xray's DNS module.
    - Russian domains go to Yandex directly; blocked and foreign domains go to DoH through the proxy.
    - `localhost` serves private and router names, and now asks the physical network's DNS servers directly (point 3).
@@ -152,7 +153,7 @@ Android's UI process does imports, pings, subscription adds and update checks it
 7. **LAN** (printers, casting, the router page) stays outside over IPv4, as on Android.
 8. **Restarts.** Xray removes the adapter, its routes and the filters at Stop, and creates them again at Start. Android's VPN interface outlives the core.
    - In between, about a second, traffic follows the physical routes, and browsers see a network change (Chrome may show `ERR_NETWORK_CHANGED` for requests in flight).
-   - Phase 1 measures it; phase 4 closes it (row 25):
+   - Phase 4 measures and closes it (row 25):
      - server switches replace the proxy outbounds in the running core;
      - resets after a network change hold traffic with WFP;
      - or Xray keeps the adapter across restarts (an upstream change: a process-wide adapter cache).
@@ -192,7 +193,7 @@ Android's UI process does imports, pings, subscription adds and update checks it
 
 ### 2.6 What is not ported, and why
 
-- **Per-app bypass** («Российские сервисы», «Другие приложения»): Android lists app packages. On a PC Russian banks and services are mostly websites, which ru_direct already sends directly. Per-program rules come in phase 7 (row 15).
+- **Per-app bypass** («Российские сервисы», «Другие приложения»): Android lists app packages. On a PC Russian banks and services are mostly websites, which ru_direct already sends directly. Per-program rules come in phase 4 (row 15).
 - **Background and battery settings, OEM autostart, notification permission:** not meaningful on Windows. «Запускать Kirov VPN при входе» and «Подключаться при включении компьютера» replace them.
 - **Private DNS hint:** Android only. Windows' encrypted DNS is handled by the WFP filters.
 - **Lockdown warning:** there is no system lockdown on Windows. A real kill switch («Блокировать интернет без VPN», persistent WFP filters) is optional, in phase 7.
@@ -224,30 +225,31 @@ Android's UI process does imports, pings, subscription adds and update checks it
 
 ```
 libxray/
-  tunwin.go               Windows tun settings for BuildConfig (pure, tested on Linux)
-  bind_windows.go         binder, interface picker, resolver while the tunnel runs
-  bind_other.go           nothing to do elsewhere
-  direct.go               dialer and transport for http.go, cert.go, geo.go (uses the binder)
-  replace_windows.go      replaceFile with retries; replace_other.go = os.Rename
+  windows.go              Windows tun settings and routing rules for BuildConfig (pure, tested on Linux)
+  direct.go               dialer and transport for http.go and cert.go through internet.Controllers
+  internal/fsx/           Replace: rename with retries on Windows (antivirus), os.Rename elsewhere
   client/                 the Android logic in Go (section 5.2), tested on Linux
 windows/
   go.mod                  module github.com/klausms17/vpn/windows; replace ../libxray
-  cmd/kirovvpn-service/   service entry; install, uninstall, stop subcommands for the installer
+  cmd/kirovvpn-service/   service entry; install, stop, uninstall for the installer
   cmd/kirovvpn/           tray and window (Wails v3)
   cmd/kirovctl/           test client for the pipe, CI only, never shipped
   internal/ipc/           protocol types, server, client, pipe transport; tests over net.Pipe
-  internal/service/       coordinator (Android's XrayVpnService): commands, state, wiring
-  internal/broker/        the only door to the core (row 18)
-  internal/netwatch/      power and session events, WWAN, captive probe; events from the binder
-  internal/winsys/        MachineGuid, OS version, model, ACLs, DNS flush, sessions, UI launch
-  internal/update/        manifest, signature, download, installer run
-  internal/ui/            Wails app: tray, window, single instance, toasts, deep links
-  ui/                     index.html, app.css, app.js, icons, flags (no npm)
-  installer/              KirovVPN.iss, Russian and English texts
-  assets/                 .ico files, manifests, version info (go-winres)
-  tools/signmanifest/     signs the update manifest in CI
+  internal/netbind/       binder and resolver (row 4, row 5); the interface picker is pure and tested on Linux
+  internal/engine/        start, stop, retries and resets of the tunnel (Android's TunnelEngine); tests with fakes
+  internal/service/       the Windows service: wiring, the pipe's handler, install and recovery
+  internal/winsys/        the protected data folder, DPAPI, elevation
+  internal/ui/            Wails app: link to the service, tray, window; frontend/ holds index.html, app.css, app.js
+  assets/                 app and tray icons, drawn by tools/mkicons and embedded
+  installer/              KirovVPN.iss
+  test/smoke.ps1          the smoke test of section 6
+  tools/mkicons/          draws the icons
+  tools/mkres/            the exes' icon, manifest and version as .syso
+  tools/testserver/       a local VLESS+REALITY server for the smoke test, never shipped
 .github/workflows/windows.yml
 ```
+
+Later phases add `internal/broker` (row 18), `internal/netwatch` (section 2.5), `internal/update` (section 7) and `tools/signmanifest`.
 
 The Windows module has its own `go.mod`, as the Remnawave e2e tool does, so Wails and Windows-only dependencies never reach the Android AAR. `android.yml` ignores `windows/**` and `windows.yml`.
 
@@ -262,14 +264,12 @@ The Windows module has its own `go.mod`, as the Remnawave e2e tool does, so Wail
    - If anything regresses on Android, only `windows/go.mod` requires the new versions until it is fixed (Go picks the highest requirement). The Windows-only code that needs the new Xray API then lives in the Windows module.
 2. **`BuildOptions.Windows`.** It adds:
    - the tun settings and routing rules of section 2.4;
-   - for profile outbounds, `sockopt.domainStrategy` plus a `localhost` DNS entry listing the server names of all saved profiles (row 5). Listing all of them lets a later hot swap (row 25) find its entry already there.
+   - for profile outbounds, `sockopt.domainStrategy` plus a `localhost` DNS entry listing the running profile's server names (row 5). The hot swap of phase 4 (row 25) lists every saved profile's, so the entry is there when it switches.
 
    Tests on Linux: the JSON of the inbound, IPv4 routes equal to `TunSettings` without `2000::/3`, and the extra rules and entry existing only on Windows. The options are passed as JSON, so the gomobile API and `tools/jvm-check/stubs` do not change.
-3. **Binder** (`bind_windows.go`, about 200 lines).
-   - Pure parts tested on Linux: the interface picker over route rows, and the "refuse when unknown" rule.
-   - `Controller.Start` turns it on when the config has a Windows tun inbound; `Stop` turns it off.
+3. **Binder:** in the Windows module (`internal/netbind`), not libxray, which stays free of Windows-only code. Its picker over route rows is pure and tested on Linux; the service switches it on around `Controller.Start` and off after `Stop`.
 4. **`direct.go`**: `http.go`, `cert.go` (TCP and the QUIC pin) and `geo.go` dial through `internet.Controllers`. No controller is registered on Android and iOS, so nothing changes there.
-5. **`replaceFile`** for `geo.go:200`, `http.go:327` and the crash-log rotation.
+5. **`fsx.Replace`** for `geo.go:200`, `http.go:327` and the crash-log rotation.
 6. **Tests on Windows** (CI): the whole suite with `GEO_DIR`, and again with `DESKTOP_MATCHER=1`. `TestMain` forces the mobile domain matcher, while desktop Xray uses the MPH matcher. Timing assertions that fail on Windows get Windows margins, never a skip.
 
 ### 5.2 The Android logic in Go (`libxray/client/`)
@@ -279,8 +279,9 @@ Ported one to one, with the JVM tests (234 today) as Go tests and the same fakes
 | Go package | Kotlin it replaces | Tests ported |
 |---|---|---|
 | `client/model`, `client/store` | `Models.kt`, `JsonFileStore`, `ProfilesOps`, `AppSettings` | `JsonFileStoreTest`, `ProfilesOpsTest`, `AppSettingsTest` |
+| `client/applog` | `AppLog` (the 128 KB log with one old file) | its own |
 | `client/subscription` | `SubscriptionUpdater`, `DeviceHeaders` (recipe, sanitising), `Pinned`, `ProfileImport` | `SubscriptionUpdaterTest`, `DeviceHeadersTest` (vector `0123456789abcdef` → `1012707cdd34d59dbc64b03534a44dc9`), `PinnedTest` |
-| `client/importer` | `ImportText`, `DeepLink` | `DeepLinkTest` and the import cases |
+| `client/importer` | `ImportText`, `DeepLink`, the key part of `MainViewModel.addLinks` (parse, pin four at a time, the result message) | `DeepLinkTest` and the import cases |
 | `client/tunnel` | `StartFailurePolicy`, `ResetScheduler`, `Epoch`, `HealthMonitor`, `TrafficCheck`, `FailoverSearch`, `Failover`, `FailureMemory`, `WhitelistLookup`, `ServerSwitcher`, `SubscriptionRefresher`, `NoticeBoard`, `VpnStatus`, `RuntimeState` rules, `RestartGuard` rules, `XrayLog` | every service test of section 10 of the Android report |
 | `client/report` | `BlockReport`, `BlockReporter` rules, `ReportThrottle` | `BlockReportTest` |
 | `client/appupdate` | `AppUpdate` (Android shape) plus the Windows manifest | `AppUpdateTest` plus manifest and signature tests |
@@ -303,7 +304,7 @@ Ported one to one, with the JVM tests (234 today) as Go tests and the same fakes
 - **Why LocalSystem and not a virtual service account:** creating the adapter (`SwDeviceCreate`), routes and interface settings needs an administrator. The first driver install also needs `SeLoadDriverPrivilege`. WireGuard, Mullvad and Tailscale all run as LocalSystem.
   - Privileges it never uses are dropped once phase 5 has settled the set: launching the tray app still needs `SeTcbPrivilege` for `WTSQueryUserToken`.
 - **Store at rest:** DPAPI for SYSTEM (`CryptProtectData` without the machine flag), as `golang.zx2c4.com/wireguard/windows/conf/dpapi` does.
-- **Pipe:** `golang.zx2c4.com/wireguard/ipc/namedpipe` (already a dependency).
+- **Pipe:** `golang.zx2c4.com/wireguard/ipc/namedpipe` (already a dependency) for the service's side; the window opens the pipe itself (section 2.3) as an overlapped `os.File`.
 - **WFP:** none of our own in phases 1–3; Xray's filters cover DNS. A full block (phase 4 or 7) would adapt `golang.zx2c4.com/wireguard/windows/tunnel/firewall`. That package is MIT; keep its notice. As shipped it is all-or-nothing and would cut the LAN, so the adaptation must permit the LAN ranges.
 - **Starting the tray app after an update:** `WTSEnumerateSessions`, `WTSQueryUserToken`, `CreateProcessAsUser`, as WireGuard starts its UI per session.
 - **Resources:** `go-winres` writes the icon, version info and manifest for both exes.
@@ -322,26 +323,26 @@ Concurrency as in `android.yml`: test builds of a branch replace each other; sta
 
 | Job | Runner | Steps |
 |---|---|---|
-| `logic` | ubuntu-latest | `go vet` and `go test` of `libxray/client/...` and the Windows module's pure packages; `GOOS=windows go vet ./...` of the Windows module; cross-compile both exes (amd64; arm64 from phase 6) with `-trimpath -buildvcs=false -ldflags "-s -w -X version"`; upload `bin` |
+| `logic` | ubuntu-latest | `go vet` and `go test -race` of `libxray/client/...` and the Windows module; `gofmt`; `GOOS=windows go vet ./...`; the icons must match `tools/mkicons`; `tools/mkres` writes the exes' resources; cross-compile both exes (amd64; arm64 from phase 6) with `-trimpath -buildvcs=false -ldflags "-s -w -X main.version"`, and `kirovctl` and `testserver` for the smoke test; the licence files of every module in the programs; upload `bin` |
 | `core-windows` | windows-2025 | `setup-go` (cache off if the restore proves slow); `scripts/fetch-geo.sh`; libxray `go test ./...` with `GEO_DIR`, and again with `DESKTOP_MATCHER=1` |
 | `package` | windows-2025, needs `logic` | wintun 0.14.1 zip with SHA-256 `07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51` (the pin of Xray's own CI), `bin/amd64/wintun.dll` and its `LICENSE.txt`; geo files (`fetch-geo.sh`, `prepare-geo.sh` into the installer's folder); the WebView2 bootstrapper, its Microsoft signature checked; `iscc` (6.7.1 or later); `SHA256SUMS.txt` with LF line endings; the update manifest, signed when `WINDOWS_UPDATE_KEY` exists |
 | `smoke` | windows-2025, needs `package` | below |
-| `screens` | ubuntu-latest | the window built with `-tags server` against a fake service, Playwright (Chromium) captures every state; PNGs go to the `ui-screenshots-windows` branch (not `ui-screenshots`, which `android.yml` force-pushes) |
+| `screens` (phase 3) | ubuntu-latest | the window built with `-tags server` against a fake service, Playwright (Chromium) captures every state; PNGs go to the `ui-screenshots-windows` branch (not `ui-screenshots`, which `android.yml` force-pushes) |
 | `release` | ubuntu-latest, needs all | pre-release `windows-build-<branch>` (deleted and recreated), or `windows-stable` for a `v*` tag or a manual stable run; title «Kirov VPN для Windows 1.0.N (…)»; Russian notes; assets: the installer, `SHA256SUMS.txt`, `version.json` and `version.json.sig` |
 
-**Smoke test** on the runner, as administrator, all through `kirovctl`:
-1. Silent install. The service is Running and Automatic, and the protocol and Run keys exist. `KirovVPN.exe --selftest` loads the UI files in a hidden WebView2 and exits; a hosted runner may not allow more GUI than that.
-2. A local VLESS+REALITY server (built from the test helpers) whose outbounds use `sockopt.interface` set to the runner's NIC, so its traffic cannot loop back into the tunnel.
+**Smoke test** (`windows/test/smoke.ps1`) on the runner, as administrator, through `kirovctl`:
+1. Silent install. The service runs as LocalSystem and starts at boot, the Run key exists, and only SYSTEM and administrators may open the data folder. `KirovVPN.exe --selftest` loads the page in a hidden WebView2 and exits.
+2. `testserver`: a VLESS+REALITY server on 127.0.0.1 whose REALITY target is a local TLS 1.3 server. Its own sockets go through `netbind` like the service's and its DNS is DoH, so its traffic cannot loop back into the tunnel.
 3. Import its link and connect.
-   - `Get-NetAdapter` shows «Kirov VPN».
-   - `curl https://www.gstatic.com/generate_204` gets 204, and the server's stats show the connection.
-   - `Resolve-DnsName example.com` works, while a direct query to 8.8.8.8:53 from PowerShell times out (the WFP filter).
-   - An IPv6 connection (`curl -6`) fails at once, not after a timeout.
-   - LAN routes still use the NIC; `Get-NetConnectionProfile` shows the connectivity Windows reports.
-4. 50 Start/Stop cycles: thread and handle counts stay flat (row 17). The time without an adapter is measured (row 25).
-5. Upgrade over the previous release; then uninstall. The service, adapter, keys and data are gone.
+   - `Get-NetAdapter` shows «Kirov VPN» up.
+   - `curl https://www.gstatic.com/generate_204` gets 204, and the server's access log shows the connection.
+   - `Resolve-DnsName example.com` works. A query to 8.8.8.8:53 sent through the network card (`IP_UNICAST_IF`) gets no answer, while before connecting and after disconnecting it does: the WFP filter. A plain query to 8.8.8.8 would prove nothing, as the tunnel's DNS answers it.
+   - An IPv6 connection (`curl -6`) fails within 3 s.
+4. 50 restarts of the tunnel: the service's handle and thread counts stay within 150 and 30 of where they were (row 17), and a site still answers.
+5. Install over itself: the service stops, is replaced, and brings the tunnel back with the saved key. (Over the previous release once one exists.)
+6. Uninstall: the service, adapter, keys and logs and the programs are gone.
 
-The first run routes only TEST-NET-3 (203.0.113.0/24) through the tunnel, so a broken build cannot cut the runner off from GitHub (Nebula's approach). The full routes follow once that passes, with a 15-minute job timeout.
+On any failure the script prints the logs and stops the service first, so the runner keeps its connection to GitHub. The job's timeout covers a hang. Routing only TEST-NET-3 first (Nebula's approach) proved unnecessary: that stop restores the runner's network.
 
 **Versions:**
 - `windows.yml`'s run number gives 1.0.N, a sequence of its own (Android has `android.yml`'s).
@@ -466,16 +467,21 @@ Never paste keys, passwords or tokens into a chat; GitHub secrets only. Say "г�
 
 **Phase 6:** the licence and SignPath decision (section 7.4).
 
+**Decisions for later**, from the owner's list of 1 Oct 2026 (items 1–4 of that list are in the phases):
+- a second way into every server (XHTTP next to REALITY) and a second server, so failover has somewhere to go: panel settings;
+- «Отправить отчёт владельцу»: diagnostics to the owner's Telegram, without IPs, keys or sites, only with the friend's consent;
+- signing the programs (section 7.4).
+
 ## 10. Phases
 
 Each phase ends in an installer built by CI that the owner installs and tries.
 
 1. **The tunnel on the owner's PC.**
    - Work:
-     - libxray: the Xray bump, `BuildOptions.Windows`, binder, resolver, `direct.go`, `replaceFile`;
-     - service: install, uninstall, stop, `should_run`, logs;
-     - pipe with `status`, `import` (one key), `connect`, `disconnect`;
-     - a minimal window: paste a key, the big button, status; tray with «Подключить» / «Отключить» / «Выход»;
+     - libxray: the Xray bump, `BuildOptions.Windows`, `direct.go`, `fsx.Replace`; in `client/`: the model, store, key import, log, `StartFailurePolicy` and the core log's trim;
+     - service: binder and resolver, the engine (start, stop, Android's retries), install, uninstall, stop, `should_run`, DPAPI, logs; a reset in place after a move to another network and after sleep (Android's NETWORK rule);
+     - pipe with `status`, `import` (keys, not yet subscriptions), `connect`, `disconnect`;
+     - a minimal window: paste a key, the big button, status; tray with «Открыть», «Подключить» / «Отключить», «Выход» (or «Отключить VPN и выйти» while connected);
      - the installer and `windows.yml` with the smoke test.
    - CI proves:
      - libxray's tests pass on Windows;
@@ -500,10 +506,15 @@ Each phase ends in an installer built by CI that the owner installs and tries.
    - Work: every screen of section 3 in the light look; tray states and menu; toasts; QR from an image, the clipboard or a screenshot; «Журнал»; «Лицензии»; settings; screenshots in CI.
    - CI proves: build, smoke test, and screenshots of every state on `ui-screenshots-windows`.
    - The owner checks: the screens, from the screenshots and on the PC.
-4. **Reliability on a laptop.**
-   - Work: the triggers of section 2.5; stall check; way back home; recovery and `RestartGuard`; the watchdog; «Обновить списки»; the restart gap of row 25 (outbounds replaced in place, a WFP hold, or a kept adapter); idle CPU and memory budget.
-   - CI proves: unit tests for every trigger; the smoke test switches the runner's routes and checks a reset in place.
-   - The owner checks: a day of normal use with sleep, Wi-Fi changes and a server switch.
+4. **Reliability on a laptop, and no need to turn the VPN off.**
+   - Work:
+     - the triggers of section 2.5; stall check; way back home; recovery and `RestartGuard`; the watchdog; «Обновить списки»; idle CPU and memory budget;
+     - a server switch without a break: the proxy outbounds replaced in the running core (row 25), so browsers see no «Сеть изменилась»; network resets behind a WFP hold or a kept adapter;
+     - «Программы без VPN» (row 15): banking clients, 1C, games with Russian servers and torrents go directly, through Xray `process` rules;
+     - Wi-Fi that needs a sign-in (hotels, cafés): seen by the captive probe of section 2.5, the tunnel pauses for a minute by itself, the sign-in page opens, and the tunnel comes back once the internet works;
+     - heavy downloads directly: Windows Update, Steam, Epic and driver downloads, by domain lists, so they are faster and cost the server nothing.
+   - CI proves: unit tests for every trigger; the smoke test switches the runner's routes and checks a reset in place; a hot swap keeps a running download alive.
+   - The owner checks: a day of normal use with sleep, Wi-Fi changes and a server switch; a program set to go without VPN; a game or Windows update downloading directly.
 5. **Updates and the panel.**
    - Work: the manifest, signing and `release` assets; the updater; section 8; the guide.
    - CI proves: updater tests with a test key (rollback, wrong signature, wrong size); `run-local.sh` ends with `ALL CHECKS PASSED` in a cloud session.
@@ -511,7 +522,7 @@ Each phase ends in an installer built by CI that the owner installs and tries.
 6. **Friends.**
    - Work: arm64 (Go, wintun's arm64 DLL, Wails; a smoke test on `windows-11-arm`); the signing decision; antivirus submissions; the friend-page guide for SmartScreen and Smart App Control.
    - The owner: first friends.
-7. **Later.** «Приложения без VPN» through Xray `process` rules; an optional kill switch with persistent WFP filters; Android onto the Go logic, one module at a time (optional).
+7. **Later.** An optional kill switch with persistent WFP filters; Android onto the Go logic, one module at a time (optional).
 
 ## 11. Risks and unknowns (most serious first)
 
@@ -525,7 +536,7 @@ Each phase ends in an installer built by CI that the owner installs and tries.
    - Large waves of REALITY server bans followed on 4 Aug and 21 Sep 2026 (#671).
    - A PC sends all its traffic through the tunnel (updates, game launchers, QUIC), unlike a phone. ru_direct keeps domestic traffic direct, and libxray already refuses QUIC to the proxy with Vision.
    - Watch the owner's own tests closely in phase 1. Server switching, XHTTP and mux support decide how quickly friends recover.
-3. **Young upstream code.** Xray's Windows WFP code is from 30 Sep 2026, Wails v3 is a beta with an open tray bug, and Xray's Windows TUN has the two suspected bugs of row 17. Mitigations:
+3. **Young upstream code.** Xray's Windows WFP code is from 30 Sep 2026, Wails v3 is a beta (its tray menu bug is worked around: the app shows the menu itself), and Xray's Windows TUN has the two suspected bugs of row 17. Mitigations:
    - pin exact versions;
    - test on the runner;
    - fix upstream first; a `replace` to a fork only if upstream is slow.
@@ -540,7 +551,7 @@ Each phase ends in an installer built by CI that the owner installs and tries.
    - A program that binds to the physical interface's address, such as WebRTC in a browser, can still reach the internet directly.
    - About a second of direct traffic while the core restarts (point 8 of section 2.4).
 
-   Measured in phase 1. If they matter, phase 4 closes the restart gap, and phase 7 offers a full block.
+   Phase 4 closes the restart gap, and phase 7 offers a full block.
 6. **WebView2 missing** on some Windows 10 or "lite" builds, with Microsoft's download possibly unreachable from Russia. Fallback: host the 127 MB standalone runtime on the panel.
 7. **Other security software** with its own WFP or TLS inspection (Kaspersky, ESET, AdGuard) may conflict with the tunnel or the filters. A third-party WFP callout can veto even Xray's hard permit.
 8. **Wintun stalls.** The unreleased master fixes of row 22 (4–5 s stalls) may show up as hiccups in the health checks.
