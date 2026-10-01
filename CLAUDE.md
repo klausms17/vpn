@@ -70,6 +70,8 @@ and give step-by-step instructions for anything he must do himself.
     log and masked addresses.
 - `scripts/`: `build-libxray.sh` (AAR), `build-libxray-ios.sh`,
   `fetch-geo.sh`, `prepare-geo.sh`.
+- `docs/windows/PLAN.md`: the plan for the Windows app (section 1 lists
+  what was checked and decided; nothing is built yet).
 - `docs/README.ru.md`: the owner's full guide in Russian: install, servers,
   whitelist mode, reliability, signing, panel and distribution.
 - `tools/jvm-check/`: a local compile-and-test of the plain Kotlin code
@@ -127,7 +129,7 @@ and give step-by-step instructions for anything he must do himself.
 - Commits: a short imperative title and a body that says what changed and
   why.
 
-## Status (27 Sep 2026)
+## Status (1 Oct 2026)
 
 - **Android is ready for testing with friends.** A stability audit found
   45 issues; all are fixed except the ones listed as known limits below.
@@ -135,6 +137,8 @@ and give step-by-step instructions for anything he must do himself.
   UI into `UiSession` and `TunnelController`. The latest build is
   `KirovVPN-1.0.54.apk` on the `build-claude-compassionate-mayer-6jph8m`
   release, signed with a temporary key.
+- **Windows:** `docs/windows/PLAN.md` was written on 1 Oct 2026 from five
+  research reports; nothing is built yet.
 - **iPhone:** phases 1–2 of `docs/ios/PLAN.md` are done. The Go core builds
   for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
   passes its checks (geo files in the extension, no bitcode). The app is
@@ -163,28 +167,27 @@ and give step-by-step instructions for anything he must do himself.
      key.
 2. **Windows desktop app**, the owner's next priority (before the Apple
    Developer Program): the same functions as the Android app, and code that
-   is professional, fast and maintainable. First write
-   `docs/windows/PLAN.md` the way `docs/ios/PLAN.md` was written, then
-   build in phases that each end in a CI-built installer the owner can try
-   (`windows-latest` runners cost nothing for a public repository).
-   Proposed, to be checked in the plan:
-   - Go, with `libxray` as a plain package; system-wide TUN through wintun
-     into the same netstack as Android and iOS; no local proxy ports.
-   - An elevated Windows service holds the core and the Android logic
-     (health checks, failover, subscription refresh, block reports,
-     network changes, no DNS or IPv6 leaks); a per-user tray icon and
-     window (e.g. Wails on WebView2) talk to it over a named pipe with an
-     ACL.
-   - The installer adds the service, the `klausvpn://` protocol (the
-     friend page's «Добавить в Kirov VPN» button) and autostart; updates
-     come from the panel's `/app/version.json`, extended for Windows.
-   - The look follows `server/remnawave/klaus-page.html`, the UI is in
-     Russian; User-Agent `KlausVPN/<ver> (Windows)` so the panel's
-     `^KlausVPN/` rule matches; `x-hwid` from a hash of `MachineGuid`.
-   - Unsigned at first (SmartScreen warns); code signing decided later.
-     Per-program "apps without VPN" later; no mobile whitelist mode.
-   - Then the panel side: publish the Windows build next to the APK, and a
-     Windows tab on the friend page.
+   is professional, fast and maintainable. The plan is
+   `docs/windows/PLAN.md` (checked 1 Oct 2026); build it in its phases,
+   each ending in a CI-built installer the owner tries. Phase 1, the tunnel
+   on the owner's PC, is next. In brief:
+   - Go only. An elevated service (LocalSystem) holds libxray and the
+     Android logic, ported to `libxray/client/` with its JVM tests. A
+     per-user tray icon and window (Wails v3, a pinned beta, on WebView2)
+     talk to it over a protected named pipe; the window holds no keys.
+   - Xray's own wintun TUN with Android's IPv4 routes and DNS, no local
+     ports. Xray v26.9.30 or later for its WFP filters
+     (`autoSystemWfpBlockLeak: ["dns", "misconfigtun"]`). libxray's own
+     socket binder and resolver keep the service outside its tunnel
+     (Windows has no `addDisallowedApplication`).
+   - Inno Setup installer: service, `klausvpn://`, autostart. Updates come
+     from the panel's `/app/windows/`, signed in CI with the
+     `WINDOWS_UPDATE_KEY` secret, installed silently by the service.
+   - Unsigned at first (SmartScreen, Smart App Control); the owner decides
+     on signing (a licence plus SignPath, or a paid certificate) before a
+     wide rollout.
+   - Then the panel side: `publish-windows` and a Windows tab on the
+     friend page.
 3. iPhone phases 4–6 (the real tunnel provider, the memory watchdog, the
    screens and feature parity) can move on in unsigned CI builds while
    signing waits; testing on a phone needs step 4.
