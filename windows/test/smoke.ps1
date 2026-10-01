@@ -1,8 +1,9 @@
 # The smoke test of the Windows app on a CI runner, as administrator:
-# install, connect through a local REALITY server, check that DNS cannot
-# leave outside the tunnel and that IPv6 fails at once, restart the tunnel
-# 50 times, install over itself, uninstall. Run by windows.yml; it changes
-# the PC's network and installs a service, so never run it on a real PC.
+# refuse a folder outside Program Files, install, connect through a local
+# REALITY server, check that DNS cannot leave outside the tunnel and that
+# IPv6 fails at once, restart the tunnel 50 times, install over itself,
+# uninstall. Run by windows.yml; it changes the PC's network and installs
+# a service, so never run it on a real PC.
 param(
   [Parameter(Mandatory)] [string] $Installer,
   # The folder with kirovctl.exe and testserver.exe.
@@ -12,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $app = Join-Path $env:ProgramFiles 'Kirov VPN'
-$data = Join-Path $env:ProgramData 'Kirov VPN'
+$data = Join-Path $app 'Data'
 $work = Join-Path $env:RUNNER_TEMP 'smoke'
 New-Item -ItemType Directory -Force $work | Out-Null
 
@@ -70,6 +71,11 @@ function ServiceProcess { Get-Process -Id (Get-CimInstance Win32_Service -Filter
 
 $server = $null
 try {
+  Write-Host '::group::Only into Program Files'
+  $p = Start-Process $Installer -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$work\elsewhere", "/LOG=$work\elsewhere.log" -Wait -PassThru
+  Check ($p.ExitCode -eq 7 -and -not (Test-Path "$work\elsewhere\KirovVPNService.exe")) "another folder is refused (exit code $($p.ExitCode))"
+  Write-Host '::endgroup::'
+
   Write-Host '::group::Install'
   Install
   $svc = Get-CimInstance Win32_Service -Filter "Name='KirovVPN'"

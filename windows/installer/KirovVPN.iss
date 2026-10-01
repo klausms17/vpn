@@ -72,7 +72,7 @@ Filename: "{app}\KirovVPNService.exe"; Parameters: "uninstall"; Flags: runhidden
 
 [UninstallDelete]
 ; The saved keys, settings and logs.
-Type: filesandordirs; Name: "{commonappdata}\Kirov VPN"
+Type: filesandordirs; Name: "{app}\Data"
 
 [Code]
 const
@@ -97,12 +97,19 @@ begin
 end;
 
 // An update replaces running files: stop the service and close the
-// windows first.
+// windows first. The service runs as SYSTEM from {app} and keeps the keys
+// there, so only Program Files will do, whatever /DIR= says: users can
+// change folders elsewhere.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Code: Integer;
   Service: String;
 begin
+  if CompareText(ExpandConstant('{app}'), ExpandConstant('{commonpf}\Kirov VPN')) <> 0 then
+  begin
+    Result := 'Kirov VPN устанавливается только в папку ' + ExpandConstant('{commonpf}\Kirov VPN') + '.';
+    exit;
+  end;
   Result := '';
   Service := ExpandConstant('{app}\KirovVPNService.exe');
   if FileExists(Service) then

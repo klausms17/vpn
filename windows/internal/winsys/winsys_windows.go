@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -17,39 +16,23 @@ import (
 // made inside it inherits that.
 const dirSDDL = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 
-// ProgramData is the folder for machine-wide data, C:\ProgramData usually.
-func ProgramData() (string, error) {
-	return windows.KnownFolderPath(windows.FOLDERID_ProgramData, windows.KF_FLAG_DEFAULT)
-}
-
-// SecureDir makes dir exist, open to SYSTEM and administrators only. A
-// folder that is already there but belongs to someone else, or is a link
-// elsewhere, is moved aside: anyone may create folders in ProgramData, and
-// the owner of one could open it up again at any time. It returns where a
-// folder was moved, if one was.
-func SecureDir(dir string) (movedTo string, err error) {
+// SecureDir makes dir exist, open to SYSTEM and administrators only, and
+// sets that again on a folder that is there already. dir must be inside
+// the program's own folder, which only administrators can change, so
+// nobody else can have made it; a link there is refused all the same.
+func SecureDir(dir string) error {
 	fi, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
-		return "", create(dir)
+		return create(dir)
 	}
 	if err != nil {
-		return "", err
+		return err
 	}
 	// Junctions show as irregular, symbolic links as links.
-	if fi.IsDir() && fi.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
-		owner, err := ownerOf(dir)
-		if err != nil {
-			return "", err
-		}
-		if owner.IsWellKnown(windows.WinLocalSystemSid) || owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
-			return "", protect(dir)
-		}
+	if !fi.IsDir() || fi.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return fmt.Errorf("%s is not a plain folder", dir)
 	}
-	movedTo = fmt.Sprintf("%s.untrusted-%d", dir, time.Now().UnixMilli())
-	if err := os.Rename(dir, movedTo); err != nil {
-		return "", err
-	}
-	return movedTo, create(dir)
+	return protect(dir)
 }
 
 func create(dir string) error {
@@ -83,15 +66,6 @@ func protect(dir string) error {
 	return windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		owner, nil, dacl, nil)
-}
-
-func ownerOf(path string) (*windows.SID, error) {
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
-	if err != nil {
-		return nil, err
-	}
-	owner, _, err := sd.Owner()
-	return owner, err
 }
 
 // DPAPI seals files for this computer's SYSTEM account, as WireGuard

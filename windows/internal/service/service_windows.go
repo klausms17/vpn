@@ -82,13 +82,14 @@ type app struct {
 // start sets everything up and resumes a tunnel that should run. The app
 // it returns on failure has only the log.
 func start(version string) (*app, error) {
-	programData, err := winsys.ProgramData()
+	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
-	root := filepath.Join(programData, "Kirov VPN")
-	movedTo, err := winsys.SecureDir(root)
-	if err != nil {
+	// Next to the programs, where only administrators can create anything
+	// (ProgramData lets every user make folders), as WireGuard does.
+	root := filepath.Join(filepath.Dir(exe), "Data")
+	if err := winsys.SecureDir(root); err != nil {
 		return nil, fmt.Errorf("data folder: %w", err)
 	}
 	dataDir, logDir := filepath.Join(root, "data"), filepath.Join(root, "logs")
@@ -103,15 +104,8 @@ func start(version string) (*app, error) {
 	stdlog.SetFlags(0)
 	stdlog.SetOutput(log)
 	log.Info(fmt.Sprintf("service %s starting, Xray %s", version, libxray.Version()))
-	if movedTo != "" {
-		log.Warn("a data folder that someone else had made was moved aside")
-	}
 	if err := libxray.SetCrashLog(filepath.Join(logDir, "go-crash.log")); err != nil {
 		log.Warn("no crash log: " + err.Error())
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return a, err
 	}
 	libxray.InitEnv(filepath.Join(filepath.Dir(exe), "geo"))
 
