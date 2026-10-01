@@ -289,6 +289,7 @@ and give step-by-step instructions for anything he must do himself.
    - candidate servers are tested only with the short 204 check, not for
      stalls (5, partly fixed);
    - Windows: while the core restarts (a reset after a network change or
-     sleep, a retry after a failure) there is no tunnel and no WFP filter,
-     so traffic goes directly for about 3 seconds, up to 15 if Windows is
-     slow to bring the adapter up.
+     sleep, a change of server or settings, a retry after a failure) a WFP
+     hold lets only the service's own traffic through, for at most 20
+     seconds; a tunnel not back by then lets traffic go directly until it
+     is.

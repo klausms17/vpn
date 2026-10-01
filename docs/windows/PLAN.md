@@ -165,10 +165,10 @@ Android's UI process does imports, pings, subscription adds and update checks it
    - the service also turns NetBIOS off on the adapter (`NetbiosOptions=2` under `NetBT\Parameters\Interfaces\Tcpip_{GUID}`), as Tailscale does.
 7. **LAN** (printers, casting, the router page) stays outside over IPv4, as on Android.
 8. **Restarts.** Xray removes the adapter, its routes and the filters at Stop, and creates them again at Start. Android's VPN interface outlives the core.
-   - In between, traffic follows the physical routes, and browsers see a network change (Chrome may show `ERR_NETWORK_CHANGED` for requests in flight). That takes about 3 seconds (the core's start on the CI machine); if Windows is slow to bring the adapter up, Xray tries for up to 15 seconds. It happens on a reset after a move to another network or a wake from sleep, and when the engine starts the core again after a failure.
-   - Phase 4 measures and closes it (row 25):
+   - In between, the routes are the physical ones, and browsers see a network change (Chrome may show `ERR_NETWORK_CHANGED` for requests in flight). That takes about 1 to 3 seconds on the CI machine; if Windows is slow to bring the adapter up, Xray tries for up to 15 seconds. It happens on a reset after a move to another network or a wake from sleep, on a change of server or settings, and when the engine starts the core again after a failure.
+   - **Hold** (built 1 Oct 2026): when a tunnel that was up restarts, the engine first turns on WireGuard's kill-switch rules (`golang.zx2c4.com/wireguard/windows/tunnel/firewall`, in a dynamic WFP session that goes with the service): only the service's own traffic, loopback, DHCP and neighbour discovery pass, until the new core runs. It lasts at most 20 seconds, so a network that needs a sign-in is not locked out for long; a tunnel that is not back by then lets traffic go directly until it is, as on Android once its retries are spent. A connect from off holds nothing, and neither does a restart when WFP refuses (logged). The smoke test probes DNS around the tunnel all through a restart.
+   - Phase 4 still shortens the gap (row 25):
      - server switches replace the proxy outbounds in the running core;
-     - resets after a network change hold traffic with WFP;
      - or Xray keeps the adapter across restarts (an upstream change: a process-wide adapter cache).
 
 **Connect sequence.** It follows the order of Android's `TunnelEngine.start`.
@@ -519,7 +519,8 @@ Each phase ends in an installer built by CI that the owner installs and tries.
      - three tabs in the window: VPN, «Серверы» (the list with each server's check, graded as Android's `pingGrade`, select, rename, delete, check all) and «Настройки»;
      - settings, sealed with DPAPI (`data\settings.json`): Android's three modes, the user's sites directly, through the VPN or blocked (checked by libxray's `UserRuleEntry`), programs directly or through the VPN (picked from the disk) with torrents directly by default, and connecting at boot; a change restarts a running tunnel once, 0.8 s after the last of a burst;
      - «Журнал»: the ends of the service's, the core's and the window's logs, with addresses and host names taken out, and «Скопировать»;
-     - the smoke test checks the server, the journal, a site and a program sent directly, a crash of the service, and another adapter holding the tunnel's address.
+     - the hold of section 2.4, point 8: nothing goes around the tunnel while it restarts;
+     - the smoke test checks the server, the journal, a site and a program sent directly, DNS around the tunnel during a restart, a crash of the service, and another adapter holding the tunnel's address.
 2. **Subscriptions and the Android logic.**
    - Work: section 5.2 with its tests; the service runs it; servers and subscriptions in the window (add by link, refresh, select, ping, delete); `klausvpn://` registered.
    - CI proves: Go tests green on Linux; the smoke test adds a subscription from a local server.
@@ -571,9 +572,9 @@ Each phase ends in an installer built by CI that the owner installs and tries.
    «Журнал» lists other VPN adapters found. The captive notice says to disconnect, sign in and connect again.
 5. **Leaks the DNS filter does not cover.**
    - A program that binds to the physical interface's address, such as WebRTC in a browser, can still reach the internet directly.
-   - About a second of direct traffic while the core restarts (point 8 of section 2.4).
+   - A restart that takes longer than 20 seconds lets traffic go directly from then until the tunnel is back (point 8 of section 2.4).
 
-   Phase 4 closes the restart gap, and phase 7 offers a full block.
+   Phase 7 offers a full block.
 6. **WebView2 missing** on some Windows 10 or "lite" builds, with Microsoft's download possibly unreachable from Russia. Fallback: host the 127 MB standalone runtime on the panel.
 7. **Other security software** with its own WFP or TLS inspection (Kaspersky, ESET, AdGuard) may conflict with the tunnel or the filters. A third-party WFP callout can veto even Xray's hard permit.
 8. **Wintun stalls.** The unreleased master fixes of row 22 (4–5 s stalls) may show up as hiccups in the health checks.

@@ -150,6 +150,7 @@ func start(version string) (*app, error) {
 	eng = engine.New(engine.Deps{
 		Core:     controller{c: libxray.NewController(), log: log.Info},
 		Binder:   binder,
+		Hold:     wfpHold{},
 		Runtime:  runtime,
 		Clock:    realClock{},
 		Profiles: profiles.ReadStrict,

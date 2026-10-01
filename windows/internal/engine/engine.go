@@ -2,7 +2,8 @@
 // TunnelEngine does. One goroutine runs every start, stop and reset, one
 // after another, and owns the session that says which tunnel runs. Xray
 // creates the Windows adapter at start and removes it at stop, so unlike
-// Android a restart cannot bring the new tunnel up before the old one goes.
+// Android a restart cannot bring the new tunnel up before the old one goes;
+// a Hold keeps traffic in meanwhile.
 package engine
 
 import (
@@ -40,6 +41,15 @@ type Runtime interface {
 	SetShouldRun(bool)
 }
 
+// Hold keeps the PC's traffic from going around the tunnel while the core
+// restarts: Xray removes the adapter, its routes and its filters with the
+// core, and until the new core has them back, traffic would go directly.
+type Hold interface {
+	// On blocks every program's traffic but the service's own.
+	On() error
+	Off()
+}
+
 // Clock is time; a fake in tests.
 type Clock interface {
 	Now() time.Time
@@ -51,6 +61,7 @@ type Clock interface {
 type Deps struct {
 	Core    Core
 	Binder  Binder
+	Hold    Hold
 	Runtime Runtime
 	Clock   Clock
 	// Profiles reads the saved servers.
@@ -75,6 +86,13 @@ const (
 	minUptimeForReset = 3 * time.Second
 	resumeSettle      = 5 * time.Second
 )
+
+// holdLimit bounds how long a restart keeps the PC offline: long enough for
+// the quick retries after a reset, short enough that a network that needs
+// a sign-in (hotel Wi-Fi) is not locked out for long. After it, traffic
+// goes directly until the tunnel is back, as on Android once its retries
+// are spent.
+const holdLimit = 20 * time.Second
 
 // The pauses before each new try of a core that did not start. Windows
 // sets up the adapter, its addresses and filters in steps that fail now
@@ -106,6 +124,12 @@ type Engine struct {
 	generation    int
 	stopReset     func() bool
 	stopReconnect func() bool
+	// holding: Hold is on while a tunnel that was up restarts. holds
+	// counts the holds, so the limit of an earlier one cannot end a later
+	// one.
+	holding  bool
+	holds    int
+	stopHold func() bool
 }
 
 type session struct {
@@ -147,6 +171,7 @@ func (e *Engine) Run(ctx context.Context) {
 				e.publish(ipc.Status{State: ipc.Disconnected})
 				e.d.Log("tunnel down: the service is stopping")
 			}
+			e.release()
 			return
 		}
 	}
@@ -160,6 +185,7 @@ func (e *Engine) do(job func()) {
 			e.d.Log(fmt.Sprintf("engine bug: %v\n%s", p, debug.Stack()))
 			e.halt()
 			e.held = false
+			e.release()
 			e.d.Runtime.SetShouldRun(false)
 			e.publish(ipc.Status{State: ipc.Failed, Message: "Внутренняя ошибка Kirov VPN. Подключитесь снова."})
 		}
@@ -293,6 +319,9 @@ func (e *Engine) start(userRequested bool, attempt int) {
 		}
 		// From here on the old tunnel is gone.
 		swapped = true
+		if e.session != nil {
+			e.hold()
+		}
 		e.halt()
 		e.d.TrimLog()
 		e.d.Binder.Activate()
@@ -300,6 +329,7 @@ func (e *Engine) start(userRequested bool, attempt int) {
 			return &coreError{err}
 		}
 		e.d.Binder.Settle()
+		e.release()
 		now := e.d.Clock.Now()
 		e.session = &session{profile: profile, config: config, up: now}
 		e.held = false
@@ -381,6 +411,7 @@ func (e *Engine) coreFailed(err error, server string, userRequested bool, attemp
 func (e *Engine) giveUp(message string) {
 	e.halt()
 	e.held = false
+	e.release()
 	e.d.Runtime.SetShouldRun(false)
 	e.publish(ipc.Status{State: ipc.Failed, Message: message})
 }
@@ -409,6 +440,7 @@ func (e *Engine) stop() {
 	}
 	e.halt()
 	e.held = false
+	e.release()
 	// A start that finished just before this set it again.
 	e.d.Runtime.SetShouldRun(false)
 	e.publish(ipc.Status{State: ipc.Disconnected})
@@ -433,6 +465,7 @@ func (e *Engine) resetNow(why string) {
 	e.stopReset = nil
 	running := e.session
 	e.d.Log(why)
+	e.hold()
 	if err := e.d.Core.Stop(); err != nil {
 		e.d.Log("core stop: " + err.Error())
 	}
@@ -443,6 +476,7 @@ func (e *Engine) resetNow(why string) {
 		e.session = nil
 		e.d.Binder.Deactivate()
 		if !e.d.Runtime.ShouldRun() {
+			e.release()
 			e.publish(ipc.Status{State: ipc.Disconnected})
 			return
 		}
@@ -452,7 +486,42 @@ func (e *Engine) resetNow(why string) {
 		return
 	}
 	e.d.Binder.Settle()
+	e.release()
 	e.session = &session{profile: running.profile, config: running.config, up: e.d.Clock.Now()}
+}
+
+// hold keeps traffic in while a tunnel that was up restarts, for at most
+// holdLimit. Without WFP the restart goes on unheld.
+func (e *Engine) hold() {
+	if e.holding {
+		return
+	}
+	if err := e.d.Hold.On(); err != nil {
+		e.d.Log("could not hold traffic during the restart: " + err.Error())
+		return
+	}
+	e.holding = true
+	e.holds++
+	n := e.holds
+	e.d.Log("holding traffic while the tunnel restarts")
+	e.stopHold = e.d.Clock.AfterFunc(holdLimit, func() {
+		e.post(func() {
+			if e.holding && e.holds == n {
+				e.d.Log("the tunnel is not back yet: traffic goes directly meanwhile")
+				e.release()
+			}
+		})
+	})
+}
+
+// release lets traffic through again; it does nothing when none is held.
+func (e *Engine) release() {
+	if !e.holding {
+		return
+	}
+	e.stopHold()
+	e.d.Hold.Off()
+	e.holding = false
 }
 
 // halt stops the core; nothing runs afterwards.

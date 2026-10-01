@@ -52,23 +52,31 @@ function Nic {
   return $best.InterfaceIndex
 }
 
-# Asks 8.8.8.8 for example.com straight through the network card, as a
-# program that ignores the tunnel's DNS would. True if it answered.
-function DirectDns {
-  $nic = Nic
-  $ip = (Get-NetIPAddress -InterfaceIndex $nic -AddressFamily IPv4 | Select-Object -First 1).IPAddress
+# Asks 8.8.8.8 for example.com straight through network card $nic, whose
+# address is $ip, as a program that ignores the tunnel's DNS would. True if
+# it answered within $timeoutMs.
+function DnsProbe([int] $nic, [string] $ip, [int] $timeoutMs) {
   $udp = [System.Net.Sockets.UdpClient]::new([System.Net.IPEndPoint]::new([IPAddress]::Parse($ip), 0))
   try {
     # IP_UNICAST_IF (31): this interface whatever the routes say.
-    $udp.Client.SetSocketOption([System.Net.Sockets.SocketOptionLevel]::IP, [System.Net.Sockets.SocketOptionName]31, [System.Net.IPAddress]::HostToNetworkOrder([int]$nic))
-    $udp.Client.ReceiveTimeout = 4000
+    $udp.Client.SetSocketOption([System.Net.Sockets.SocketOptionLevel]::IP, [System.Net.Sockets.SocketOptionName]31, [System.Net.IPAddress]::HostToNetworkOrder($nic))
+    $udp.Client.ReceiveTimeout = $timeoutMs
     [byte[]] $query = 0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 7, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 3, 0x63, 0x6f, 0x6d, 0, 0, 1, 0, 1
-    [void] $udp.Send($query, $query.Length, '8.8.8.8', 53)
     $from = [System.Net.IPEndPoint]::new([IPAddress]::Any, 0)
-    try { [void] $udp.Receive([ref] $from); return $true } catch [System.Net.Sockets.SocketException] { return $false }
+    try {
+      [void] $udp.Send($query, $query.Length, '8.8.8.8', 53)
+      [void] $udp.Receive([ref] $from)
+      return $true
+    } catch [System.Net.Sockets.SocketException] { return $false }
   } finally {
     $udp.Close()
   }
+}
+
+function DirectDns {
+  $nic = Nic
+  $ip = (Get-NetIPAddress -InterfaceIndex $nic -AddressFamily IPv4 | Select-Object -First 1).IPAddress
+  return DnsProbe $nic $ip 4000
 }
 
 function ServiceProcess { Get-Process -Id (Get-CimInstance Win32_Service -Filter "Name='KirovVPN'").ProcessId }
@@ -168,6 +176,26 @@ try {
   $code = (Invoke-WebRequest -Uri 'https://www.gstatic.com/generate_204' -TimeoutSec 20).StatusCode
   for ($i = 0; $i -lt 20 -and (Through) -eq $before; $i++) { Start-Sleep -Milliseconds 250 }
   Check ($code -eq 204 -and (Through) -gt $before) 'other programs still go through the server'
+  # A change restarts the core, and the tunnel's adapter, routes and filters
+  # with it. Meanwhile nothing may go around the tunnel: probe all the while.
+  $nic = Nic
+  $ip = (Get-NetIPAddress -InterfaceIndex $nic -AddressFamily IPv4 | Select-Object -First 1).IPAddress
+  '{"mode":"ru_direct","directSites":["example.org"],"torrentsDirect":true,"autoConnect":true}' | Set-Content "$work\settings.json"
+  $set = Start-Process (Join-Path $Tools 'kirovctl.exe') -ArgumentList 'set-settings' -RedirectStandardInput "$work\settings.json" -NoNewWindow -PassThru
+  # Without the handle taken now, PowerShell loses the exit code.
+  $null = $set.Handle
+  $probes, $answered = 0, 0
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  while ($sw.Elapsed.TotalSeconds -lt 5) {
+    $probes++
+    if (DnsProbe $nic $ip 100) { $answered++ }
+    Start-Sleep -Milliseconds 20
+  }
+  $set.WaitForExit()
+  Ctl wait-connected | Out-Null
+  Check ($set.ExitCode -eq 0 -and $answered -eq 0) "nothing goes around the tunnel while it restarts ($answered of $probes DNS probes answered)"
+  Check (Select-String -Path "$data\logs\service.log" -Pattern 'holding traffic while the tunnel restarts' -SimpleMatch -Quiet) 'the service held traffic during the restart'
+  Check (Http204) 'and let it through again'
   Settings '{"mode":"ru_direct","torrentsDirect":true,"autoConnect":true}'
   Write-Host '::endgroup::'
 

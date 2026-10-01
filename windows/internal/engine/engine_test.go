@@ -134,6 +134,45 @@ func (b *fakeBinder) last() string {
 	return b.calls[len(b.calls)-1]
 }
 
+// fakeHold records when it was turned on and off, and whether the core
+// ran at that moment.
+type fakeHold struct {
+	mu    sync.Mutex
+	core  *fakeCore
+	calls []string
+	fail  error
+}
+
+func (h *fakeHold) record(what string) {
+	state := " down"
+	if running, _, _ := h.core.state(); running {
+		state = " up"
+	}
+	h.calls = append(h.calls, what+state)
+}
+
+func (h *fakeHold) On() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.fail != nil {
+		return h.fail
+	}
+	h.record("on")
+	return nil
+}
+
+func (h *fakeHold) Off() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.record("off")
+}
+
+func (h *fakeHold) seen() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.calls)
+}
+
 type fakeRuntime struct {
 	mu        sync.Mutex
 	shouldRun bool
@@ -156,6 +195,7 @@ type world struct {
 	e        *Engine
 	core     *fakeCore
 	binder   *fakeBinder
+	hold     *fakeHold
 	runtime  *fakeRuntime
 	clock    *clock
 	mu       sync.Mutex
@@ -167,10 +207,12 @@ type world struct {
 var germany = model.StoredProfile{ID: "de", Name: "Германия", Protocol: "vless", Network: "tcp", Security: "reality"}
 
 func newWorld(t *testing.T) *world {
+	core := &fakeCore{}
 	w := &world{
 		t:        t,
-		core:     &fakeCore{},
+		core:     core,
 		binder:   &fakeBinder{},
+		hold:     &fakeHold{core: core},
 		runtime:  &fakeRuntime{},
 		clock:    &clock{now: time.Unix(1_700_000_000, 0)},
 		profiles: model.ProfilesState{Profiles: []model.StoredProfile{germany}, SelectedID: "de"},
@@ -178,6 +220,7 @@ func newWorld(t *testing.T) *world {
 	w.e = New(Deps{
 		Core:    w.core,
 		Binder:  w.binder,
+		Hold:    w.hold,
 		Runtime: w.runtime,
 		Clock:   w.clock,
 		Profiles: func() (model.ProfilesState, error) {
@@ -666,5 +709,128 @@ func TestABugTakesTheTunnelDownNotTheService(t *testing.T) {
 	w.sync()
 	if got := w.last(); got.State != ipc.Connected {
 		t.Errorf("then: %+v", got)
+	}
+}
+
+func (w *world) expectHold(want ...string) {
+	w.t.Helper()
+	if got := w.hold.seen(); !slices.Equal(got, want) {
+		w.t.Errorf("hold %v, want %v", got, want)
+	}
+}
+
+func TestAResetHoldsTrafficUntilTheCoreIsBack(t *testing.T) {
+	w := newWorld(t)
+	w.e.Connect()
+	w.advance(10 * time.Second)
+	w.e.NetworkSwitched()
+	w.advance(networkSettle)
+	w.expectHold("on up", "off up")
+	w.hold.calls = nil
+	w.e.Resumed()
+	w.advance(resumeSettle)
+	w.expectHold("on up", "off up")
+}
+
+func TestAChangeOfServerOrSettingsHoldsTraffic(t *testing.T) {
+	w := newWorld(t)
+	w.e.Connect()
+	w.sync()
+	w.e.Reconnect()
+	w.advance(reconnectDelay)
+	if _, starts, _ := w.core.state(); starts != 2 {
+		t.Fatalf("%d starts", starts)
+	}
+	w.expectHold("on up", "off up")
+}
+
+func TestATunnelThatWasOffHoldsNothing(t *testing.T) {
+	w := newWorld(t)
+	w.e.Connect()
+	w.sync()
+	w.e.Disconnect()
+	w.runtime.SetShouldRun(true)
+	w.e.Resume()
+	w.core.failNext(errors.New("adapter busy"))
+	w.e.Disconnect()
+	w.e.Connect()
+	w.advance(time.Minute)
+	w.expectHold()
+}
+
+func TestAHeldRestartLetsTrafficGoAfterTheLimit(t *testing.T) {
+	w := newWorld(t)
+	w.e.Connect()
+	w.advance(10 * time.Second)
+	w.core.failNext(errors.New("adapter busy"), errors.New("adapter busy"), errors.New("adapter busy"), errors.New("adapter busy"))
+	w.e.Resumed()
+	// The reset, the start right after it and the retries 1.5 s and 5 s
+	// later fail: still held.
+	w.advance(resumeSettle)
+	w.advance(1500 * time.Millisecond)
+	w.advance(5 * time.Second)
+	w.expectHold("on up")
+	w.advance(holdLimit - 6500*time.Millisecond)
+	w.expectHold("on up", "off down")
+	// The tunnel that comes back later needs nothing more.
+	w.advance(15 * time.Second)
+	if s := w.last(); s.State != ipc.Connected {
+		t.Fatalf("status %+v", s)
+	}
+	w.expectHold("on up", "off down")
+}
+
+func TestStoppingAHeldRestartLetsTrafficGo(t *testing.T) {
+	w := newWorld(t)
+	w.e.Connect()
+	w.sync()
+	w.core.failNext(errors.New("adapter busy"))
+	w.e.Reconnect()
+	w.advance(reconnectDelay)
+	w.e.Disconnect()
+	w.sync()
+	w.expectHold("on up", "off down")
+	// The limit it had ends no later hold.
+	w.e.Connect()
+	w.advance(10 * time.Second)
+	w.core.failNext(errors.New("adapter busy"), errors.New("adapter busy"), errors.New("adapter busy"))
+	w.e.Reconnect()
+	w.advance(reconnectDelay)
+	w.advance(1500 * time.Millisecond)
+	w.advance(5 * time.Second)
+	w.advance(holdLimit - 10*time.Second - 6500*time.Millisecond + time.Millisecond)
+	w.expectHold("on up", "off down", "on up")
+	w.advance(10 * time.Second)
+	w.expectHold("on up", "off down", "on up", "off down")
+}
+
+func TestAFinalCauseInARestartLetsTrafficGo(t *testing.T) {
+	w := newWorld(t)
+	w.e.Connect()
+	w.sync()
+	w.core.failNext(errors.New("final: another VPN"))
+	w.e.Reconnect()
+	w.advance(reconnectDelay)
+	if s := w.last(); s.State != ipc.Failed {
+		t.Fatalf("status %+v", s)
+	}
+	w.expectHold("on up", "off down")
+}
+
+func TestWithoutWFPARestartGoesOnUnheld(t *testing.T) {
+	w := newWorld(t)
+	w.hold.fail = errors.New("no WFP")
+	w.e.Connect()
+	w.sync()
+	w.e.Reconnect()
+	w.advance(reconnectDelay)
+	if s := w.last(); s.State != ipc.Connected {
+		t.Fatalf("status %+v", s)
+	}
+	w.expectHold()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !slices.Contains(w.logs, "could not hold traffic during the restart: no WFP") {
+		t.Errorf("logs %q", w.logs)
 	}
 }
