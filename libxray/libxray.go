@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/klausms17/vpn/libxray/internal/fsx"
 	applog "github.com/xtls/xray-core/app/log"
 	"github.com/xtls/xray-core/common/geodata"
 	commonlog "github.com/xtls/xray-core/common/log"
@@ -71,7 +72,7 @@ func SetCrashLog(path string) error {
 		return nil
 	}
 	if st, err := os.Stat(path); err == nil && st.Size() > 256<<10 {
-		_ = os.Rename(path, path+".1")
+		_ = fsx.Replace(path, path+".1")
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {

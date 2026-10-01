@@ -411,7 +411,7 @@ func TestPolicyLevels(t *testing.T) {
 
 func TestDNSServesStaleNames(t *testing.T) {
 	for _, mode := range []string{ModeRuDirect, ModeBlockedOnly, ModeGlobal} {
-		d := buildDNS(&BuildOptions{Mode: mode})
+		d := buildDNS(&BuildOptions{Mode: mode}, nil)
 		if d["serveStale"] != true || d["serveExpiredTTL"] != 3600 {
 			t.Errorf("%s: stale answers off: %v", mode, d)
 		}

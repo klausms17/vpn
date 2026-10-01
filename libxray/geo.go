@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/klausms17/vpn/libxray/internal/fsx"
 	"github.com/xtls/xray-core/common/geodata"
 	"google.golang.org/protobuf/proto"
 )
@@ -197,7 +198,7 @@ func TrimGeoFile(src, dst, codes string) (err error) {
 		return err
 	}
 	out = nil
-	return os.Rename(tmp, dst)
+	return fsx.Replace(tmp, dst)
 }
 
 // GeoIPContains reports whether ip (IPv4 or IPv6 literal) belongs to the

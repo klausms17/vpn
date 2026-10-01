@@ -80,6 +80,9 @@ type BuildOptions struct {
 	// Tun adds the TUN inbound fed by the Android VpnService fd.
 	Tun    bool `json:"tun"`
 	TunMTU int  `json:"tunMtu"`
+	// Windows has Xray create and set up the wintun adapter itself instead
+	// (see windowsTunSettings), with the rules Windows needs.
+	Windows bool `json:"windows"`
 	// SocksPort adds a 127.0.0.1 SOCKS inbound. Only for tests: the app
 	// never opens local ports, because any app on the phone could use them
 	// to detect the VPN or reach the proxy.
@@ -209,6 +212,14 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 	}
 	// Vision refuses QUIC; see blockQUICToProxy.
 	vision := visionFlow(outbounds[0].(map[string]any))
+	var localNames []string
+	if o.Windows {
+		strategy := "UseIPv4"
+		if o.IPv6 {
+			strategy = "UseIP"
+		}
+		localNames = append(resolveServersLocally(outbounds, strategy), windowsDirectDomains...)
+	}
 	outbounds = append(outbounds,
 		map[string]any{"tag": DirectTag, "protocol": "freedom", "settings": map[string]any{"userLevel": levelDirect}},
 		map[string]any{"tag": blockTag, "protocol": "blackhole"},
@@ -256,13 +267,17 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 		if mtu <= 0 {
 			mtu = TunMTU
 		}
+		// An explicit name avoids interface enumeration, which Android
+		// forbids for apps.
+		settings := map[string]any{"name": "tun0", "mtu": mtu}
+		if o.Windows {
+			settings = windowsTunSettings(mtu)
+		}
 		inbounds = append(inbounds, map[string]any{
 			"tag":      tunInboundTag,
 			"protocol": "tun",
 			"port":     0,
-			// An explicit name avoids interface enumeration, which Android
-			// forbids for apps.
-			"settings": map[string]any{"name": "tun0", "mtu": mtu},
+			"settings": settings,
 			"sniffing": sniffing,
 		})
 		dnsInbounds = append(dnsInbounds, tunInboundTag)
@@ -291,6 +306,9 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 		// port 853 of the VPN DNS address; refusing it immediately makes
 		// Android fall back to plain DNS without a multi-second stall.
 		rules = append(rules, rule{"ip": []string{TunDNSv4 + "/32", TunIPv4 + "/32"}, "outboundTag": blockTag})
+		if o.Windows {
+			rules = append(rules, windowsRules()...)
+		}
 	}
 	// 2. The DNS module's own upstream queries.
 	if o.Mode != ModeGlobal {
@@ -376,15 +394,25 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 				strconv.Itoa(levelDirect): map[string]any{"connIdle": 300},
 			},
 		},
-		"dns":       buildDNS(o),
+		"dns":       buildDNS(o, localNames),
 		"inbounds":  inbounds,
 		"outbounds": outbounds,
 		"routing":   map[string]any{"domainStrategy": "AsIs", "rules": rules},
 	}, nil
 }
 
-func buildDNS(o *BuildOptions) map[string]any {
+// localNames (Windows only) are resolved through the physical network's
+// DNS servers first: the servers' own names and Windows' connectivity
+// checks (see resolveServersLocally).
+func buildDNS(o *BuildOptions, localNames []string) map[string]any {
 	var servers []any
+	if len(localNames) > 0 {
+		servers = append(servers, map[string]any{
+			"address":      "localhost",
+			"domains":      localNames,
+			"skipFallback": true,
+		})
+	}
 	doh := func(domains []string) {
 		for i, addr := range dohDNS {
 			s := map[string]any{"address": addr}
