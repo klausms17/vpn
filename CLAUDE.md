@@ -160,7 +160,12 @@ and give step-by-step instructions for anything he must do himself.
   release, signed with a temporary key.
 - **Windows:** phase 1 of `docs/windows/PLAN.md` is built (1 Oct 2026):
   the service with Xray's TUN and WFP leak filters, the window and tray,
-  the installer and `windows.yml`. The owner has not tried it yet.
+  the installer and `windows.yml`. Its first full run passed: libxray's
+  tests on Windows, and the smoke test (install, connect through a local
+  REALITY server, DNS filter, IPv6, 50 restarts with 500 → 537 handles and
+  19 → 20 threads, install over itself, uninstall). The installer is on
+  the `windows-build-claude-panel-privacy` release (1.0.3). The owner has
+  not tried it yet.
 - **iPhone:** phases 1–2 of `docs/ios/PLAN.md` are done. The Go core builds
   for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
   passes its checks (geo files in the extension, no bitcode). The app is
