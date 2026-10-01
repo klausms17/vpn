@@ -426,13 +426,26 @@ document.addEventListener("keydown", (e) => {
 
 // ---------------------------------------------------------------- settings
 
+// Saves go one after another, each built on the one before, so that two
+// quick changes both stay.
+let saving = Promise.resolve();
+let unsaved = null;
+
 // save sends the settings with change made; on a refusal the controls go
 // back to what is saved.
 function save(change) {
   if (!snap || !snap.settings) return Promise.reject(new Error("Нет связи со службой Kirov VPN"));
-  const next = structuredClone(snap.settings);
+  const next = structuredClone(unsaved || snap.settings);
   change(next);
-  return call("SaveSettings", next).catch((err) => {
+  unsaved = next;
+  const done = saving.then(() => call("SaveSettings", next));
+  saving = done.catch(() => {});
+  return done.then((saved) => {
+    // The state with the settings as saved, so the next change builds on it.
+    if (saved) render(saved);
+    if (unsaved === next) unsaved = null;
+  }, (err) => {
+    unsaved = null;
     fail(err);
     render(snap);
     throw err;

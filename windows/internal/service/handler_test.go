@@ -55,8 +55,10 @@ type testEnv struct {
 	// importing, if set, tells when an import reads its keys and holds it
 	// until the test sends.
 	importing chan struct{}
-	// measured answers the pinger's checks by server name.
+	// measured answers the pinger's checks by server name; batches counts
+	// the servers of each batch.
 	measured map[string]int64
+	batches  []int
 }
 
 func newEnv(t *testing.T) *testEnv {
@@ -67,19 +69,27 @@ func newEnv(t *testing.T) *testEnv {
 		defer env.mu.Unlock()
 		env.events = append(env.events, ev)
 	}
+	profiles := store.New(filepath.Join(dir, "profiles.json"), func() model.ProfilesState { return model.ProfilesState{} }, nil, func(string) {})
 	env.h = &handler{
 		tunnel:   env.tunnel,
-		profiles: store.New(filepath.Join(dir, "profiles.json"), func() model.ProfilesState { return model.ProfilesState{} }, nil, func(string) {}),
+		profiles: profiles,
 		settings: store.New(filepath.Join(dir, "settings.json"), defaultSettings, nil, func(string) {}),
-		pinger: newPinger(func(outbounds json.RawMessage) (int64, error) {
-			var obs []map[string]any
-			json.Unmarshal(outbounds, &obs)
-			name, _ := obs[0]["name"].(string)
-			if ms, ok := env.measured[name]; ok {
-				return ms, nil
+		pinger: newPinger(func(servers []model.StoredProfile) []int64 {
+			env.mu.Lock()
+			env.batches = append(env.batches, len(servers))
+			env.mu.Unlock()
+			out := make([]int64, len(servers))
+			for i, s := range servers {
+				var obs []map[string]any
+				json.Unmarshal(s.Outbounds, &obs)
+				name, _ := obs[0]["name"].(string)
+				out[i] = -1
+				if ms, ok := env.measured[name]; ok {
+					out[i] = ms
+				}
 			}
-			return 0, errors.New("timeout")
-		}, func(p ipc.Pings) { broadcast(ipc.NewEvent(ipc.EventPings, p)) }),
+			return out
+		}, profiles.ReadStrict, func(p ipc.Pings) { broadcast(ipc.NewEvent(ipc.EventPings, p)) }),
 		keys: func(ctx context.Context, text string) ([]model.Key, []string, error) {
 			if env.importing != nil {
 				env.importing <- struct{}{}
@@ -414,12 +424,13 @@ func TestSettingsAreCheckedSavedAndApplied(t *testing.T) {
 	s := defaultSettings()
 	s.Mode = ipc.ModeGlobal
 	s.DirectSites = []string{"Bank.example", "bank.example"}
-	s.DirectPrograms = []string{"Telegram.exe", "telegram.EXE"}
+	// Names stay as Windows spells them: Xray matches them exactly.
+	s.DirectPrograms = []string{"Telegram.exe", " Telegram.exe", "GAME.EXE"}
 	if _, err := env.call(ipc.OpSetSettings, s); err != nil {
 		t.Fatal(err)
 	}
 	saved := env.h.settings.Read()
-	if saved.Mode != ipc.ModeGlobal || !reflect.DeepEqual(saved.DirectSites, []string{"bank.example"}) || !reflect.DeepEqual(saved.DirectPrograms, []string{"Telegram.exe"}) || !saved.TorrentsDirect || !saved.AutoConnect {
+	if saved.Mode != ipc.ModeGlobal || !reflect.DeepEqual(saved.DirectSites, []string{"bank.example"}) || !reflect.DeepEqual(saved.DirectPrograms, []string{"Telegram.exe", "GAME.EXE"}) || !saved.TorrentsDirect || !saved.AutoConnect {
 		t.Errorf("saved %+v", saved)
 	}
 	if env.tunnel.took() != "reconnect" || len(env.named(ipc.EventSettings)) != 1 {
@@ -438,12 +449,25 @@ func TestSettingsAreCheckedSavedAndApplied(t *testing.T) {
 		{func(s *ipc.Settings) { s.ProxySites = []string{"not a site"} }, "«not a site» не похоже на сайт или адрес"},
 		{func(s *ipc.Settings) { s.ProxyPrograms = []string{`C:\Tools\x.exe`} }, "не похоже на программу"},
 		{func(s *ipc.Settings) { s.ProxyPrograms = []string{"notes.txt"} }, "не похоже на программу"},
+		{func(s *ipc.Settings) { s.ProxyPrograms = []string{"..exe"} }, "не похоже на программу"},
+		{func(s *ipc.Settings) { s.ProxyPrograms = []string{"a\x01.exe"} }, "не похоже на программу"},
 		{func(s *ipc.Settings) { s.BlockSites = make([]string, maxSites+1) }, "Слишком много сайтов"},
+		{func(s *ipc.Settings) {
+			for i := range maxRegexps + 1 {
+				s.BlockSites = append(s.BlockSites, fmt.Sprintf("regexp:^ad%d", i))
+			}
+		}, "Слишком много правил regexp"},
+		{func(s *ipc.Settings) {
+			for i := range maxSites {
+				s.ProxySites = append(s.ProxySites, fmt.Sprintf("keyword:%0250d", i))
+				s.DirectSites = append(s.DirectSites, fmt.Sprintf("keyword:%0250d", i))
+			}
+		}, "Слишком много правил"},
 	} {
 		bad := defaultSettings()
 		c.change(&bad)
 		if _, err := env.call(ipc.OpSetSettings, bad); err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("%+v: %v", bad, err)
+			t.Errorf("%s: %v", clip(fmt.Sprintf("%+v", bad)), err)
 		}
 	}
 	if got := env.h.settings.Read(); got.Mode != ipc.ModeGlobal {
@@ -456,5 +480,104 @@ func TestLogsGoToTheWindow(t *testing.T) {
 	res, err := env.call(ipc.OpLogs, nil)
 	if err != nil || len(res.(ipc.Logs).Sections) != 1 {
 		t.Errorf("%+v %v", res, err)
+	}
+}
+
+func TestConnectingAtBootIsNoReasonToRestart(t *testing.T) {
+	env := newEnv(t)
+	s := defaultSettings()
+	s.AutoConnect = false
+	if _, err := env.call(ipc.OpSetSettings, s); err != nil {
+		t.Fatal(err)
+	}
+	if env.tunnel.took() != "" || len(env.named(ipc.EventSettings)) != 1 {
+		t.Errorf("tunnel %q, events %v", env.tunnel.took(), env.events)
+	}
+}
+
+func TestTheJournalIsReadOncePerSecond(t *testing.T) {
+	env := newEnv(t)
+	reads := 0
+	logs := env.h.logs
+	env.h.logs = func() ipc.Logs {
+		reads++
+		return logs()
+	}
+	now := time.UnixMilli(5000)
+	env.h.now = func() time.Time { return now }
+	for range 3 {
+		env.call(ipc.OpLogs, nil)
+	}
+	now = now.Add(logsFresh)
+	env.call(ipc.OpLogs, nil)
+	if reads != 2 {
+		t.Errorf("%d reads", reads)
+	}
+}
+
+func TestChecksRunInBatchesOneAtATime(t *testing.T) {
+	env := newEnv(t)
+	ids := env.servers(t, "de", "nl", "fi")
+	started := make(chan int, 4)
+	release := make(chan struct{})
+	env.h.pinger.probe = func(servers []model.StoredProfile) []int64 {
+		started <- len(servers)
+		<-release
+		return make([]int64, len(servers))
+	}
+	env.call(ipc.OpPing, ipc.PingArgs{IDs: ids[:1]})
+	if n := <-started; n != 1 {
+		t.Fatalf("the first batch checked %d servers", n)
+	}
+	// Asked for while it runs, the others wait for one batch together, and
+	// one deleted before it starts is not checked.
+	env.call(ipc.OpPing, ipc.PingArgs{IDs: ids[1:]})
+	env.call(ipc.OpDelete, ipc.IDArgs{ID: ids[2]})
+	select {
+	case n := <-started:
+		t.Fatalf("a second batch of %d ran alongside", n)
+	case <-time.After(50 * time.Millisecond):
+	}
+	release <- struct{}{}
+	if n := <-started; n != 1 {
+		t.Fatalf("the next batch checked %d servers, want the one left", n)
+	}
+	release <- struct{}{}
+	got := env.pingsWhenDone(t, 0)
+	want := ipc.Pings{ids[0]: {State: ipc.PingOK}, ids[1]: {State: ipc.PingOK}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("pings %+v", got)
+	}
+}
+
+// TestEverySettingCounts: a setting added to ipc.Settings must be compared
+// too, or changing it would not reach the tunnel or the windows.
+func TestEverySettingCounts(t *testing.T) {
+	base := defaultSettings()
+	v := reflect.ValueOf(&base).Elem()
+	for i := range v.NumField() {
+		changed := base
+		f := reflect.ValueOf(&changed).Elem().Field(i)
+		switch f.Kind() {
+		case reflect.String:
+			f.SetString("other")
+		case reflect.Bool:
+			f.SetBool(!f.Bool())
+		case reflect.Slice:
+			f.Set(reflect.ValueOf([]string{"x"}))
+		default:
+			t.Fatalf("%s: a kind of setting the test does not know", v.Type().Field(i).Name)
+		}
+		if equalSettings(base, changed) {
+			t.Errorf("%s is not compared", v.Type().Field(i).Name)
+		}
+		if routing := v.Type().Field(i).Name != "AutoConnect"; sameRouting(base, changed) == routing {
+			t.Errorf("%s: routing %v", v.Type().Field(i).Name, routing)
+		}
+	}
+	empty := base
+	empty.DirectSites = []string{}
+	if !equalSettings(base, empty) {
+		t.Error("an empty list differs from none")
 	}
 }

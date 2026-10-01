@@ -254,7 +254,9 @@ func (e *Engine) Reconnect() {
 			e.post(func() {
 				if generation == e.generation && (e.session != nil || e.held) {
 					e.d.Log("reconnecting: the server or the settings changed")
-					e.start(false, 0)
+					// A held start without should_run is the user's: it keeps
+					// the user's retries.
+					e.start(e.session == nil && !e.d.Runtime.ShouldRun(), 0)
 				}
 			})
 		})

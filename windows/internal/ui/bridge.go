@@ -67,8 +67,15 @@ func (b *Bridge) Delete(id string) error { return b.request(ipc.OpDelete, ipc.ID
 // Ping checks the servers with ids, or all of them when there are none.
 func (b *Bridge) Ping(ids []string) error { return b.request(ipc.OpPing, ipc.PingArgs{IDs: ids}, nil) }
 
-// SaveSettings saves the settings; the service checks them first.
-func (b *Bridge) SaveSettings(s ipc.Settings) error { return b.request(ipc.OpSetSettings, s, nil) }
+// SaveSettings saves the settings; the service checks them first. It
+// returns the window's state with them, which the service sent before it
+// answered, so that the page builds its next change on what was saved.
+func (b *Bridge) SaveSettings(s ipc.Settings) (Snapshot, error) {
+	if err := b.request(ipc.OpSetSettings, s, nil); err != nil {
+		return Snapshot{}, err
+	}
+	return b.link.snapshot(), nil
+}
 
 // Logs returns the journal: the service's and the core's logs, then the
 // window's own, which is there even when the service is not.

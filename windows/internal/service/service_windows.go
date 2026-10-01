@@ -147,8 +147,12 @@ func start(version string) (*app, error) {
 		return a, fmt.Errorf("network watch: %w", err)
 	}
 	xrayLog := filepath.Join(logDir, "xray.log")
+	// The tunnel and the server checks share one controller: every core
+	// takes over Xray's process-wide state, and only the controller gives
+	// it back to the tunnel (the plan's row 18).
+	core := controller{c: libxray.NewController(), log: log.Info}
 	eng = engine.New(engine.Deps{
-		Core:     controller{c: libxray.NewController(), log: log.Info},
+		Core:     core,
 		Binder:   binder,
 		Hold:     wfpHold{},
 		Runtime:  runtime,
@@ -164,14 +168,15 @@ func start(version string) (*app, error) {
 		tunnel:   eng,
 		profiles: profiles,
 		settings: settings,
-		pinger:   newPinger(measure, func(p ipc.Pings) { server.Broadcast(ipc.NewEvent(ipc.EventPings, p)) }),
+		pinger:   newPinger(core.probe, profiles.ReadStrict, func(p ipc.Pings) { server.Broadcast(ipc.NewEvent(ipc.EventPings, p)) }),
 		keys: func(ctx context.Context, text string) ([]model.Key, []string, error) {
 			return importer.Keys(ctx, text, importer.ForService)
 		},
 		site: libxray.UserRuleEntry,
 		logs: func() ipc.Logs {
 			return ipc.Logs{Sections: []ipc.LogSection{
-				{Title: "Служба Kirov VPN", Text: applog.Tail(filepath.Join(logDir, "service.log"), logTail, false)},
+				// Every user may read the journal: no server names either.
+				{Title: "Служба Kirov VPN", Text: applog.Tail(filepath.Join(logDir, "service.log"), logTail, true)},
 				{Title: "Ядро Xray", Text: applog.Tail(xrayLog, logTail, true)},
 			}}
 		},
@@ -208,30 +213,15 @@ func start(version string) (*app, error) {
 			}
 		}
 	}()
-	if !settings.Read().AutoConnect && windows.DurationSinceBoot() < bootWindow {
+	// Only at boot: a restart after a crash or an update brings back a
+	// tunnel the user connected by hand.
+	sinceBoot := windows.DurationSinceBoot()
+	if runtime.firstStartSince(time.Now().Add(-sinceBoot)) && sinceBoot < bootWindow && !settings.Read().AutoConnect {
 		log.Info("not connecting at boot: switched off in the settings")
 		runtime.SetShouldRun(false)
 	}
 	eng.Resume()
 	return a, nil
-}
-
-// measure checks how fast a server answers, through a core of its own, as
-// Android's ping does. The service runs it as SYSTEM, so the server's
-// outbounds pass the same check as when the tunnel starts.
-func measure(outbounds json.RawMessage) (int64, error) {
-	var obs []json.RawMessage
-	if err := json.Unmarshal(outbounds, &obs); err != nil {
-		return 0, err
-	}
-	if err := importer.ForService(obs); err != nil {
-		return 0, err
-	}
-	config, err := libxray.BuildProxyOnlyConfig(string(outbounds))
-	if err != nil {
-		return 0, err
-	}
-	return libxray.MeasureOutboundDelay(config, pingURL, pingTimeoutMs)
 }
 
 func (a *app) stop() {
@@ -260,6 +250,45 @@ func (c controller) Start(config string) error {
 }
 
 func (c controller) Stop() error { return c.c.Stop() }
+
+// probe checks how fast servers answer, as Android's ping does, in one
+// temporary core whose takeover of Xray's state the controller undoes. It
+// runs as SYSTEM, so each server passes the same check as when the tunnel
+// starts; one that does not counts as failed.
+func (c controller) probe(servers []model.StoredProfile) []int64 {
+	results := make([]int64, len(servers))
+	var (
+		candidates []json.RawMessage
+		at         []int
+	)
+	for i, s := range servers {
+		results[i] = -1
+		var obs []json.RawMessage
+		if json.Unmarshal(s.Outbounds, &obs) != nil || importer.ForService(obs) != nil {
+			continue
+		}
+		candidates = append(candidates, s.Outbounds)
+		at = append(at, i)
+	}
+	if len(candidates) == 0 {
+		return results
+	}
+	in, err := json.Marshal(candidates)
+	if err != nil {
+		return results
+	}
+	out, err := c.c.ProbeOutbounds(string(in), pingURL, pingTimeoutMs, pingParallel)
+	var ms []int64
+	if err != nil || json.Unmarshal([]byte(out), &ms) != nil || len(ms) != len(candidates) {
+		// Its text may quote a server.
+		c.log("server checks could not run")
+		return results
+	}
+	for j, i := range at {
+		results[i] = ms[j]
+	}
+	return results
+}
 
 type realClock struct{}
 

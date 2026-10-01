@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/klausms17/vpn/libxray/client/importer"
 	"github.com/klausms17/vpn/libxray/client/store"
@@ -55,7 +57,10 @@ func TestTheConfigHasTheWindowsTunnel(t *testing.T) {
 			sites = true
 		}
 	}
-	if len(programs) != 1+len(torrentClients) || programs[0] != "Telegram" || programs[1] != "qbittorrent" || !sites {
+	// Each client as it ships and in lower case, without the ".exe" Xray
+	// leaves out.
+	if len(programs) != 1+len(torrentRules) || programs[0] != "Telegram" || programs[1] != "qbittorrent" ||
+		!slices.Contains(programs, any("uTorrent")) || !slices.Contains(programs, any("utorrent")) || !sites {
 		t.Errorf("programs %v, site rule %v", programs, sites)
 	}
 	// Without torrents the clients go through the VPN like anything else.
@@ -76,5 +81,19 @@ func TestShouldRunIsKept(t *testing.T) {
 	newStore().SetShouldRun(true)
 	if !newStore().ShouldRun() {
 		t.Error("not kept")
+	}
+	// The first start after a boot, then a restart reckoning the boot a
+	// few seconds off, then the next boot.
+	boot := time.Unix(1_790_000_000, 0)
+	for i, c := range []struct {
+		boot  time.Time
+		first bool
+	}{{boot, true}, {boot.Add(3 * time.Second), false}, {boot.Add(-2 * time.Second), false}, {boot.Add(time.Hour), true}} {
+		if got := newStore().firstStartSince(c.boot); got != c.first {
+			t.Errorf("start %d: first %v", i, got)
+		}
+	}
+	if !newStore().ShouldRun() {
+		t.Error("should_run lost")
 	}
 }

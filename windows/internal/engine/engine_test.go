@@ -834,3 +834,21 @@ func TestWithoutWFPARestartGoesOnUnheld(t *testing.T) {
 		t.Errorf("logs %q", w.logs)
 	}
 }
+
+func TestAChangeDuringTheUsersRetriesKeepsThem(t *testing.T) {
+	w := newWorld(t)
+	w.core.failNext(errors.New("adapter busy"), errors.New("adapter busy"))
+	w.e.Connect()
+	w.sync()
+	// The user picks another server while a quiet retry waits: the change
+	// is tried at once and fails, and the user's retries go on.
+	w.e.Reconnect()
+	w.advance(reconnectDelay)
+	if s := w.last(); s.State != ipc.Connecting || s.Message != "" {
+		t.Fatalf("status %+v", s)
+	}
+	w.advance(1500 * time.Millisecond)
+	if s := w.last(); s.State != ipc.Connected {
+		t.Errorf("status %+v", s)
+	}
+}

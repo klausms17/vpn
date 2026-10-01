@@ -188,8 +188,7 @@ try {
   $sw = [Diagnostics.Stopwatch]::StartNew()
   while ($sw.Elapsed.TotalSeconds -lt 5) {
     $probes++
-    if (DnsProbe $nic $ip 100) { $answered++ }
-    Start-Sleep -Milliseconds 20
+    if (DnsProbe $nic $ip 50) { $answered++ }
   }
   $set.WaitForExit()
   Ctl wait-connected | Out-Null
