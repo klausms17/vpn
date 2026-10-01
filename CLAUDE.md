@@ -171,9 +171,9 @@ and give step-by-step instructions for anything he must do himself.
   45 issues; all are fixed except the ones listed as known limits below.
   The quality refactor is done: the service was split into classes and the
   UI into `UiSession` and `TunnelController`. The latest build is
-  `KirovVPN-1.0.64.apk` on the `build-claude-panel-privacy` release (Xray
-  v26.9.30, the core's log without addresses and names), signed with a
-  temporary key.
+  `KirovVPN-1.0.66.apk` on the `build-claude-panel-privacy` release (Xray
+  v26.9.30, the core's log without addresses and names, bounded user
+  rules), signed with a temporary key.
 - **Windows:** phase 1 of `docs/windows/PLAN.md` is built (1 Oct 2026):
   the service with Xray's TUN and WFP leak filters, the window and tray,
   the installer and `windows.yml`.
@@ -213,11 +213,12 @@ and give step-by-step instructions for anything he must do himself.
     security, refuse a file-writing key, connect through a local REALITY
     server, DNS filter, IPv6, the server check, the journal without
     addresses, a site and a program sent directly, no DNS around the
-    tunnel during a restart (0 of 34 probes), 50 restarts in 165 s with
-    506 → 516 handles and 20 → 19 threads, the service killed while
+    tunnel during a restart (0 of 72 probes), 50 restarts in 164 s with
+    515 → 517 handles and 19 → 19 threads, the service killed while
     connected and back, another VPN holding the address named at once,
-    install over itself, uninstall). The installer is on the
-    `windows-build-claude-panel-privacy` release.
+    install over itself, uninstall). The installer is
+    `KirovVPN-Setup-1.0.10.exe` on the `windows-build-claude-panel-privacy`
+    release; the owner has not tried it yet.
 - **iPhone:** phases 1–2 of `docs/ios/PLAN.md` are done. The Go core builds
   for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
   passes its checks (geo files in the extension, no bitcode). The app is
