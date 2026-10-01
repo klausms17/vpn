@@ -407,9 +407,13 @@ func (c *Controller) newProbeInstance(groups [][]any) (*core.Instance, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Under the controller's lock: a tunnel that started in between would
+	// lose the globals to this instance for good.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	inst, err := newInstance(string(cfg))
 	// Even a failed core.New may have taken the globals over already.
-	c.restoreGlobals(inst)
+	c.restoreGlobalsLocked(inst)
 	return inst, err
 }
 
@@ -423,6 +427,10 @@ func (c *Controller) newProbeInstance(groups [][]any) (*core.Instance, error) {
 func (c *Controller) restoreGlobals(probe *core.Instance) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.restoreGlobalsLocked(probe)
+}
+
+func (c *Controller) restoreGlobalsLocked(probe *core.Instance) {
 	if c.cur == nil {
 		return
 	}

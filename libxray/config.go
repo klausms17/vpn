@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"regexp/syntax"
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/klausms17/vpn/libxray/internal/privileged"
 )
@@ -343,7 +345,7 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 	}{{o.DirectPrograms, DirectTag}, {o.ProxyPrograms, ProxyTag}} {
 		var names []string
 		for _, n := range up.names {
-			if n = programName(n); n != "" && !slices.Contains(names, n) {
+			if n = ProgramName(n); n != "" && !slices.Contains(names, n) {
 				names = append(names, n)
 			}
 		}
@@ -547,39 +549,61 @@ func UserRuleEntry(entry string) string {
 	case domain == "":
 		return ""
 	}
-	e := strings.TrimSpace(strings.ToLower(entry))
-	if prefix, _, ok := strings.Cut(e, ":"); ok && (prefix == "domain" || prefix == "full" || prefix == "keyword" || prefix == "regexp") {
-		return e
+	if prefix, _, ok := strings.Cut(strings.TrimSpace(entry), ":"); ok && slices.Contains(xrayDomainForms, strings.ToLower(prefix)) {
+		return domain
 	}
 	return strings.TrimPrefix(domain, "domain:")
 }
 
+var xrayDomainForms = []string{"domain", "full", "keyword", "regexp"}
+
+// Bounds of a user rule. A domain name has at most 253 characters, and a
+// keyword or a regexp longer than that is no site but a way to make the
+// core's start slow and big; Xray compiles every regexp rule at each
+// start, and a short pattern can still expand a lot ("a{1000}"). A link
+// may be longer: only its host is kept.
+const (
+	maxRuleEntry   = 253
+	maxRuleLink    = 2048
+	maxRegexpInsts = 1000
+)
+
 // userRule converts one user entry into an Xray domain or IP matcher; both
 // are "" for an entry that is not valid.
 func userRule(e string) (domain, ip string) {
-	e = strings.TrimSpace(strings.ToLower(e))
-	if e == "" || strings.HasPrefix(e, "#") {
+	e = strings.TrimSpace(e)
+	if e == "" || len(e) > maxRuleLink || strings.HasPrefix(e, "#") {
 		return "", ""
 	}
 	if prefix, rest, ok := strings.Cut(e, ":"); ok {
-		switch prefix {
-		case "domain", "full", "keyword":
-			if rest != "" && (prefix == "keyword" || domainRe.MatchString(rest)) {
+		switch prefix = strings.ToLower(prefix); prefix {
+		case "domain", "full":
+			if rest = strings.ToLower(rest); len(rest) <= maxRuleEntry && domainRe.MatchString(rest) {
+				return prefix + ":" + rest, ""
+			}
+			return "", ""
+		case "keyword":
+			if rest = strings.ToLower(rest); rest != "" && len(rest) <= maxRuleEntry && printableASCII(rest) {
 				return prefix + ":" + rest, ""
 			}
 			return "", ""
 		case "regexp":
-			if _, err := regexp.Compile(rest); err == nil && rest != "" {
-				return e, ""
+			// As typed: in lower case \D, \S and \W would mean their
+			// opposites.
+			if rest != "" && len(rest) <= maxRuleEntry && printableASCII(rest) && smallRegexp(rest) {
+				return prefix + ":" + rest, ""
 			}
 			return "", ""
 		case "http", "https":
 			// A pasted URL: keep the host.
-			if h := hostFromURL(e); h != "" {
+			if h := hostFromURL(strings.ToLower(e)); h != "" && len(h) <= maxRuleEntry {
 				return "domain:" + h, ""
 			}
 			return "", ""
 		}
+	}
+	if e = strings.ToLower(e); len(e) > maxRuleEntry {
+		return "", ""
 	}
 	if pfx, err := netip.ParsePrefix(e); err == nil {
 		if pfx.Addr().Is4In6() {
@@ -609,18 +633,41 @@ func userRule(e string) (domain, ip string) {
 	return "", ""
 }
 
-// programName is the name a process rule matches for a program the user
-// gave by its file name ("Telegram.exe"), or "" for anything that is not
-// a plain file name.
-func programName(name string) string {
-	name = strings.TrimSpace(name)
-	if len(name) > 4 && strings.EqualFold(name[len(name)-4:], ".exe") {
-		name = name[:len(name)-4]
-	}
-	if name == "" || len(name) > 255 || strings.ContainsAny(name, `/\:*?"<>|`) || strings.TrimLeft(name, ".") == "" {
+// ProgramName checks a program the user gave by its file name
+// ("Telegram.exe") for the program lists of BuildOptions. It returns the
+// name a process rule matches, or "" for anything that is not a plain file
+// name. Xray compares names exactly, as Windows reports them, without a
+// lower-case ".exe": "Telegram.exe" matches "Telegram", "GAME.EXE" only
+// "GAME.EXE".
+func ProgramName(name string) string {
+	name = strings.TrimSuffix(strings.TrimSpace(name), ".exe")
+	if name == "" || len(name) > 255 || strings.ContainsAny(name, `/\:*?"<>|`) || strings.TrimLeft(name, ".") == "" ||
+		strings.ContainsFunc(name, unicode.IsControl) {
 		return ""
 	}
 	return name
+}
+
+// printableASCII tells whether s has only visible ASCII characters, as
+// domain names have.
+func printableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] <= ' ' || s[i] > '~' {
+			return false
+		}
+	}
+	return true
+}
+
+// smallRegexp tells whether expr compiles, in the syntax Xray uses, to at
+// most maxRegexpInsts instructions.
+func smallRegexp(expr string) bool {
+	re, err := syntax.Parse(expr, syntax.Perl)
+	if err != nil {
+		return false
+	}
+	prog, err := syntax.Compile(re.Simplify())
+	return err == nil && len(prog.Inst) <= maxRegexpInsts
 }
 
 func hostFromURL(s string) string {

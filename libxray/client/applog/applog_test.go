@@ -45,10 +45,13 @@ func TestAnUnwritableLogIsIgnored(t *testing.T) {
 	l.Info("nobody hears this") // no panic, no error
 }
 
-func TestIPAddressesAreMasked(t *testing.T) {
+func TestAddressesAndNamesAreMasked(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "service.log")
 	New(path).Warn("pin failed: dial tcp 203.0.113.7:443")
-	if data, _ := os.ReadFile(path); !strings.HasSuffix(string(data), "W pin failed: dial tcp [IP]:443\n") {
+	New(path).Error("core did not start: tls: server name cdn.Example.com, Xray 26.9.30")
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), " W pin failed: dial tcp [IP]:443\n") ||
+		!strings.Contains(string(data), " E core did not start: tls: server name [host], Xray 26.9.30\n") {
 		t.Errorf("log %q", data)
 	}
 }

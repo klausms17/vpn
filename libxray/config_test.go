@@ -424,33 +424,59 @@ func TestDNSServesStaleNames(t *testing.T) {
 
 func TestUserRuleEntry(t *testing.T) {
 	for in, want := range map[string]string{
-		"  Example.COM ":                      "example.com",
-		"*.corp.example":                      "corp.example",
-		"https://www.youtube.com/watch?v=abc": "www.youtube.com",
-		"domain:Example.org":                  "domain:example.org",
-		"full:api.example.net":                "full:api.example.net",
-		"keyword:bank":                        "keyword:bank",
-		"regexp:^ya\\.":                       "regexp:^ya\\.",
-		"10.1.2.3":                            "10.1.2.3",
-		"10.1.0.0/16":                         "10.1.0.0/16",
-		"10.1.2.3/16":                         "10.1.0.0/16",
-		"сайт.рф":                             "сайт.рф",
-		"bad domain!":                         "",
-		"regexp:(":                            "",
-		"fe80::1%eth0":                        "",
-		"":                                    "",
-		"# a comment":                         "",
+		"  Example.COM ":                             "example.com",
+		"*.corp.example":                             "corp.example",
+		"https://www.youtube.com/watch?v=abc":        "www.youtube.com",
+		"domain:Example.org":                         "domain:example.org",
+		"full:api.example.net":                       "full:api.example.net",
+		"keyword:bank":                               "keyword:bank",
+		"regexp:^ya\\.":                              "regexp:^ya\\.",
+		"REGEXP:^Ya\\D":                              "regexp:^Ya\\D",
+		"Keyword:Bank":                               "keyword:bank",
+		"keyword:a b":                                "",
+		"regexp:a{1000}a{1000}":                      "",
+		"keyword:" + strings.Repeat("a", 254):        "",
+		"regexp:" + strings.Repeat("a", 254):         "",
+		strings.Repeat("a", 250) + ".com":            "",
+		"https://ya.ru/" + strings.Repeat("x", 1000): "ya.ru",
+		"10.1.2.3":                                   "10.1.2.3",
+		"10.1.0.0/16":                                "10.1.0.0/16",
+		"10.1.2.3/16":                                "10.1.0.0/16",
+		"сайт.рф":                                    "сайт.рф",
+		"bad domain!":                                "",
+		"regexp:(":                                   "",
+		"fe80::1%eth0":                               "",
+		"":                                           "",
+		"# a comment":                                "",
 	} {
 		if got := UserRuleEntry(in); got != want {
 			t.Errorf("%q -> %q, want %q", in, got, want)
 		}
 	}
 	// What is saved builds the same rule again.
-	for _, in := range []string{"*.corp.example", "https://www.youtube.com/x", "10.1.2.3/16", "keyword:bank"} {
+	for _, in := range []string{"*.corp.example", "https://www.youtube.com/x", "10.1.2.3/16", "keyword:bank", "REGEXP:^Ya\\D"} {
 		d1, ip1 := userRule(in)
 		d2, ip2 := userRule(UserRuleEntry(in))
 		if d1 != d2 || ip1 != ip2 {
 			t.Errorf("%q: %q %q, saved %q %q", in, d1, ip1, d2, ip2)
+		}
+	}
+}
+
+func TestProgramName(t *testing.T) {
+	for in, want := range map[string]string{
+		"Telegram.exe": "Telegram",
+		" curl.exe ":   "curl",
+		"GAME.EXE":     "GAME.EXE",
+		"uTorrent":     "uTorrent",
+		"..exe":        "",
+		"a\x01b.exe":   "",
+		`C:\x.exe`:     "",
+		"self/":        "",
+		"":             "",
+	} {
+		if got := ProgramName(in); got != want {
+			t.Errorf("%q -> %q, want %q", in, got, want)
 		}
 	}
 }
@@ -478,7 +504,7 @@ func TestProgramRulesComeAfterBlockedSitesAndBeforeSites(t *testing.T) {
 			order = append(order, fmt.Sprintf("%v>%v", r["domain"], r["outboundTag"]))
 		}
 	}
-	want := []string{"[domain:ads.example.com]>block", "[qbittorrent uTorrent]>direct", "[Telegram]>proxy", "[domain:example.org]>direct", "[geosite:ru-blocked]>proxy"}
+	want := []string{"[domain:ads.example.com]>block", "[qbittorrent uTorrent]>direct", "[Telegram.EXE]>proxy", "[domain:example.org]>direct", "[geosite:ru-blocked]>proxy"}
 	if !reflect.DeepEqual(order, want) {
 		t.Errorf("rules %v, want %v", order, want)
 	}

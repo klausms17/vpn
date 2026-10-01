@@ -1,7 +1,8 @@
 // Package applog is the app's own small log, as Android's AppLog: lines
 // "MM-dd HH:mm:ss L message" appended to a file that moves to "<name>.1"
 // once it is over MaxBytes. Never log keys, links, passwords, IPs or
-// server names; IP addresses that an error text brings along are masked.
+// server names; the IP addresses and host names that an error text brings
+// along are masked (file names with them).
 package applog
 
 import (
@@ -48,7 +49,7 @@ func (l *Log) line(level byte, msg string) {
 	b.WriteByte(' ')
 	b.WriteByte(level)
 	b.WriteByte(' ')
-	b.WriteString(redact.IPs(msg))
+	b.WriteString(redact.Hosts(redact.IPs(msg)))
 	b.WriteByte('\n')
 
 	l.mu.Lock()

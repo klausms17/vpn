@@ -21,9 +21,12 @@ func LastBytes(path string, limit int) ([]byte, error) {
 	// One byte more, to see whether the kept part begins a line.
 	start := max(st.Size()-int64(limit)-1, 0)
 	buf := make([]byte, st.Size()-start)
-	if _, err := f.ReadAt(buf, start); err != nil && err != io.EOF {
+	// The file may have been cut meanwhile: only what was read counts.
+	n, err := f.ReadAt(buf, start)
+	if err != nil && err != io.EOF {
 		return nil, err
 	}
+	buf = buf[:n]
 	if st.Size() > int64(limit) {
 		// buf starts a byte before the kept part: what follows its first
 		// line end is kept, so that no half line remains.
