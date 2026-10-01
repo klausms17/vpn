@@ -87,7 +87,7 @@ try {
   $acl = (Get-Acl $data).Access | ForEach-Object { $_.IdentityReference.Value }
   Check (-not ($acl | Where-Object { $_ -notmatch 'SYSTEM|Administrators|Администраторы' })) "only SYSTEM and administrators may open the data folder ($($acl -join ', '))"
   $sddl = "$(Ctl pipe-sddl)"
-  Check ($sddl -match '^O:SY' -and $sddl -match ';;;IU\)' -and $sddl -match 'S:\(ML;;NWNRNX;;;ME\)') "the pipe is SYSTEM's, for signed-in users and not for sandboxes ($sddl)"
+  Check ($sddl -match '^O:SY' -and $sddl -match ';;;IU\)' -and $sddl -match 'S:[A-Z]*\(ML;;NWNRNX;;;ME\)') "the pipe is SYSTEM's, for signed-in users and not for sandboxes ($sddl)"
   Write-Host '::endgroup::'
 
   Write-Host '::group::The window loads'
@@ -101,6 +101,11 @@ try {
   for ($i = 0; $i -lt 60 -and -not (Test-Path "$work\link.txt"); $i++) { Start-Sleep -Milliseconds 500 }
   Get-Content "$work\link.txt" | & (Join-Path $Tools 'kirovctl.exe') import
   Check ($LASTEXITCODE -eq 0) 'the key was added'
+  # A key whose XHTTP "extra" asks for xdrive's local storage, which would
+  # write files as SYSTEM.
+  $extra = [uri]::EscapeDataString('{"downloadSettings":{"network":"xdrive","xdriveSettings":{"service":"local","remoteFolder":"C:\\KirovSmokeXdrive"}}}')
+  $out = "vless://11111111-2222-3333-4444-555555555555@127.0.0.1:1?type=xhttp&security=tls&pcs=$('ab' * 32)&extra=$extra#bad" | & (Join-Path $Tools 'kirovctl.exe') import
+  Check ($LASTEXITCODE -ne 0 -and "$out" -match 'downloadSettings\.network: xdrive' -and -not (Test-Path 'C:\KirovSmokeXdrive')) "a key that would write files as SYSTEM is refused ($out)"
   Ctl connect | Out-Null
   Check ((Get-NetAdapter -Name 'Kirov VPN').Status -eq 'Up') 'the Kirov VPN adapter is up'
   Check (Http204) 'a site answers through the tunnel'
