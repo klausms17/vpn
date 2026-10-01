@@ -79,9 +79,10 @@ Android's UI process does imports, pings, subscription adds and update checks it
 
 ### 2.2 Data and files
 
-- **`C:\Program Files\Kirov VPN\`**: both exes, `wintun.dll` (amd64), `geo\` (the bundled `geoip.dat`, `geosite.dat`, `version.txt`), `licenses\`.
-- **`C:\ProgramData\Kirov VPN\`**: only SYSTEM and Administrators.
-  - At every start the service checks that the folder belongs to SYSTEM or Administrators and resets its protected ACL. A folder that someone else created before installation is moved aside and recreated.
+- **`C:\Program Files\Kirov VPN\`**: both exes, `wintun.dll` (amd64), `geo\` (the bundled `geoip.dat`, `geosite.dat`, `version.txt`), `licenses\`. The installer refuses any other folder (`/DIR=`), because the service runs as SYSTEM from it.
+- **`C:\Program Files\Kirov VPN\Data\`**: only SYSTEM and Administrators.
+  - Next to the programs, as WireGuard keeps its data: only administrators can create anything there. In `C:\ProgramData` every user may create folders, so a user could make the folder before the service and hold it open to keep the service from starting.
+  - At every start the service creates it with a protected ACL, or sets that ACL and its owner again; a link in its place is refused.
   - Contents:
     - `data\profiles.json` and `data\settings.json`: the JSON of Android's `Models.kt`, with `JsonFileStore` semantics (temporary file, fsync, rename; an undecodable file is set aside, at most 3 kept). On disk they are encrypted with DPAPI for SYSTEM, as WireGuard stores its configurations, because profiles hold keys and subscription links;
     - `data\runtime.json`: Android's `vpn_runtime` preferences (`should_run`, budgets, the way back home);
@@ -91,6 +92,8 @@ Android's UI process does imports, pings, subscription adds and update checks it
   - The service is the only writer, so no cross-process file lock is needed.
 - **`%LOCALAPPDATA%\Kirov VPN\`** (per user): `ui.log`, `ui.json` (dismissed update, window position, "do not start at logon"), and the WebView2 user data folder. The default folder next to the exe is not writable under Program Files.
 - **Privacy, as on Android:** no keys, links, IPs or server hostnames in any log; Go error texts never quote link bodies.
+  - The app's own logs mask every IP address in a line, and the engine drops the server's address from logged core errors.
+  - The core logs warnings with `maskAddress: "full"`, without access or DNS log.
 - **Replacing files.** Go opens files without `FILE_SHARE_DELETE` and `os.Rename` does not retry, so an antivirus reading a file makes replacing it fail. `fsx.Replace` retries for about 2 seconds; it is used for geo files, downloads, saved data and log rotation.
 
 ### 2.3 Service and window: the pipe
@@ -98,16 +101,21 @@ Android's UI process does imports, pings, subscription adds and update checks it
 - **The pipe.** `\\.\pipe\ProtectedPrefix\Administrators\KirovVPN\control`.
   - The service creates it at start with the first-instance flag; only administrators can create pipes under that prefix, so nobody can squat the name while the service restarts.
   - It rejects remote clients.
-  - SDDL: `O:SYG:SYD:P(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12019b;;;IU)`.
+  - SDDL: `O:SYG:SYD:P(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12019b;;;IU)S:(ML;;NWNRNX;;;ME)`.
     - Interactive users get read and write without `FILE_APPEND_DATA`, which for pipes is `FILE_CREATE_PIPE_INSTANCE`, so they can talk but cannot add instances.
     - Network logons are denied explicitly.
+    - The medium integrity label with no read up: sandboxed programs (low integrity) cannot even read the status.
 - **The window's side.** It dials with access `0x120083` at identification impersonation level, overlapped, and checks that the pipe belongs to SYSTEM. `namedpipe`'s own dial asks for `GENERIC_WRITE`, which the ACL refuses users, so the window opens the pipe itself (`ipc.Dial`).
 - **The service's side** (phase 3, for toasts in the right session). It reads the caller's user and session from its token: `ImpersonateNamedPipeClient` on a locked thread, then `RevertToSelf`; if that fails, the process exits. Caller identity grants no extra rights.
 - **Messages.** Newline-delimited JSON.
   - Requests `{id, op, args}` get `{id, result}` or `{id, error}`; the error is a Russian text the window shows as it is.
   - Events go to every window: `hello` (the protocol version), `status` (Android's `onStatus`: state, profile id and name, message, connected since), `profiles` (Android's `onProfilesChanged`, without keys or links); later `busy` (the busy captions) and `toast`. A new window gets `hello`, `status` and `profiles` first.
   - The protocol is versioned; a window of another version asks to be restarted after an update.
-  - Limits: 32 connections, 8 requests running per connection (more are told to wait), 64 queued messages (a window that reads no more is dropped), 2 MB per line.
+  - Limits: 32 connections; per connection 8 requests running and 20 at once then 10 a second (more are told to wait); 64 queued messages (a window that reads no more is dropped); 2 MB per line, which neither side sends beyond.
+  - A connection keeps its place until its running requests end, so all windows together run at most 256 requests. When a window hangs up, its requests are cancelled.
+  - The heavy request, `import`, runs one at a time and fetches at most 16 certificates (four at once), each a connection outside the tunnel to whatever the key names.
+  - Saved servers are capped at 1000 and their names at 100 characters, so the server list always fits in one message.
+  - The window waits longer and longer before dialling again after a failed dial or a connection that ended at once.
 - **Operations** (phase 1 has `status`, `import`, `connect` and `disconnect`):
   - connection: `status`, `connect {picked}`, `disconnect`, `reconnect {picked}`, `select`;
   - servers: `import {text}` (at most 256 KB, Android's cap), `refresh {subscription}`, `rename`, `delete`, `ping {ids}`, `pingAll`;
@@ -365,7 +373,7 @@ On any failure the script prints the logs and stops the service first, so the ru
 - **After copying:** `KirovVPNService.exe install`, which creates or updates the service and starts it. The service starts the tray app in each active session.
   - Interactive installs also start it in the installing user's session.
   - Never a `[Run]` entry while running as SYSTEM: the app would start in session 0, where nobody sees it.
-- **Uninstall:** `KirovVPNService.exe uninstall`, then the files, registry keys and `C:\ProgramData\Kirov VPN`. Keys must not stay behind on a PC that is given away.
+- **Uninstall:** `KirovVPNService.exe uninstall`, then the files, registry keys and `Data\`. Keys must not stay behind on a PC that is given away.
   - `uninstall` stops and deletes the service; the adapter goes with the process.
   - It removes the wintun driver if no adapter uses it (`WintunDeleteDriver`); another wintun program reinstalls it on first use.
 
@@ -381,7 +389,7 @@ On any failure the script prints the logs and stops the service first, so the ru
 2. **What it checks:** the signature against the public key in the source. `versionCode` must be higher than the installed one and than any seen before, which stops rollback attacks (Mozilla CVE-2020-15663). `minBuild` must fit the system.
 3. **The card.** It shows «Доступна новая версия 1.0.N» with «Позже» and «Обновить», as on Android.
 4. **Install.** «Обновить» makes the service:
-   - download into `C:\ProgramData\Kirov VPN\update\`, checking size and SHA-256 while it downloads;
+   - download into `Data\update\`, checking size and SHA-256 while it downloads;
    - start the installer detached: `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /NOCANCEL /LOG=…`.
 
    The installer stops the service, replaces the files and starts it again. The service resumes the tunnel if it was on, and starts the tray app in each session again.
