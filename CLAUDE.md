@@ -101,9 +101,9 @@ and give step-by-step instructions for anything he must do himself.
   - iOS compile check of the core:
     `GOOS=ios GOARCH=arm64 CGO_ENABLED=0 go build .` and
     `GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go vet -tags ios .`
-  - Panel: start Docker (`dockerd &`), then
-    `WORK=/tmp/rw bash server/remnawave/test/run-local.sh`. It takes about
-    25 minutes and must end with `ALL CHECKS PASSED`.
+  - Panel: start Docker (`dockerd &`; install `iproute2` if `ip` is
+    missing), then `WORK=/tmp/rw bash server/remnawave/test/run-local.sh`.
+    It takes about 25 minutes and must end with `ALL CHECKS PASSED`.
     `python3 -B server/remnawave/test/monitor_test.py` runs the monitor
     tests alone.
 - Keep `tools/jvm-check/stubs` in step with the AIDL files and the
@@ -142,13 +142,13 @@ and give step-by-step instructions for anything he must do himself.
 - **Panel:** installed on the owner's own panel VPS on 28 Sep 2026; the old
   German VPN server is registered as node `de-1` but not switched over yet
   (`MIGRATE=1`, once friends have their links). The privacy changes and
-  `klaus-page.html` of 28 Sep (see the map above) have not been through
-  the Docker e2e yet: run it in a cloud session, never on the live panel. Friends can be added in
-  the web form too (see `tidy-users` above), so the owner needs no custom
-  admin UI.
-- The work of `claude/compassionate-mayer-6jph8m` goes to `main` through a
-  PR from `claude/pensive-gates-mddsan`. Once it is merged, start new work
-  from `main`.
+  `klaus-page.html` of 28 Sep (see the map above) pass the Docker e2e
+  (1 Oct 2026, run in a cloud session; never run it on the live panel).
+  Friends can be added in the web form too (see `tidy-users` above), so the
+  owner needs no custom admin UI.
+- `main` has everything up to 27 Sep (PR 1). `claude/panel-privacy` goes to
+  `main` through https://github.com/klausms17/vpn/pull/2; once it is
+  merged, start new work from `main`.
 - The owner's servers: the current VPN (`install.sh`, one shared key) runs
   on a VPS in Germany; the owner also has a Beget VPS in Russia.
 
