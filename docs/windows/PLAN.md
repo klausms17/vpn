@@ -93,7 +93,7 @@ Android's UI process does imports, pings, subscription adds and update checks it
 - **`%LOCALAPPDATA%\Kirov VPN\`** (per user): `ui.log`, `ui.json` (dismissed update, window position, "do not start at logon"), and the WebView2 user data folder. The default folder next to the exe is not writable under Program Files.
 - **Privacy, as on Android:** no keys, links, IPs or server hostnames in any log; Go error texts never quote link bodies.
   - The app's own logs mask every IP address in a line, and the engine drops the server's address from logged core errors.
-  - The core logs warnings with `maskAddress: "full"`, without access or DNS log.
+  - The core's log file goes through a filter that takes out IP addresses and host names (`libxray/xraylog.go`): Xray's warnings and errors quote the names it failed to resolve or reach, the server's among them. There is no access or DNS log.
 - **Replacing files.** Go opens files without `FILE_SHARE_DELETE` and `os.Rename` does not retry, so an antivirus reading a file makes replacing it fail. `fsx.Replace` retries for about 2 seconds; it is used for geo files, downloads, saved data and log rotation.
 
 ### 2.3 Service and window: the pipe
@@ -127,6 +127,11 @@ Android's UI process does imports, pings, subscription adds and update checks it
   - raw Xray JSON, whose log paths, inbounds, `api` and `sockopt` could write files as SYSTEM or open ports.
 
   Every argument is validated and sized, each connection is rate-limited, and keys and links are never sent back except by «Скопировать ключ».
+- **What the core may run.** A key is text from whoever wrote it, and so is a pasted config or a link's `extra` and `fm` JSON. Xray outbounds can do more than connect: xdrive's local storage writes files wherever it is told, TLS and REALITY write key logs and read certificate files, a VLESS `reverse` lets the server into the PC's network, and a `freedom` outbound sends everything past the server.
+  - `libxray/internal/privileged` lets through only what share links make: the proxy protocols (VLESS, VMess, Trojan, Shadowsocks, Hysteria), the RAW, WS, HTTPUpgrade, gRPC, XHTTP and Hysteria transports, TLS and REALITY client settings, XHTTP's `extra` and download settings, the fragment, noise, salamander and header masks, and a few socket options. Keys are matched as Xray's JSON loader matches them, whatever their case; anything else is refused.
+  - The service's import skips a refused key before fetching any certificate for it, and `BuildOptions.Windows` refuses it again before the core starts.
+  - Android and iOS run the core in their app sandbox and are not limited this way.
+- **The window's page.** Its calls to the service go through the window's own asset server, which refuses any request whose `Origin` is not the page's (`http://wails.localhost`), and the page ignores dropped links and files, so the window cannot be led to a foreign page that calls the service.
 - **Who may control it.** Any interactive user of the PC: a family PC shares one VPN, like a router. Nothing needs administrator rights after installation.
 
 ### 2.4 The tunnel on Windows
@@ -160,7 +165,7 @@ Android's UI process does imports, pings, subscription adds and update checks it
    - the service also turns NetBIOS off on the adapter (`NetbiosOptions=2` under `NetBT\Parameters\Interfaces\Tcpip_{GUID}`), as Tailscale does.
 7. **LAN** (printers, casting, the router page) stays outside over IPv4, as on Android.
 8. **Restarts.** Xray removes the adapter, its routes and the filters at Stop, and creates them again at Start. Android's VPN interface outlives the core.
-   - In between, about a second, traffic follows the physical routes, and browsers see a network change (Chrome may show `ERR_NETWORK_CHANGED` for requests in flight).
+   - In between, traffic follows the physical routes, and browsers see a network change (Chrome may show `ERR_NETWORK_CHANGED` for requests in flight). That takes about a second; if Windows is slow to bring the adapter up, Xray tries for up to 15 seconds. It happens on a reset after a move to another network or a wake from sleep, and when the engine starts the core again after a failure.
    - Phase 4 measures and closes it (row 25):
      - server switches replace the proxy outbounds in the running core;
      - resets after a network change hold traffic with WFP;
@@ -194,6 +199,7 @@ Android's UI process does imports, pings, subscription adds and update checks it
 - **Crash and restart.**
   - The Service Control Manager restarts the service after 2, 10 and 60 seconds; the failure count resets after a day; non-crash failures count too (`SetRecoveryActionsOnNonCrashFailures`).
   - A marker file tells a crash from a clean stop. If the service has restarted 3 times within 5 minutes while it should run, it does not resume by itself and shows Android's message («VPN несколько раз аварийно остановился…»). This is Android's `RestartGuard`.
+  - A bug in one of the engine's jobs does not take the service down: the panic is logged with its stack, the tunnel goes down and the window shows «Внутренняя ошибка Kirov VPN. Подключитесь снова.» (phase 1).
 - **Boot.** The service starts at boot (automatic, not delayed) and reconnects if the VPN was on (`should_run`). This replaces Android's always-on VPN and sticky restart.
   - Early in boot the adapter's IP interface may not exist yet. Xray retries for 15 seconds, and the service retries the start after that, as WireGuard does.
   - The setting «Подключаться при включении компьютера» is on by default.
