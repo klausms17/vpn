@@ -1,0 +1,78 @@
+<!doctype html>
+<!-- Kirov VPN for Windows: the window. It only shows what the service
+     reports and sends it requests (app.js); nothing is loaded from other
+     sites. The look is that of server/remnawave/klaus-page.html. -->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>Kirov VPN</title>
+<link rel="stylesheet" href="app.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<div class="wall" aria-hidden="true"></div>
+
+<main class="page">
+  <header class="top">
+    <span class="mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/></svg>
+    </span>
+    Kirov VPN
+  </header>
+
+  <section class="hero" id="hero" data-state="noservice">
+    <button type="button" class="orb" id="power" aria-label="Подключить" disabled>
+      <span class="ring r3" aria-hidden="true"></span>
+      <span class="ring r2" aria-hidden="true"></span>
+      <span class="ring r1" aria-hidden="true"></span>
+      <span class="disc" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3.5v8"/>
+          <path d="M7.05 6.6a7.5 7.5 0 1 0 9.9 0"/>
+        </svg>
+      </span>
+    </button>
+    <h1 id="title">Kirov VPN</h1>
+    <p class="lede" id="detail" aria-live="polite"></p>
+  </section>
+
+  <section class="sheet server" id="server-sheet">
+    <div class="server-row">
+      <span class="server-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5c2.4 2.3 3.6 5.1 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.1-3.6-8.5s1.2-6.2 3.6-8.5z"/></svg>
+      </span>
+      <div class="server-text">
+        <span class="server-label">Сервер</span>
+        <span class="server-name" id="server-name">—</span>
+      </div>
+    </div>
+    <button type="button" class="btn tint" id="add-open">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+      Добавить ключ
+    </button>
+  </section>
+
+  <section class="sheet add" id="add-sheet" hidden>
+    <h2>Добавить ключ</h2>
+    <p>Вставьте ключ сервера (vless://, trojan://, ss://, hysteria2://) или сообщение, в котором он есть.</p>
+    <textarea id="key" rows="4" spellcheck="false" autocomplete="off" placeholder="vless://…" aria-label="Ключ сервера"></textarea>
+    <div class="actions">
+      <button type="button" class="btn small" id="add-cancel">Отмена</button>
+      <button type="button" class="btn primary" id="add-save">Добавить</button>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <p class="priv">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></svg>
+      Ключи хранятся только на этом компьютере, в зашифрованном виде.
+    </p>
+    <p class="version" id="version"></p>
+  </footer>
+</main>
+
+<div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

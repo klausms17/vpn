@@ -6,9 +6,10 @@ on:
     # A v* tag makes the stable build friends get (see "Publish stable
     # release"); tags are built whatever files changed.
     tags: ["v*"]
-    # The iPhone app has its own workflows (ios.yml, ios-app.yml); docs/
-    # and tools/ (a local check, see tools/jvm-check) change no APK.
-    paths-ignore: ["**.md", "docs/**", "tools/**", "ios/**", ".github/workflows/ios*.yml"]
+    # The iPhone and Windows apps have their own workflows (ios.yml,
+    # ios-app.yml, windows.yml); docs/ and tools/ (a local check, see
+    # tools/jvm-check) change no APK.
+    paths-ignore: ["**.md", "docs/**", "tools/**", "ios/**", "windows/**", ".github/workflows/ios*.yml", ".github/workflows/windows.yml"]
   workflow_dispatch:
     inputs:
       stable:
