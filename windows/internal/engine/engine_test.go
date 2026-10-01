@@ -185,7 +185,12 @@ func newWorld(t *testing.T) *world {
 			defer w.mu.Unlock()
 			return w.profiles, nil
 		},
-		Build:   func(p model.StoredProfile) (string, error) { return "config of " + p.ID, nil },
+		Build: func(p model.StoredProfile) (string, error) {
+			if p.ID == "bug" {
+				panic("a bug")
+			}
+			return "config of " + p.ID, nil
+		},
 		TrimLog: func() {},
 		Publish: func(s ipc.Status) {
 			w.mu.Lock()
@@ -540,5 +545,37 @@ func TestTheLogNeverNamesTheServer(t *testing.T) {
 	}
 	if !slices.ContainsFunc(w.logs, func(l string) bool { return strings.Contains(l, `invalid address: "<server>"`) }) {
 		t.Errorf("logs %q", w.logs)
+	}
+}
+
+func TestABugTakesTheTunnelDownNotTheService(t *testing.T) {
+	w := newWorld(t)
+	w.e.Connect()
+	w.sync()
+	w.mu.Lock()
+	w.profiles.Profiles = append(w.profiles.Profiles, model.StoredProfile{ID: "bug", Name: "Ошибка"})
+	w.profiles.SelectedID = "bug"
+	w.mu.Unlock()
+	w.e.Disconnect()
+	w.e.Connect()
+	w.sync()
+	if got := w.last(); got.State != ipc.Failed || got.Message != "Внутренняя ошибка Kirov VPN. Подключитесь снова." {
+		t.Errorf("status %+v", got)
+	}
+	if running, _, _ := w.core.state(); running || w.runtime.ShouldRun() {
+		t.Errorf("after the bug: core running %v, should run %v", running, w.runtime.ShouldRun())
+	}
+	w.mu.Lock()
+	logged := slices.ContainsFunc(w.logs, func(l string) bool { return strings.HasPrefix(l, "engine bug: a bug\n") })
+	w.profiles.SelectedID = "de"
+	w.mu.Unlock()
+	if !logged {
+		t.Error("the bug was not logged")
+	}
+	// The engine still works.
+	w.e.Connect()
+	w.sync()
+	if got := w.last(); got.State != ipc.Connected {
+		t.Errorf("then: %+v", got)
 	}
 }

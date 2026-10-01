@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -116,7 +117,7 @@ func (e *Engine) Run(ctx context.Context) {
 	for {
 		select {
 		case job := <-e.jobs:
-			job()
+			e.do(job)
 		case <-ctx.Done():
 			if e.session != nil || e.held {
 				e.halt()
@@ -127,6 +128,21 @@ func (e *Engine) Run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// do runs one job. A panic in it is a bug: it is logged and the tunnel,
+// whose state is unknown now, goes down, rather than the whole service.
+func (e *Engine) do(job func()) {
+	defer func() {
+		if p := recover(); p != nil {
+			e.d.Log(fmt.Sprintf("engine bug: %v\n%s", p, debug.Stack()))
+			e.halt()
+			e.held = false
+			e.d.Runtime.SetShouldRun(false)
+			e.publish(ipc.Status{State: ipc.Failed, Message: "Внутренняя ошибка Kirov VPN. Подключитесь снова."})
+		}
+	}()
+	job()
 }
 
 // Status returns the current status.
