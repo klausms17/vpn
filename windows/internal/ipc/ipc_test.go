@@ -180,10 +180,30 @@ func TestTooManyRequestsAreTurnedAway(t *testing.T) {
 	wg.Wait()
 }
 
+// waitConns waits until s serves n connections.
+func waitConns(t *testing.T, s *Server, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.mu.Lock()
+		got := len(s.conns)
+		s.mu.Unlock()
+		if got == n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d connections, want %d", got, n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestAWindowThatStopsReadingIsDropped(t *testing.T) {
 	s := NewServer(echo, greeting, silent)
 	a, b := net.Pipe()
 	go s.ServeConn(a)
+	// Joined, so the broadcasts below are queued for it.
+	waitConns(t, s, 1)
 	done := make(chan struct{})
 	go func() {
 		for range outQueue * 3 {
@@ -207,12 +227,7 @@ func TestAWindowThatStopsReadingIsDropped(t *testing.T) {
 			break
 		}
 	}
-	s.mu.Lock()
-	n := len(s.conns)
-	s.mu.Unlock()
-	if n != 0 {
-		t.Errorf("%d connections left", n)
-	}
+	waitConns(t, s, 0)
 }
 
 func TestAnOverlongMessageEndsTheConnection(t *testing.T) {
