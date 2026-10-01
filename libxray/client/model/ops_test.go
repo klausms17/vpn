@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func server(id, sub string) StoredProfile {
@@ -79,22 +81,60 @@ func TestKeysWithoutALinkAreTheSameWhenTheirOutboundsAre(t *testing.T) {
 func TestTheSameKeysImportedTwiceAreSavedOnce(t *testing.T) {
 	ready := []Key{key("vless://a", "a"), key("vless://b", "b")}
 	newID := counter()
-	once, added := ProfilesState{}.WithNewKeys(ready, newID, 7)
-	if len(added) != 2 || added[0].Link != "vless://a" || added[1].Link != "vless://b" {
-		t.Fatalf("added %+v", added)
+	once, added, left := ProfilesState{}.WithNewKeys(ready, newID, 7)
+	if len(added) != 2 || left != 0 || added[0].Link != "vless://a" || added[1].Link != "vless://b" {
+		t.Fatalf("added %+v, %d left", added, left)
 	}
 	if !reflect.DeepEqual(once.Profiles, added) || once.SelectedID != added[0].ID || added[0].CreatedAt != 7 {
 		t.Errorf("state %+v", once)
 	}
-	twice, again := once.WithNewKeys(ready, newID, 8)
+	twice, again, _ := once.WithNewKeys(ready, newID, 8)
 	if len(again) != 0 || !reflect.DeepEqual(twice, once) {
 		t.Errorf("second import added %+v", again)
+	}
+}
+
+func TestNoMoreThanMaxProfilesAreSaved(t *testing.T) {
+	var ready []Key
+	for i := range MaxProfiles - 1 {
+		ready = append(ready, key(fmt.Sprintf("vless://%d", i), "k"))
+	}
+	full, _, left := ProfilesState{}.WithNewKeys(ready, counter(), 0)
+	if len(full.Profiles) != MaxProfiles-1 || left != 0 {
+		t.Fatalf("%d saved, %d left", len(full.Profiles), left)
+	}
+	more := []Key{key("vless://x", "x"), key("vless://y", "y"), key("vless://0", "repeated")}
+	next, added, left := full.WithNewKeys(more, counter(), 0)
+	if len(added) != 1 || added[0].Link != "vless://x" || left != 1 || len(next.Profiles) != MaxProfiles {
+		t.Errorf("added %d, %d left, %d saved", len(added), left, len(next.Profiles))
+	}
+	if _, added, left := next.WithNewKeys(more[1:2], counter(), 0); len(added) != 0 || left != 1 {
+		t.Errorf("into a full list: added %d, %d left", len(added), left)
 	}
 }
 
 func TestUnnamedKeysAreNamedAfterTheirAddress(t *testing.T) {
 	if got := (Key{Address: "203.0.113.10"}).Stored("x", "", 0).Name; got != "203.0.113.10" {
 		t.Errorf("name %q", got)
+	}
+}
+
+func TestNamesAreBounded(t *testing.T) {
+	long := strings.Repeat("Я", 5000)
+	got := (Key{Name: long}).Stored("x", "", 0).Name
+	if utf8.RuneCountInString(got) != MaxName || !strings.HasSuffix(got, "…") || !strings.HasPrefix(got, "ЯЯЯ") {
+		t.Errorf("name of %d characters: %q…", utf8.RuneCountInString(got), got[:12])
+	}
+	if got := (Key{Address: strings.Repeat("a", 300) + ".example"}).Label(); utf8.RuneCountInString(got) != MaxName {
+		t.Errorf("address label of %d characters", utf8.RuneCountInString(got))
+	}
+	exact := strings.Repeat("ж", MaxName)
+	if ClipName(exact) != exact || ClipName("Германия") != "Германия" {
+		t.Error("a short name was changed")
+	}
+	state := ProfilesState{Profiles: []StoredProfile{server("a", "")}}.Renamed("a", long)
+	if utf8.RuneCountInString(state.Profiles[0].Name) != MaxName {
+		t.Errorf("renamed to %d characters", utf8.RuneCountInString(state.Profiles[0].Name))
 	}
 }
 

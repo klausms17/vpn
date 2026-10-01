@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/klausms17/vpn/libxray/client/importer"
@@ -27,13 +28,19 @@ type handler struct {
 	tunnel   Tunnel
 	profiles *store.Store[model.ProfilesState]
 	// keys reads the keys in pasted text (importer.Keys).
-	keys      func(text string) ([]model.Key, []string, error)
+	keys      func(ctx context.Context, text string) ([]model.Key, []string, error)
 	broadcast func(ipc.Event)
 	log       func(string)
 	now       func() time.Time
+	// importing holds the one import that may run at a time: each can
+	// fetch certificates over the network.
+	importing sync.Mutex
 }
 
-var errBadRequest = errors.New("неверный запрос: обновите Kirov VPN")
+var (
+	errBadRequest = errors.New("неверный запрос: обновите Kirov VPN")
+	errImporting  = errors.New("Ключи ещё добавляются, подождите")
+)
 
 func (h *handler) handle(ctx context.Context, op string, args json.RawMessage) (any, error) {
 	switch op {
@@ -52,12 +59,12 @@ func (h *handler) handle(ctx context.Context, op string, args json.RawMessage) (
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, errBadRequest
 		}
-		return h.importText(a.Text)
+		return h.importText(ctx, a.Text)
 	}
 	return nil, ipc.ErrUnknownOp
 }
 
-func (h *handler) importText(text string) (ipc.ImportResult, error) {
+func (h *handler) importText(ctx context.Context, text string) (ipc.ImportResult, error) {
 	text = strings.TrimSpace(text)
 	switch {
 	case text == "":
@@ -66,18 +73,24 @@ func (h *handler) importText(text string) (ipc.ImportResult, error) {
 		return ipc.ImportResult{}, errors.New("Слишком длинный текст: вставьте только ключи")
 	case importer.SubscriptionURL(text) != "":
 		return ipc.ImportResult{}, errors.New("Подписки появятся в следующей версии. Пока вставьте ключ сервера (vless://, trojan://, ss://…)")
+	case !h.importing.TryLock():
+		return ipc.ImportResult{}, errImporting
 	}
-	keys, skipped, err := h.keys(text)
+	defer h.importing.Unlock()
+	keys, skipped, err := h.keys(ctx, text)
 	if err != nil {
 		return ipc.ImportResult{}, err
 	}
-	var added []model.StoredProfile
+	var (
+		added []model.StoredProfile
+		left  int
+	)
 	if len(keys) > 0 {
-		// Against the saved list, inside the save: another import may have
-		// just added these keys.
+		// Inside the save, against the list as saved: nothing written
+		// meanwhile is lost.
 		if _, err := h.profiles.Update(func(s model.ProfilesState) model.ProfilesState {
-			next, a := s.WithNewKeys(keys, newID, h.now().UnixMilli())
-			added = a
+			next, a, l := s.WithNewKeys(keys, newID, h.now().UnixMilli())
+			added, left = a, l
 			return next
 		}); err != nil {
 			return ipc.ImportResult{}, err
@@ -87,7 +100,11 @@ func (h *handler) importText(text string) (ipc.ImportResult, error) {
 		h.log(fmt.Sprintf("added %d servers", len(added)))
 		h.broadcast(ipc.NewEvent(ipc.EventProfiles, h.profilesData()))
 	}
-	return ipc.ImportResult{Added: len(added), Message: importer.Summary(len(added), len(keys), skipped)}, nil
+	message := importer.Summary(len(added), len(keys), skipped)
+	if left > 0 {
+		message = fmt.Sprintf("Добавлено серверов: %d. Больше %d серверов сохранить нельзя.", len(added), model.MaxProfiles)
+	}
+	return ipc.ImportResult{Added: len(added), Message: message}, nil
 }
 
 // greet is what a new window gets first: the status and the servers.

@@ -18,8 +18,10 @@ const PipePath = `\\.\pipe\ProtectedPrefix\Administrators\KirovVPN\control`
 
 // pipeSDDL gives SYSTEM and administrators full access, and signed-in
 // users (Remote Desktop too) read and write without FILE_APPEND_DATA,
-// which for pipes is FILE_CREATE_PIPE_INSTANCE. Network logons are denied.
-const pipeSDDL = "O:SYG:SYD:P(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12019b;;;IU)"
+// which for pipes is FILE_CREATE_PIPE_INSTANCE. Network logons are denied,
+// and so are programs below medium integrity (sandboxed ones), even to
+// read.
+const pipeSDDL = "O:SYG:SYD:P(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12019b;;;IU)S:(ML;;NWNRNX;;;ME)"
 
 // clientAccess is what a window asks for: FILE_READ_DATA, FILE_WRITE_DATA,
 // FILE_READ_ATTRIBUTES, READ_CONTROL and SYNCHRONIZE. GENERIC_WRITE would

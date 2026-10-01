@@ -3,7 +3,10 @@
 // service uses it, and the iPhone app will.
 package model
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"unicode/utf8"
+)
 
 // StoredProfile is one server. Outbounds is the Xray outbound list the
 // core made from the key; [0] is the proxy.
@@ -91,13 +94,29 @@ type Key struct {
 // Stored makes a saved server of k. An unnamed key is named after its
 // address.
 func (k Key) Stored(id, subscriptionID string, createdAt int64) StoredProfile {
-	name := k.Name
-	if name == "" {
-		name = k.Address
-	}
 	return StoredProfile{
-		ID: id, Name: name, Protocol: k.Protocol, Address: k.Address, Port: k.Port,
+		ID: id, Name: k.Label(), Protocol: k.Protocol, Address: k.Address, Port: k.Port,
 		Network: k.Network, Security: k.Security, Link: k.Link, Outbounds: k.Outbounds,
 		SubscriptionID: subscriptionID, CreatedAt: createdAt,
 	}
+}
+
+// Label is the name k is shown and saved under: its own, or else its
+// address, at most MaxName characters.
+func (k Key) Label() string {
+	if k.Name != "" {
+		return ClipName(k.Name)
+	}
+	return ClipName(k.Address)
+}
+
+// MaxName bounds a server's name, which comes from whoever wrote the key.
+const MaxName = 100
+
+// ClipName cuts name to MaxName characters.
+func ClipName(name string) string {
+	if utf8.RuneCountInString(name) <= MaxName {
+		return name
+	}
+	return string([]rune(name)[:MaxName-1]) + "…"
 }

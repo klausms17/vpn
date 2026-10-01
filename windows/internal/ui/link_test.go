@@ -157,6 +157,32 @@ func TestTheWindowReconnectsAfterTheServiceRestarts(t *testing.T) {
 	}
 }
 
+func TestAServiceThatHangsUpAtOnceIsNotHammered(t *testing.T) {
+	var mu sync.Mutex
+	dials := 0
+	hangUp := func(context.Context) (io.ReadWriteCloser, error) {
+		mu.Lock()
+		dials++
+		mu.Unlock()
+		a, b := net.Pipe()
+		a.Close()
+		return b, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		newLink(func(Snapshot) {}).run(ctx, hangUp)
+		close(done)
+	}()
+	time.Sleep(1200 * time.Millisecond)
+	cancel()
+	<-done
+	// At 0, 0.5 and 1.5 seconds: not a busy loop.
+	if dials > 3 {
+		t.Errorf("%d dials in 1.2 s", dials)
+	}
+}
+
 func TestAnOutdatedServiceIsNotUsed(t *testing.T) {
 	snaps := &snapshots{}
 	l := newLink(snaps.add)

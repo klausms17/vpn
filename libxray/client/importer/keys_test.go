@@ -1,15 +1,20 @@
 package importer
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/klausms17/vpn/libxray/client/model"
 )
 
 const realityKey = "vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?type=tcp&security=reality&pbk=Iv4yHdwV8Hc9BPh-c3zWJhDPLA1WZwpFNjTCn9JM2TM&sni=www.example.com&sid=ab&fp=chrome&flow=xtls-rprx-vision#Германия"
 
 func TestKeysFromLinks(t *testing.T) {
-	keys, skipped, err := Keys("Ключ: " + realityKey + "\nи ещё bogus://x")
+	keys, skipped, err := Keys(context.Background(), "Ключ: "+realityKey+"\nи ещё bogus://x")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,13 +36,65 @@ func TestKeysFromLinks(t *testing.T) {
 }
 
 func TestKeysFromAPastedSubscriptionBody(t *testing.T) {
-	keys, _, err := Keys(realityKey + "\n")
+	keys, _, err := Keys(context.Background(), realityKey+"\n")
 	if err != nil || len(keys) != 1 {
 		t.Fatalf("%d keys, %v", len(keys), err)
 	}
 	// Not a single link: no keys, so the text is read as a body.
-	if _, _, err := Keys("просто текст"); err == nil {
+	if _, _, err := Keys(context.Background(), "просто текст"); err == nil {
 		t.Error("plain text gave no error")
+	}
+}
+
+// insecureKeys are n keys that ask to skip the certificate check, so each
+// needs its certificate fetched: from a closed local port, which fails at
+// once.
+func insecureKeys(n int) string {
+	var b strings.Builder
+	for i := range n {
+		fmt.Fprintf(&b, "vless://11111111-2222-3333-4444-555555555555@127.0.0.1:1?security=tls&allowInsecure=1&type=tcp#self%d\n", i)
+	}
+	return b.String()
+}
+
+func TestOneImportFetchesAtMostMaxPinsCertificates(t *testing.T) {
+	keys, skipped, err := Keys(context.Background(), insecureKeys(maxPins+4)+realityKey)
+	if err != nil || len(keys) != 1 || len(skipped) != maxPins+4 {
+		t.Fatalf("%d keys, skipped %d, %v", len(keys), len(skipped), err)
+	}
+	fetched, refused := 0, 0
+	for _, s := range skipped {
+		switch {
+		case strings.Contains(s, "не удалось получить сертификат"):
+			fetched++
+		case strings.Contains(s, "слишком много ключей"):
+			refused++
+		}
+	}
+	if fetched != maxPins || refused != 4 {
+		t.Errorf("fetched %d, refused %d: %q", fetched, refused, skipped)
+	}
+}
+
+func TestACancelledImportFetchesNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	keys, skipped, err := Keys(ctx, insecureKeys(3)+realityKey)
+	if err != nil || len(keys) != 1 || len(skipped) != 3 {
+		t.Fatalf("%d keys, skipped %q, %v", len(keys), skipped, err)
+	}
+	for _, s := range skipped {
+		if !strings.HasSuffix(s, "добавление прервано") {
+			t.Errorf("skipped %q", s)
+		}
+	}
+}
+
+func TestLongNamesAreCutInMessagesToo(t *testing.T) {
+	long := strings.Repeat("&", 3*model.MaxName)
+	_, skipped, _ := Keys(context.Background(), "vless://11111111-2222-3333-4444-555555555555@127.0.0.1:1?security=tls&allowInsecure=1&type=tcp#"+long)
+	if len(skipped) != 1 || utf8.RuneCountInString(strings.SplitN(skipped[0], ":", 2)[0]) != model.MaxName {
+		t.Errorf("skipped %q", skipped)
 	}
 }
 

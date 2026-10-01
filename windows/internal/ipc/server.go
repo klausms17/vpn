@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 )
 
 // Handler answers one request. The error's text goes to the window as it
@@ -21,12 +22,23 @@ var ErrUnknownOp = errors.New("неизвестная команда: обнов
 
 // Limits, so that no program can stall the service: connections at once
 // (a window per signed-in user, with plenty to spare), and per connection
-// the requests running (more are told to wait) and the messages queued (a
-// window that reads no more is dropped).
+// the requests running and the requests per second, a burst then a steady
+// rate (more are told to wait), and the messages queued (a window that
+// reads no more is dropped). A connection keeps its place until its last
+// request has finished, so all of them together run at most
+// maxConns*maxInFlight requests.
 const (
-	maxConns    = 32
-	maxInFlight = 8
-	outQueue    = 64
+	maxConns     = 32
+	maxInFlight  = 8
+	requestBurst = 20
+	requestRate  = 10
+	outQueue     = 64
+)
+
+// Answers the window shows as they are.
+const (
+	tooMany  = "Слишком много запросов, подождите"
+	internal = "Внутренняя ошибка службы"
 )
 
 // Server answers windows and pushes events to all of them. Requests of one
@@ -36,6 +48,7 @@ type Server struct {
 	// greet gives the events a new connection gets first, the current state.
 	greet func() []Event
 	log   func(string)
+	now   func() time.Time
 
 	mu    sync.Mutex
 	conns map[*serverConn]struct{}
@@ -45,7 +58,7 @@ type Server struct {
 // connections with greet's events. greet runs under the server's lock, so
 // it may only read state, never broadcast.
 func NewServer(handle Handler, greet func() []Event, log func(string)) *Server {
-	return &Server{handle: handle, greet: greet, log: log, conns: map[*serverConn]struct{}{}}
+	return &Server{handle: handle, greet: greet, log: log, now: time.Now, conns: map[*serverConn]struct{}{}}
 }
 
 // Serve accepts connections from l until it is closed.
@@ -76,7 +89,7 @@ func (s *Server) Serve(l net.Listener) error {
 func (s *Server) Broadcast(ev Event) {
 	line, err := encode(ev)
 	if err != nil {
-		s.log("event not sent: " + err.Error())
+		s.log("event " + ev.Event + " not sent: " + err.Error())
 		return
 	}
 	s.mu.Lock()
@@ -95,16 +108,21 @@ func (s *Server) ServeConn(rw io.ReadWriteCloser) {
 	s.mu.Lock()
 	greeting := append([]Event{event(EventHello, Hello{Version: Version})}, s.greet()...)
 	for _, ev := range greeting {
-		if line, err := encode(ev); err == nil {
-			c.send(line)
+		line, err := encode(ev)
+		if err != nil {
+			s.log("event " + ev.Event + " not sent: " + err.Error())
+			continue
 		}
+		c.send(line)
 	}
 	s.conns[c] = struct{}{}
 	s.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
+	var running sync.WaitGroup
 	defer func() {
 		cancel()
+		running.Wait()
 		s.mu.Lock()
 		delete(s.conns, c)
 		s.mu.Unlock()
@@ -112,6 +130,7 @@ func (s *Server) ServeConn(rw io.ReadWriteCloser) {
 	}()
 	r := bufio.NewReaderSize(rw, 64<<10)
 	slots := make(chan struct{}, maxInFlight)
+	rate := bucket{tokens: requestBurst, last: s.now()}
 	for {
 		line, err := readLine(r, MaxMessage)
 		if err != nil {
@@ -122,20 +141,41 @@ func (s *Server) ServeConn(rw io.ReadWriteCloser) {
 		}
 		var req Request
 		if err := json.Unmarshal(line, &req); err != nil {
-			c.respond(Response{Error: "неверный запрос"})
+			s.respond(c, Response{Error: "неверный запрос"})
+			continue
+		}
+		if !rate.take(s.now()) {
+			s.respond(c, Response{ID: req.ID, Error: tooMany})
 			continue
 		}
 		select {
 		case slots <- struct{}{}:
 		default:
-			c.respond(Response{ID: req.ID, Error: "Слишком много запросов, подождите"})
+			s.respond(c, Response{ID: req.ID, Error: tooMany})
 			continue
 		}
-		go func() {
+		running.Go(func() {
 			defer func() { <-slots }()
-			c.respond(s.answer(ctx, req))
-		}()
+			s.respond(c, s.answer(ctx, req))
+		})
 	}
+}
+
+// bucket lets requestBurst requests through at once, then requestRate a
+// second.
+type bucket struct {
+	tokens float64
+	last   time.Time
+}
+
+func (b *bucket) take(now time.Time) bool {
+	b.tokens = min(requestBurst, b.tokens+now.Sub(b.last).Seconds()*requestRate)
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
 }
 
 func (s *Server) answer(ctx context.Context, req Request) (resp Response) {
@@ -143,7 +183,7 @@ func (s *Server) answer(ctx context.Context, req Request) (resp Response) {
 	defer func() {
 		if p := recover(); p != nil {
 			s.log("request " + req.Op + " panicked")
-			resp = Response{ID: req.ID, Error: "Внутренняя ошибка службы"}
+			resp = Response{ID: req.ID, Error: internal}
 		}
 	}()
 	result, err := s.handle(ctx, req.Op, req.Args)
@@ -154,7 +194,7 @@ func (s *Server) answer(ctx context.Context, req Request) (resp Response) {
 	if result != nil {
 		raw, err := json.Marshal(result)
 		if err != nil {
-			resp.Error = "Внутренняя ошибка службы"
+			resp.Error = internal
 			return resp
 		}
 		resp.Result = raw
@@ -169,10 +209,15 @@ type serverConn struct {
 	closed bool
 }
 
-func (c *serverConn) respond(resp Response) {
-	if line, err := encode(resp); err == nil {
-		c.send(line)
+// respond sends resp to c; an answer too long for the pipe becomes an
+// error.
+func (s *Server) respond(c *serverConn, resp Response) {
+	line, err := encode(resp)
+	if err != nil {
+		s.log("answer not sent: " + err.Error())
+		line, _ = encode(Response{ID: resp.ID, Error: internal})
 	}
+	c.send(line)
 }
 
 // send queues line; a window whose queue is full is not reading, and is
@@ -224,10 +269,14 @@ func event(name string, data any) Event {
 // NewEvent makes the event name carrying data.
 func NewEvent(name string, data any) Event { return event(name, data) }
 
+// encode makes the line of v, refusing one the other side would not read.
 func encode(v any) ([]byte, error) {
 	line, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
+	}
+	if len(line) > MaxMessage {
+		return nil, errTooLong
 	}
 	return append(line, '\n'), nil
 }

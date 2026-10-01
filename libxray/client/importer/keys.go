@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -9,16 +10,21 @@ import (
 	"github.com/klausms17/vpn/libxray/client/model"
 )
 
-// pinTimeoutMs bounds fetching one server's certificate, as on Android.
-const pinTimeoutMs = 8000
+const (
+	// pinTimeoutMs bounds fetching one server's certificate, as on Android.
+	pinTimeoutMs = 8000
+	// maxPins bounds the certificate fetches of one import: each is a
+	// connection to whatever the key names, outside the tunnel.
+	maxPins = 16
+)
 
 // Keys turns text into servers ready to save, as the Android app's
 // addLinks does: each link is parsed or, when there are none, the text is
 // read as a pasted subscription body. Links that ask to skip certificate
-// checks get the server's certificate pinned, four servers at a time.
-// skipped has a line in Russian for each key that cannot be used; err
-// means the text holds no keys at all.
-func Keys(text string) (keys []model.Key, skipped []string, err error) {
+// checks get the server's certificate pinned, four servers at a time, at
+// most maxPins, and none once ctx ends. skipped has a line in Russian for
+// each key that cannot be used; err means the text holds no keys at all.
+func Keys(ctx context.Context, text string) (keys []model.Key, skipped []string, err error) {
 	var parsed []libxray.Profile
 	if links := Links(text); len(links) > 0 {
 		for _, link := range links {
@@ -54,10 +60,24 @@ func Keys(text string) (keys []model.Key, skipped []string, err error) {
 	}, len(parsed))
 	limit := make(chan struct{}, 4)
 	var wg sync.WaitGroup
+	pins := 0
 	for i, p := range parsed {
+		switch {
+		case !p.NeedsCertPin:
+			results[i].key, results[i].fail = ready(p)
+			continue
+		case pins == maxPins:
+			results[i].fail = label(p) + ": слишком много ключей без проверки сертификата за раз, добавьте его отдельно"
+			continue
+		}
+		pins++
 		wg.Go(func() {
 			limit <- struct{}{}
 			defer func() { <-limit }()
+			if ctx.Err() != nil {
+				results[i].fail = label(p) + ": добавление прервано"
+				return
+			}
 			results[i].key, results[i].fail = ready(p)
 		})
 	}
@@ -78,19 +98,22 @@ func ready(p libxray.Profile) (k model.Key, fail string) {
 	if p.NeedsCertPin {
 		pinned, err := pin(p)
 		if err != nil {
-			return k, fmt.Sprintf("%s: не удалось получить сертификат сервера (%s)", p.Name, err)
+			return k, fmt.Sprintf("%s: не удалось получить сертификат сервера (%s)", label(p), err)
 		}
 		p = pinned
 	}
 	outbounds, err := json.Marshal(p.Outbounds)
 	if err != nil {
-		return k, fmt.Sprintf("%s: %s", p.Name, err)
+		return k, fmt.Sprintf("%s: %s", label(p), err)
 	}
 	return model.Key{
 		Name: p.Name, Protocol: p.Protocol, Address: p.Address, Port: p.Port,
 		Network: p.Network, Security: p.Security, Link: p.Link, Outbounds: outbounds,
 	}, ""
 }
+
+// label names p in a message, as its saved server will be named.
+func label(p libxray.Profile) string { return model.Key{Name: p.Name, Address: p.Address}.Label() }
 
 func pin(p libxray.Profile) (libxray.Profile, error) {
 	hash, err := libxray.FetchCertSha256(p.Address, int32(p.Port), p.CertPinSNI, p.CertPinQuic, pinTimeoutMs)

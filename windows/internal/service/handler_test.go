@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -40,6 +41,9 @@ type testEnv struct {
 	tunnel *fakeTunnel
 	events []ipc.Event
 	logs   []string
+	// importing, if set, tells when an import reads its keys and holds it
+	// until the test sends.
+	importing chan struct{}
 }
 
 func newEnv(t *testing.T) *testEnv {
@@ -47,7 +51,11 @@ func newEnv(t *testing.T) *testEnv {
 	env.h = &handler{
 		tunnel:   env.tunnel,
 		profiles: store.New(filepath.Join(t.TempDir(), "profiles.json"), func() model.ProfilesState { return model.ProfilesState{} }, nil, func(string) {}),
-		keys: func(text string) ([]model.Key, []string, error) {
+		keys: func(ctx context.Context, text string) ([]model.Key, []string, error) {
+			if env.importing != nil {
+				env.importing <- struct{}{}
+				<-env.importing
+			}
 			if text == "плохо" {
 				return nil, nil, errors.New("Не найдено ни одного ключа")
 			}
@@ -128,6 +136,51 @@ func TestImportRefusals(t *testing.T) {
 	}
 	if len(env.h.profiles.Read().Profiles) != 0 {
 		t.Error("saved something")
+	}
+}
+
+func TestOneImportAtATime(t *testing.T) {
+	env := newEnv(t)
+	env.importing = make(chan struct{})
+	first := make(chan error, 1)
+	go func() {
+		_, err := env.call(ipc.OpImport, ipc.ImportArgs{Text: "vless://one"})
+		first <- err
+	}()
+	<-env.importing // the first one runs
+	if _, err := env.call(ipc.OpImport, ipc.ImportArgs{Text: "vless://two"}); !errors.Is(err, errImporting) {
+		t.Errorf("second import: %v", err)
+	}
+	env.importing <- struct{}{}
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	env.importing = nil
+	if _, err := env.call(ipc.OpImport, ipc.ImportArgs{Text: "vless://two"}); err != nil {
+		t.Errorf("after it: %v", err)
+	}
+}
+
+func TestImportIntoAFullList(t *testing.T) {
+	env := newEnv(t)
+	links := make([]string, model.MaxProfiles+5)
+	for i := range links {
+		links[i] = fmt.Sprintf("vless://%d", i)
+	}
+	res, err := env.call(ipc.OpImport, ipc.ImportArgs{Text: strings.Join(links, "\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("Добавлено серверов: %d. Больше %d серверов сохранить нельзя.", model.MaxProfiles, model.MaxProfiles)
+	if r := res.(ipc.ImportResult); r.Added != model.MaxProfiles || r.Message != want {
+		t.Errorf("result %+v", r)
+	}
+	if n := len(env.h.profiles.Read().Profiles); n != model.MaxProfiles {
+		t.Errorf("%d saved", n)
+	}
+	// The list still fits in one message to the window.
+	if line, err := json.Marshal(ipc.NewEvent(ipc.EventProfiles, env.h.profilesData())); err != nil || len(line) > ipc.MaxMessage {
+		t.Errorf("profiles event of %d bytes, %v", len(line), err)
 	}
 }
 

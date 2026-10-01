@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -231,22 +232,124 @@ func TestAWindowThatStopsReadingIsDropped(t *testing.T) {
 }
 
 func TestAnOverlongMessageEndsTheConnection(t *testing.T) {
-	s := NewServer(echo, greeting, silent)
 	a, b := net.Pipe()
-	go s.ServeConn(a)
-	rec := newRecorder()
-	c := NewClient(b, rec.add)
-	defer c.Close()
-	rec.wait(t, 2)
-	err := c.Call(context.Background(), "echo", ImportArgs{Text: strings.Repeat("я", MaxMessage)}, nil)
-	if !errors.Is(err, ErrClosed) {
-		t.Errorf("err %v", err)
-	}
+	done := make(chan struct{})
+	go func() {
+		NewServer(echo, greeting, silent).ServeConn(a)
+		close(done)
+	}()
+	go io.Copy(io.Discard, b)
+	go b.Write([]byte(strings.Repeat("x", MaxMessage+2) + "\n"))
 	select {
-	case <-c.Done():
+	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Error("still connected")
 	}
+}
+
+func TestTheWindowSendsNoOverlongRequest(t *testing.T) {
+	c, rec := connect(t, NewServer(echo, greeting, silent))
+	rec.wait(t, 2)
+	err := c.Call(context.Background(), "echo", ImportArgs{Text: strings.Repeat("я", MaxMessage)}, nil)
+	if !errors.Is(err, errTooLong) {
+		t.Errorf("err %v", err)
+	}
+	if err := c.Call(context.Background(), "echo", ImportArgs{Text: "ok"}, nil); err != nil {
+		t.Errorf("then: %v", err)
+	}
+}
+
+func TestTheServiceSendsNoOverlongMessage(t *testing.T) {
+	var logged sync.Map
+	huge := strings.Repeat("&", MaxMessage/4)
+	handle := func(ctx context.Context, op string, args json.RawMessage) (any, error) {
+		return ImportResult{Message: huge}, nil
+	}
+	s := NewServer(handle, greeting, func(m string) { logged.Store(m, true) })
+	c, rec := connect(t, s)
+	rec.wait(t, 2)
+	// Each "&" is six bytes in JSON: too long for the window.
+	s.Broadcast(NewEvent(EventProfiles, Profiles{SelectedID: huge}))
+	if _, ok := logged.Load("event profiles not sent: message too long"); !ok {
+		t.Error("the event was not refused")
+	}
+	err := c.Call(context.Background(), "big", nil, nil)
+	if err == nil || err.Error() != internal {
+		t.Errorf("err %v", err)
+	}
+	// Still connected and in step.
+	s.Broadcast(NewEvent(EventStatus, Status{State: Connecting}))
+	if evs := rec.wait(t, 3); evs[2].Event != EventStatus {
+		t.Errorf("events %+v", evs)
+	}
+}
+
+func TestRequestsAreRateLimited(t *testing.T) {
+	s := NewServer(echo, greeting, silent)
+	now := time.Unix(1000, 0)
+	var mu sync.Mutex
+	s.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	c, _ := connect(t, s)
+	call := func() error { return c.Call(context.Background(), "echo", ImportArgs{Text: "x"}, nil) }
+	for i := range requestBurst {
+		if err := call(); err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+	}
+	if err := call(); err == nil || err.Error() != tooMany {
+		t.Errorf("one over the burst: %v", err)
+	}
+	mu.Lock()
+	now = now.Add(time.Second)
+	mu.Unlock()
+	for i := range requestRate {
+		if err := call(); err != nil {
+			t.Fatalf("a second later, request %d: %v", i, err)
+		}
+	}
+	if err := call(); err == nil || err.Error() != tooMany {
+		t.Errorf("one over the rate: %v", err)
+	}
+}
+
+func TestAConnectionEndsAfterItsRunningRequests(t *testing.T) {
+	cancelled := make(chan struct{})
+	release := make(chan struct{})
+	handle := func(ctx context.Context, op string, args json.RawMessage) (any, error) {
+		<-ctx.Done()
+		close(cancelled)
+		<-release
+		return nil, nil
+	}
+	s := NewServer(handle, greeting, silent)
+	a, b := net.Pipe()
+	ended := make(chan struct{})
+	go func() {
+		s.ServeConn(a)
+		close(ended)
+	}()
+	c := NewClient(b, func(Event) {})
+	go c.Call(context.Background(), "slow", nil, nil)
+	waitConns(t, s, 1)
+	time.Sleep(20 * time.Millisecond)
+	c.Close()
+	<-cancelled
+	select {
+	case <-ended:
+		t.Fatal("ended while its request still runs")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("did not end")
+	}
+	waitConns(t, s, 0)
 }
 
 func TestCallsEndWithTheConnection(t *testing.T) {

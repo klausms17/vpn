@@ -71,7 +71,11 @@ func (c *Client) Call(ctx context.Context, op string, args, result any) error {
 		c.mu.Unlock()
 	}()
 
-	if err := c.write(req); err != nil {
+	line, err := encode(req)
+	if err != nil {
+		return err
+	}
+	if err := c.write(line); err != nil {
 		c.Close()
 		return ErrClosed
 	}
@@ -97,17 +101,13 @@ func (c *Client) Done() <-chan struct{} { return c.done }
 // Close ends the connection.
 func (c *Client) Close() error { return c.rw.Close() }
 
-func (c *Client) write(req Request) error {
-	line, err := encode(req)
-	if err != nil {
-		return err
-	}
+func (c *Client) write(line []byte) error {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 	if d, ok := c.rw.(interface{ SetWriteDeadline(time.Time) error }); ok {
 		_ = d.SetWriteDeadline(time.Now().Add(writeTimeout))
 	}
-	_, err = c.rw.Write(line)
+	_, err := c.rw.Write(line)
 	return err
 }
 

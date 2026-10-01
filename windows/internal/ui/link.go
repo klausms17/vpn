@@ -53,35 +53,49 @@ type Dialer func(ctx context.Context) (io.ReadWriteCloser, error)
 
 // run connects to the service, and connects again whenever the connection
 // ends (the service restarts with an update or after a crash), until ctx
-// ends.
+// ends. After a failed try, or a connection that ended at once, it waits
+// longer each time.
 func (l *link) run(ctx context.Context, dial Dialer) {
-	const maxWait = 5 * time.Second
-	wait := 500 * time.Millisecond
+	const (
+		firstWait = 500 * time.Millisecond
+		maxWait   = 5 * time.Second
+		// A connection that lasted this long was a working one.
+		lasted = 10 * time.Second
+	)
+	wait := firstWait
 	for ctx.Err() == nil {
 		dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		conn, err := dial(dctx)
 		cancel()
-		if err != nil {
-			l.update(func(s *Snapshot) { s.Service = false })
-			select {
-			case <-time.After(wait):
-			case <-ctx.Done():
+		if err == nil {
+			opened := time.Now()
+			l.serve(ctx, conn)
+			if time.Since(opened) >= lasted {
+				wait = firstWait
+				continue
 			}
-			wait = min(wait*2, maxWait)
-			continue
 		}
-		wait = 500 * time.Millisecond
-		c := ipc.NewClient(conn, l.onEvent)
-		l.setClient(c)
-		l.update(func(s *Snapshot) { s.Service = true })
-		select {
-		case <-c.Done():
-		case <-ctx.Done():
-			c.Close()
-		}
-		l.setClient(nil)
 		l.update(func(s *Snapshot) { s.Service = false })
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+		}
+		wait = min(wait*2, maxWait)
 	}
+}
+
+// serve keeps the snapshot current from conn until it or ctx ends.
+func (l *link) serve(ctx context.Context, conn io.ReadWriteCloser) {
+	c := ipc.NewClient(conn, l.onEvent)
+	l.setClient(c)
+	l.update(func(s *Snapshot) { s.Service = true })
+	select {
+	case <-c.Done():
+	case <-ctx.Done():
+		c.Close()
+	}
+	l.setClient(nil)
+	l.update(func(s *Snapshot) { s.Service = false })
 }
 
 func (l *link) setClient(c *ipc.Client) {
