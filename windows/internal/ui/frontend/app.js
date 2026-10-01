@@ -160,6 +160,11 @@ keyInput.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeAdd();
 });
 
+// A link or file dropped on the window must not replace the page.
+for (const type of ["dragover", "drop"]) {
+  window.addEventListener(type, (e) => e.preventDefault());
+}
+
 Events.On("snapshot", (ev) => render(ev.data));
 call("Snapshot").then(render, fail);
 call("Version").then((v) => { $("version").textContent = `Версия ${v}`; }, () => {});

@@ -113,7 +113,7 @@ func Run(version string, args []string) error {
 		Description: "Kirov VPN",
 		Icon:        assets.App,
 		Services:    []application.Service{application.NewService(bridge)},
-		Assets:      application.AssetOptions{Handler: application.AssetFileServerFS(page)},
+		Assets:      application.AssetOptions{Handler: application.AssetFileServerFS(page), Middleware: sameOrigin},
 		Logger:      slog.New(slog.NewTextHandler(log, &slog.HandlerOptions{Level: slog.LevelWarn})),
 		SingleInstance: &application.SingleInstanceOptions{
 			UniqueID: "com.klausms.vpn.windows",
