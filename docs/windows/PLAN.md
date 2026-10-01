@@ -165,7 +165,7 @@ Android's UI process does imports, pings, subscription adds and update checks it
    - the service also turns NetBIOS off on the adapter (`NetbiosOptions=2` under `NetBT\Parameters\Interfaces\Tcpip_{GUID}`), as Tailscale does.
 7. **LAN** (printers, casting, the router page) stays outside over IPv4, as on Android.
 8. **Restarts.** Xray removes the adapter, its routes and the filters at Stop, and creates them again at Start. Android's VPN interface outlives the core.
-   - In between, traffic follows the physical routes, and browsers see a network change (Chrome may show `ERR_NETWORK_CHANGED` for requests in flight). That takes about a second; if Windows is slow to bring the adapter up, Xray tries for up to 15 seconds. It happens on a reset after a move to another network or a wake from sleep, and when the engine starts the core again after a failure.
+   - In between, traffic follows the physical routes, and browsers see a network change (Chrome may show `ERR_NETWORK_CHANGED` for requests in flight). That takes about 3 seconds (the core's start on the CI machine); if Windows is slow to bring the adapter up, Xray tries for up to 15 seconds. It happens on a reset after a move to another network or a wake from sleep, and when the engine starts the core again after a failure.
    - Phase 4 measures and closes it (row 25):
      - server switches replace the proxy outbounds in the running core;
      - resets after a network change hold traffic with WFP;

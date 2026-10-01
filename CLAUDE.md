@@ -47,13 +47,17 @@ and give step-by-step instructions for anything he must do himself.
     wires `internal/engine` (start, stop and retries, Android's
     `TunnelEngine`), `internal/netbind` (keeps the service's own sockets
     and DNS outside the tunnel), `internal/ipc` (the protected pipe to the
-    window) and `internal/winsys` (data folder, DPAPI).
+    window) and `internal/winsys` (the data folder
+    `C:\Program Files\Kirov VPN\Data`, DPAPI).
   - `cmd/kirovvpn`: the tray icon and window (Wails v3, `internal/ui`; the
     page is `internal/ui/frontend`). It holds no keys.
   - `installer/KirovVPN.iss` (Inno Setup), `test/smoke.ps1` (CI only),
     `tools/` (icons, exe resources, a test server).
 - `libxray/client/`: the Android logic ported to Go with its tests (model,
   store, key import, log, tunnel rules), used by Windows and later iOS.
+  `libxray/internal/privileged` is the allowlist of what the Windows
+  service's core may run, and `internal/redact` takes addresses and host
+  names out of the logs (the core's `xray.log` too, on every platform).
 - `ios/`: the iPhone app. `project.yml` is the XcodeGen spec; `App/`,
   `PacketTunnel/` and `Shared/` hold the code. The plan is in
   `docs/ios/PLAN.md` and the drafts for later phases are in
@@ -144,6 +148,10 @@ and give step-by-step instructions for anything he must do himself.
 - Privacy and security:
   - Never log keys, links, IPs or server hostnames. Go error texts must not
     quote link bodies.
+  - The Windows service runs as SYSTEM and takes input from every user of
+    the PC: it runs only outbounds that pass `libxray/internal/privileged`,
+    and the pipe stays bounded (sizes, rates, one import at a time). After
+    an Xray bump, check its new outbound features against the allowlist.
   - Never commit secrets.
   - Never ask the owner to paste keys, passwords, tokens or UDIDs into a
     chat. Those go into GitHub secrets or the panel's hidden prompts.
@@ -156,16 +164,29 @@ and give step-by-step instructions for anything he must do himself.
   45 issues; all are fixed except the ones listed as known limits below.
   The quality refactor is done: the service was split into classes and the
   UI into `UiSession` and `TunnelController`. The latest build is
-  `KirovVPN-1.0.54.apk` on the `build-claude-compassionate-mayer-6jph8m`
-  release, signed with a temporary key.
+  `KirovVPN-1.0.64.apk` on the `build-claude-panel-privacy` release (Xray
+  v26.9.30, the core's log without addresses and names), signed with a
+  temporary key.
 - **Windows:** phase 1 of `docs/windows/PLAN.md` is built (1 Oct 2026):
   the service with Xray's TUN and WFP leak filters, the window and tray,
-  the installer and `windows.yml`. Its first full run passed: libxray's
-  tests on Windows, and the smoke test (install, connect through a local
-  REALITY server, DNS filter, IPv6, 50 restarts with 500 → 537 handles and
-  19 → 20 threads, install over itself, uninstall). The installer is on
-  the `windows-build-claude-panel-privacy` release (1.0.3). The owner has
-  not tried it yet.
+  the installer and `windows.yml`.
+  - Two independent security reviews followed. Fixed: keys or a pasted
+    config could make the SYSTEM service write files (xdrive), keep TLS
+    key logs, open a VLESS `reverse` into the LAN or send everything past
+    the server, so the service now runs only what share links make; one
+    import could make it fetch thousands of certificates; long server
+    names locked every window out; a user could keep the service from
+    starting by creating its ProgramData folder first, so the data moved
+    to `Program Files\Kirov VPN\Data`; a page the window was led to could
+    call the service; site names and addresses in `xray.log`; a bug in the
+    engine ended the service.
+  - CI (`windows.yml`) passes: libxray's tests on Windows, and the smoke
+    test (refuse a folder outside Program Files, install, the pipe's
+    security, refuse a file-writing key, connect through a local REALITY
+    server, DNS filter, IPv6, 50 restarts in 164 s with 471 → 508 handles
+    and 19 → 20 threads, install over itself, uninstall). The installer is
+    on the `windows-build-claude-panel-privacy` release (1.0.5). The owner
+    has not tried it yet.
 - **iPhone:** phases 1–2 of `docs/ios/PLAN.md` are done. The Go core builds
   for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
   passes its checks (geo files in the extension, no bitcode). The app is
@@ -198,8 +219,10 @@ and give step-by-step instructions for anything he must do himself.
    `docs/windows/PLAN.md` (checked 1 Oct 2026); build it in its phases,
    each ending in a CI-built installer the owner tries. Phase 1, the tunnel
    on the owner's PC, is built; the owner tries its installer (the checks
-   are in the plan's section 10), then phase 2 (subscriptions and the
-   Android logic). In brief:
+   are in the plan's section 10). Next, before phase 2 (subscriptions and
+   the Android logic): hold traffic with WFP while the core restarts, so
+   resets after a network change or sleep leak nothing (see the known
+   limits). In brief:
    - Go only. An elevated service (LocalSystem) holds libxray and the
      Android logic, ported to `libxray/client/` with its JVM tests. A
      per-user tray icon and window (Wails v3, a pinned beta, on WebView2)
@@ -257,4 +280,8 @@ and give step-by-step instructions for anything he must do himself.
    - DNS for names never seen before still waits while the server is down
      (21, partly fixed);
    - candidate servers are tested only with the short 204 check, not for
-     stalls (5, partly fixed).
+     stalls (5, partly fixed);
+   - Windows: while the core restarts (a reset after a network change or
+     sleep, a retry after a failure) there is no tunnel and no WFP filter,
+     so traffic goes directly for about 3 seconds, up to 15 if Windows is
+     slow to bring the adapter up.
