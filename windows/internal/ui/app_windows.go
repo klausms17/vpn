@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/klausms17/vpn/libxray/client/applog"
@@ -58,7 +59,7 @@ func Run(version string, args []string) error {
 		tray.SetIcon(trayIcons[look.icon])
 		tray.SetTooltip(look.tooltip)
 	})
-	bridge := &Bridge{link: link, version: version}
+	bridge := &Bridge{link: link, version: version, uiLog: filepath.Join(dir, "ui.log")}
 	if selftest {
 		bridge.loaded = func() {
 			log.Info("self-test: the page loaded")
@@ -127,6 +128,19 @@ func Run(version string, args []string) error {
 			WebviewUserDataPath: filepath.Join(dir, "WebView2"),
 		},
 	})
+	bridge.copyText = app.Clipboard.SetText
+	bridge.pickProgram = func() (string, error) {
+		path, err := app.Dialog.OpenFile().
+			SetTitle("Выберите программу").
+			AddFilter("Программы", "*.exe").
+			AttachToWindow(win).
+			PromptForSingleSelection()
+		// The dialog reports a cancel as an error of its own.
+		if err != nil && strings.Contains(err.Error(), "cancel") {
+			return "", nil
+		}
+		return path, err
+	}
 	win = app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:             "main",
 		Title:            "Kirov VPN",

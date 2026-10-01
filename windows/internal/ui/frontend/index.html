@@ -8,71 +8,257 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <title>Kirov VPN</title>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="app.css">
 <script type="module" src="app.js"></script>
 </head>
 <body>
 <div class="wall" aria-hidden="true"></div>
 
-<main class="page">
+<div class="app">
   <header class="top">
     <span class="mark" aria-hidden="true">
       <svg viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/></svg>
     </span>
-    Kirov VPN
+    <span id="top-title">Kirov VPN</span>
   </header>
 
-  <section class="hero" id="hero" data-state="noservice">
-    <button type="button" class="orb" id="power" aria-label="Подключить" disabled>
-      <span class="ring r3" aria-hidden="true"></span>
-      <span class="ring r2" aria-hidden="true"></span>
-      <span class="ring r1" aria-hidden="true"></span>
-      <span class="disc" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 3.5v8"/>
-          <path d="M7.05 6.6a7.5 7.5 0 1 0 9.9 0"/>
-        </svg>
-      </span>
-    </button>
-    <h1 id="title">Kirov VPN</h1>
-    <p class="lede" id="detail" aria-live="polite"></p>
-  </section>
+  <main class="views" id="views">
+    <!-- VPN: the big button and what it connects to. -->
+    <section class="view" id="view-home">
+      <section class="hero" id="hero" data-state="noservice">
+        <button type="button" class="orb" id="power" aria-label="Подключить" disabled>
+          <span class="ring r3" aria-hidden="true"></span>
+          <span class="ring r2" aria-hidden="true"></span>
+          <span class="ring r1" aria-hidden="true"></span>
+          <span class="disc" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3.5v8"/>
+              <path d="M7.05 6.6a7.5 7.5 0 1 0 9.9 0"/>
+            </svg>
+          </span>
+        </button>
+        <h1 id="title">Kirov VPN</h1>
+        <p class="lede" id="detail" aria-live="polite"></p>
+        <button type="button" class="link" id="hero-logs" hidden>Подробнее в журнале</button>
+      </section>
 
-  <section class="sheet server" id="server-sheet">
-    <div class="server-row">
-      <span class="server-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5c2.4 2.3 3.6 5.1 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.1-3.6-8.5s1.2-6.2 3.6-8.5z"/></svg>
-      </span>
-      <div class="server-text">
-        <span class="server-label">Сервер</span>
-        <span class="server-name" id="server-name">—</span>
+      <div class="sheet list">
+        <button type="button" class="row" id="home-server">
+          <span class="row-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5c2.4 2.3 3.6 5.1 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.1-3.6-8.5s1.2-6.2 3.6-8.5z"/></svg>
+          </span>
+          <span class="row-text">
+            <span class="row-label">Сервер</span>
+            <span class="row-title" id="home-server-name">—</span>
+          </span>
+          <span class="ping" id="home-ping"></span>
+          <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+        </button>
+        <button type="button" class="row" id="home-mode">
+          <span class="row-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10"/><path d="M18 7h2"/><circle cx="16" cy="7" r="2"/><path d="M4 17h4"/><path d="M12 17h8"/><circle cx="10" cy="17" r="2"/></svg>
+          </span>
+          <span class="row-text">
+            <span class="row-label">Через VPN</span>
+            <span class="row-title" id="home-mode-name">—</span>
+          </span>
+          <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+        </button>
       </div>
-    </div>
-    <button type="button" class="btn tint" id="add-open">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
-      Добавить ключ
-    </button>
-  </section>
+      <button type="button" class="btn tint" id="home-add" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        Добавить ключ
+      </button>
+    </section>
 
-  <section class="sheet add" id="add-sheet" hidden>
-    <h2>Добавить ключ</h2>
+    <!-- Servers: the list, their checks, adding a key. -->
+    <section class="view" id="view-servers" hidden>
+      <div class="heading">
+        <h2>Серверы</h2>
+        <button type="button" class="icon-btn" id="ping-all" title="Проверить все серверы" aria-label="Проверить все серверы">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16.5a8 8 0 1 1 15 0"/><path d="M12 12l3.5-3.5"/><circle cx="12" cy="12" r="1.2"/></svg>
+        </button>
+        <button type="button" class="icon-btn" id="servers-add" title="Добавить ключ" aria-label="Добавить ключ">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        </button>
+      </div>
+      <div class="sheet list" id="server-list" role="radiogroup" aria-label="Серверы"></div>
+      <div class="empty" id="servers-empty" hidden>
+        <p>Серверов пока нет. Добавьте ключ сервера: его присылает тот, кто дал вам VPN.</p>
+        <button type="button" class="btn primary" id="servers-empty-add">Добавить ключ</button>
+      </div>
+      <p class="note">Нажмите на сервер, чтобы подключаться через него. Отклик — сколько миллисекунд идёт запрос через сервер.</p>
+    </section>
+
+    <!-- Settings. -->
+    <section class="view" id="view-settings" hidden>
+      <h2 class="section">Что идёт через VPN</h2>
+      <div class="sheet list choices" id="modes">
+        <label class="row choice">
+          <input type="radio" name="mode" value="ru_direct">
+          <span class="row-text">
+            <span class="row-title">Всё, кроме российских сайтов</span>
+            <span class="row-sub">Банки, Госуслуги и другие российские сайты открываются напрямую, остальное — через VPN. Подходит почти всем.</span>
+          </span>
+        </label>
+        <label class="row choice">
+          <input type="radio" name="mode" value="blocked_only">
+          <span class="row-text">
+            <span class="row-title">Только заблокированные сайты</span>
+            <span class="row-sub">Через VPN идут только сайты и сервисы, заблокированные в России, всё остальное — напрямую.</span>
+          </span>
+        </label>
+        <label class="row choice">
+          <input type="radio" name="mode" value="global">
+          <span class="row-text">
+            <span class="row-title">Всё</span>
+            <span class="row-sub">Весь интернет идёт через VPN, кроме домашней сети.</span>
+          </span>
+        </label>
+      </div>
+
+      <h2 class="section">Свои правила</h2>
+      <div class="sheet list">
+        <details class="editor" data-list="directSites" data-kind="site">
+          <summary class="row"><span class="row-text"><span class="row-title">Сайты без VPN</span><span class="row-sub">Всегда напрямую</span></span><span class="count"></span></summary>
+          <div class="editor-body"></div>
+        </details>
+        <details class="editor" data-list="proxySites" data-kind="site">
+          <summary class="row"><span class="row-text"><span class="row-title">Сайты через VPN</span><span class="row-sub">Всегда через VPN, даже российские</span></span><span class="count"></span></summary>
+          <div class="editor-body"></div>
+        </details>
+        <details class="editor" data-list="blockSites" data-kind="site">
+          <summary class="row"><span class="row-text"><span class="row-title">Заблокировать сайты</span><span class="row-sub">Не открываются совсем: реклама, счётчики</span></span><span class="count"></span></summary>
+          <div class="editor-body"></div>
+        </details>
+      </div>
+      <p class="note">Сайт можно вписать так: example.com (вместе с поддоменами), ссылкой или IP-адресом.</p>
+
+      <h2 class="section">Программы</h2>
+      <div class="sheet list">
+        <label class="row toggle">
+          <span class="row-text">
+            <span class="row-title">Торренты без VPN</span>
+            <span class="row-sub">qBittorrent, µTorrent, BitTorrent и другие качают напрямую: так быстрее, а серверу VPN не приходят жалобы правообладателей.</span>
+          </span>
+          <input type="checkbox" role="switch" id="torrents">
+        </label>
+        <details class="editor" data-list="directPrograms" data-kind="program">
+          <summary class="row"><span class="row-text"><span class="row-title">Программы без VPN</span><span class="row-sub">Например, игры с российскими серверами</span></span><span class="count"></span></summary>
+          <div class="editor-body"></div>
+        </details>
+        <details class="editor" data-list="proxyPrograms" data-kind="program">
+          <summary class="row"><span class="row-text"><span class="row-title">Программы через VPN</span><span class="row-sub">Всё, что они делают, идёт через VPN</span></span><span class="count"></span></summary>
+          <div class="editor-body"></div>
+        </details>
+      </div>
+
+      <h2 class="section">Запуск</h2>
+      <div class="sheet list">
+        <label class="row toggle">
+          <span class="row-text">
+            <span class="row-title">Подключаться при запуске Windows</span>
+            <span class="row-sub">Если VPN был включён, после перезагрузки он включится сам.</span>
+          </span>
+          <input type="checkbox" role="switch" id="autoconnect">
+        </label>
+      </div>
+
+      <h2 class="section">Помощь</h2>
+      <div class="sheet list">
+        <button type="button" class="row" id="open-logs">
+          <span class="row-text"><span class="row-title">Журнал</span><span class="row-sub">Что происходило с VPN. Можно скопировать и отправить</span></span>
+          <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+        </button>
+      </div>
+      <footer class="foot">
+        <p class="priv">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></svg>
+          Ключи и настройки хранятся только на этом компьютере, в зашифрованном виде.
+        </p>
+        <p class="version" id="version"></p>
+      </footer>
+    </section>
+
+    <!-- The journal, opened from the settings. -->
+    <section class="view" id="view-logs" hidden>
+      <div class="heading">
+        <button type="button" class="back" id="logs-back">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+          Настройки
+        </button>
+      </div>
+      <h2 class="title2">Журнал</h2>
+      <p class="note">В журнале нет ключей, адресов и названий сайтов, его можно отправить тому, кто помогает с VPN.</p>
+      <div class="actions">
+        <button type="button" class="btn small" id="logs-refresh">Обновить</button>
+        <button type="button" class="btn primary" id="logs-copy">Скопировать</button>
+      </div>
+      <div id="logs"></div>
+    </section>
+  </main>
+
+  <nav class="tabs" aria-label="Разделы">
+    <button type="button" class="tab" data-tab="home" aria-current="page">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/></svg>
+      VPN
+    </button>
+    <button type="button" class="tab" data-tab="servers">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4.5" width="16" height="6" rx="2"/><rect x="4" y="13.5" width="16" height="6" rx="2"/><path d="M8 7.5h.01"/><path d="M8 16.5h.01"/></svg>
+      Серверы
+    </button>
+    <button type="button" class="tab" data-tab="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      Настройки
+    </button>
+  </nav>
+</div>
+
+<!-- Sheets over the window. -->
+<div class="modal" id="add-sheet" hidden>
+  <div class="sheet dialog" role="dialog" aria-modal="true" aria-labelledby="add-title">
+    <h2 id="add-title">Добавить ключ</h2>
     <p>Вставьте ключ сервера (vless://, trojan://, ss://, hysteria2://) или сообщение, в котором он есть.</p>
     <textarea id="key" rows="4" spellcheck="false" autocomplete="off" placeholder="vless://…" aria-label="Ключ сервера"></textarea>
     <div class="actions">
       <button type="button" class="btn small" id="add-cancel">Отмена</button>
       <button type="button" class="btn primary" id="add-save">Добавить</button>
     </div>
-  </section>
+  </div>
+</div>
 
-  <footer class="foot">
-    <p class="priv">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></svg>
-      Ключи хранятся только на этом компьютере, в зашифрованном виде.
-    </p>
-    <p class="version" id="version"></p>
-  </footer>
-</main>
+<div class="modal" id="rename-sheet" hidden>
+  <div class="sheet dialog" role="dialog" aria-modal="true" aria-labelledby="rename-title">
+    <h2 id="rename-title">Имя сервера</h2>
+    <input type="text" id="rename-input" maxlength="100" spellcheck="false" autocomplete="off" aria-label="Имя сервера">
+    <div class="actions">
+      <button type="button" class="btn small" id="rename-cancel">Отмена</button>
+      <button type="button" class="btn primary" id="rename-save">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="delete-sheet" hidden>
+  <div class="sheet dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title">
+    <h2 id="delete-title">Удалить сервер?</h2>
+    <p id="delete-text"></p>
+    <div class="actions">
+      <button type="button" class="btn small" id="delete-cancel">Отмена</button>
+      <button type="button" class="btn danger" id="delete-confirm">Удалить</button>
+    </div>
+  </div>
+</div>
+
+<div class="menu" id="row-menu" role="menu" hidden>
+  <button type="button" role="menuitem" data-act="ping">Проверить отклик</button>
+  <button type="button" role="menuitem" data-act="rename">Переименовать</button>
+  <button type="button" role="menuitem" data-act="delete" class="danger">Удалить</button>
+</div>
 
 <div class="toast" id="toast" role="status" hidden></div>
+
+<template id="icon-more"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5.5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="18.5" cy="12" r="1.8"/></svg></template>
+<template id="icon-remove"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg></template>
 </body>
 </html>

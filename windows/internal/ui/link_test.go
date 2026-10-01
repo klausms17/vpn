@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -211,5 +213,34 @@ func TestATooLongImportStaysInTheWindow(t *testing.T) {
 	b := &Bridge{link: newLink(func(Snapshot) {})}
 	if _, err := b.Import(string(make([]byte, ipc.MaxImport+1))); err == nil {
 		t.Error("no error")
+	}
+}
+
+func TestChecksAndSettingsReachTheSnapshot(t *testing.T) {
+	snaps := &snapshots{}
+	l := newLink(snaps.add)
+	if s := l.snapshot(); s.Settings != nil || s.Pings == nil {
+		t.Fatalf("before the service spoke: %+v", s)
+	}
+	l.onEvent(ipc.NewEvent(ipc.EventPings, ipc.Pings{"de": {State: ipc.PingOK, Ms: 87}}))
+	l.onEvent(ipc.NewEvent(ipc.EventSettings, ipc.Settings{Mode: ipc.ModeGlobal, TorrentsDirect: true}))
+	s := l.snapshot()
+	if s.Pings["de"].Ms != 87 || s.Settings == nil || s.Settings.Mode != ipc.ModeGlobal {
+		t.Errorf("snapshot %+v", s)
+	}
+	// An empty map stays a map: the page reads it.
+	l.onEvent(ipc.Event{Event: ipc.EventPings, Data: json.RawMessage("null")})
+	if l.snapshot().Pings == nil {
+		t.Error("pings became null")
+	}
+}
+
+func TestTheJournalHasTheWindowsLogWithoutTheService(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ui.log")
+	os.WriteFile(path, []byte("window started\n"), 0o600)
+	b := &Bridge{link: newLink(func(Snapshot) {}), uiLog: path}
+	l := b.Logs()
+	if len(l.Sections) != 2 || l.Sections[0].Text != errNoService.Error() || l.Sections[1].Text != "window started\n" {
+		t.Errorf("journal %+v", l)
 	}
 }

@@ -22,6 +22,9 @@ type Snapshot struct {
 	Outdated bool         `json:"outdated"`
 	Status   ipc.Status   `json:"status"`
 	Profiles ipc.Profiles `json:"profiles"`
+	Pings    ipc.Pings    `json:"pings"`
+	// Settings is nil until the service has sent them.
+	Settings *ipc.Settings `json:"settings"`
 	// Seq orders the snapshots: the page ignores one older than what it
 	// shows (an answer to Snapshot that crossed an event).
 	Seq uint64 `json:"seq"`
@@ -45,7 +48,7 @@ type link struct {
 }
 
 func newLink(onChange func(Snapshot)) *link {
-	return &link{onChange: onChange, snap: Snapshot{Profiles: ipc.Profiles{Profiles: []ipc.Profile{}}}}
+	return &link{onChange: onChange, snap: Snapshot{Profiles: ipc.Profiles{Profiles: []ipc.Profile{}}, Pings: ipc.Pings{}}}
 }
 
 // Dialer opens a connection to the service.
@@ -146,6 +149,19 @@ func (l *link) onEvent(ev ipc.Event) {
 				p.Profiles = []ipc.Profile{}
 			}
 			l.update(func(s *Snapshot) { s.Profiles = p })
+		}
+	case ipc.EventPings:
+		var p ipc.Pings
+		if json.Unmarshal(ev.Data, &p) == nil {
+			if p == nil {
+				p = ipc.Pings{}
+			}
+			l.update(func(s *Snapshot) { s.Pings = p })
+		}
+	case ipc.EventSettings:
+		var st ipc.Settings
+		if json.Unmarshal(ev.Data, &st) == nil {
+			l.update(func(s *Snapshot) { s.Settings = &st })
 		}
 	}
 }
