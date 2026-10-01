@@ -161,33 +161,65 @@ and give step-by-step instructions for anything he must do himself.
    - make the first stable build;
    - register `com.klausms.vpn` for Google developer verification with that
      key.
-2. iPhone phases 4–6 (the real tunnel provider, the memory watchdog, the
+2. **Windows desktop app**, the owner's next priority (before the Apple
+   Developer Program): the same functions as the Android app, and code that
+   is professional, fast and maintainable. First write
+   `docs/windows/PLAN.md` the way `docs/ios/PLAN.md` was written, then
+   build in phases that each end in a CI-built installer the owner can try
+   (`windows-latest` runners cost nothing for a public repository).
+   Proposed, to be checked in the plan:
+   - Go, with `libxray` as a plain package; system-wide TUN through wintun
+     into the same netstack as Android and iOS; no local proxy ports.
+   - An elevated Windows service holds the core and the Android logic
+     (health checks, failover, subscription refresh, block reports,
+     network changes, no DNS or IPv6 leaks); a per-user tray icon and
+     window (e.g. Wails on WebView2) talk to it over a named pipe with an
+     ACL.
+   - The installer adds the service, the `klausvpn://` protocol (the
+     friend page's «Добавить в Kirov VPN» button) and autostart; updates
+     come from the panel's `/app/version.json`, extended for Windows.
+   - The look follows `server/remnawave/klaus-page.html`, the UI is in
+     Russian; User-Agent `KlausVPN/<ver> (Windows)` so the panel's
+     `^KlausVPN/` rule matches; `x-hwid` from a hash of `MachineGuid`.
+   - Unsigned at first (SmartScreen warns); code signing decided later.
+     Per-program "apps without VPN" later; no mobile whitelist mode.
+   - Then the panel side: publish the Windows build next to the APK, and a
+     Windows tab on the friend page.
+3. iPhone phases 4–6 (the real tunnel provider, the memory watchdog, the
    screens and feature parity) can move on in unsigned CI builds while
-   signing waits; testing on a phone needs step 3.
-3. The owner buys the Apple Developer Program ($99/year). Then follow
+   signing waits; testing on a phone needs step 4.
+4. The owner buys the Apple Developer Program ($99/year). Then follow
    `docs/ios/PLAN.md` section 8 (identifiers, certificate, API key, GitHub
    secrets), then phase 3 (signing, Ad Hoc via the App Store Connect API
    tool in the drafts), then phases 4–6 (a working tunnel within about
    50 MB, then feature parity).
-4. The owner installs the panel (`docs/README.ru.md`, section 12): VPS and
-   domain, `install-panel.sh`, `klaus-panel telegram-setup`, nodes. Running
-   the installers again later applies `connIdle` 1800 and the new
-   whitelist-note texts. The panel publishes only `KirovVPN-*.apk` from the
-   `stable` release, so it needs a stable build first.
-   - The panel goes on its own VPS abroad, not on the German VPN server: a
-     block of that IP would take the subscription address down with it.
-   - The German server becomes a node with `MIGRATE=1` once friends have
-     their links (the old shared key stops then); a second node at another
-     hoster lets the apps switch by themselves.
+5. The panel is installed (see Status). Still open:
+   - No node serves it yet, so friends' links connect nowhere. The old
+     German VPN server runs the owner's own admin panel with per-friend
+     keys that many iPhone friends use, so it keeps working until the
+     iPhone app exists. Recommended: a new VPS abroad becomes the first
+     node (then `klaus-panel disable-node de-1` until de-1 is switched).
+     The other way, de-1 on another port next to the old VPN (8443 is free
+     there), first needs `klaus-panel setup` to move existing hosts to a
+     changed `REALITY_PORT`, which it does not do yet.
+   - de-1 becomes a node with `MIGRATE=1` once friends have their links.
+     Find out first what the old admin panel is: `install-node.sh` only
+     stops the Xray of `install.sh`.
+   - `klaus-panel telegram-setup`, a backup, and deleting the test user
+     `test` (its link was posted in a chat).
+   - The panel publishes only `KirovVPN-*.apk` from the `stable` release,
+     so it needs a stable build first.
    - The Beget VPS is not needed: a Russian exit bypasses nothing, and a
      panel there would put friends' data under Russian requests and its
      links to the nodes behind TSPU. Later it might be a whitelist relay.
-5. The owner once pasted a Telegram bot token into a chat. Make sure he
+6. The owner once pasted a Telegram bot token into a chat. Make sure he
    revoked it (@BotFather → /revoke) and entered the new one only on the
    panel.
-6. The owner agreed to move the work to `main` and merges the PR. The
-   weekly geo rebuild runs only on the default branch.
-7. Known limits, documented:
+7. The owner agreed to move the work to `main` and merges the PRs. The
+   weekly geo rebuild runs only on the default branch. Once
+   `claude/panel-privacy` is merged, put `~/vpn` on the panel server back
+   on `main`.
+8. Known limits, documented:
    - UDP flows outlive `Stop`, and a UDP socket is routed by its first
      packet (audit 41/42);
    - DNS for names never seen before still waits while the server is down
