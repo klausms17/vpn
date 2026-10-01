@@ -61,6 +61,10 @@ type Deps struct {
 	TrimLog func()
 	// Publish gets every status in order. It must not block or call back.
 	Publish func(ipc.Status)
+	// Explain turns an error of the core's start into the message the
+	// window shows; final says that trying again cannot help (another
+	// program holds what the tunnel needs).
+	Explain func(err error) (message string, final bool)
 	Log     func(string)
 }
 
@@ -70,6 +74,17 @@ const (
 	networkSettle     = 1500 * time.Millisecond
 	minUptimeForReset = 3 * time.Second
 	resumeSettle      = 5 * time.Second
+)
+
+// The pauses before each new try of a core that did not start. Windows
+// sets up the adapter, its addresses and filters in steps that fail now
+// and then for a moment, most of all right after boot or sleep. A start
+// the user asked for is tried twice more before the error shows; one
+// nobody asked for (at boot, after sleep, after a reset) keeps trying for
+// about two minutes, as the VPN is meant to be on.
+var (
+	userRetries = []time.Duration{1500 * time.Millisecond, 5 * time.Second}
+	autoRetries = []time.Duration{1500 * time.Millisecond, 5 * time.Second, 15 * time.Second, 30 * time.Second, 60 * time.Second}
 )
 
 // Engine owns the tunnel. Its methods may be called from any goroutine;
@@ -88,8 +103,9 @@ type Engine struct {
 	held bool
 	// generation counts starts and stops; a retry or reset planned before
 	// a newer one is dropped.
-	generation int
-	stopReset  func() bool
+	generation    int
+	stopReset     func() bool
+	stopReconnect func() bool
 }
 
 type session struct {
@@ -102,6 +118,12 @@ type session struct {
 type userError struct{ msg string }
 
 func (e *userError) Error() string { return e.msg }
+
+// coreError is a core that did not start. The tunnel is down then, whatever
+// ran before.
+type coreError struct{ err error }
+
+func (e *coreError) Error() string { return e.err.Error() }
 
 // New returns an engine that is idle until Run.
 func New(d Deps) *Engine {
@@ -186,6 +208,33 @@ func (e *Engine) NetworkSwitched() {
 	})
 }
 
+// reconnectDelay lets a burst of changes, a few settings switched in a
+// row, restart the tunnel once.
+const reconnectDelay = 800 * time.Millisecond
+
+// Reconnect starts the tunnel again with the selected server and the
+// settings as saved now, if it runs or waits for a retry, a moment after
+// the last of a burst of calls.
+func (e *Engine) Reconnect() {
+	e.post(func() {
+		if e.session == nil && !e.held {
+			return
+		}
+		if e.stopReconnect != nil {
+			e.stopReconnect()
+		}
+		generation := e.generation
+		e.stopReconnect = e.d.Clock.AfterFunc(reconnectDelay, func() {
+			e.post(func() {
+				if generation == e.generation && (e.session != nil || e.held) {
+					e.d.Log("reconnecting: the server or the settings changed")
+					e.start(false, 0)
+				}
+			})
+		})
+	})
+}
+
 // Resumed tells that the PC woke from sleep, after which most connections
 // are dead.
 func (e *Engine) Resumed() {
@@ -248,7 +297,7 @@ func (e *Engine) start(userRequested bool, attempt int) {
 		e.d.TrimLog()
 		e.d.Binder.Activate()
 		if err := e.d.Core.Start(config); err != nil {
-			return &userError{"Ядро не запустилось: " + err.Error()}
+			return &coreError{err}
 		}
 		e.d.Binder.Settle()
 		now := e.d.Clock.Now()
@@ -265,6 +314,11 @@ func (e *Engine) start(userRequested bool, attempt int) {
 }
 
 func (e *Engine) startFailed(err error, server string, userRequested bool, attempt, generation int, restarting, swapped bool, before ipc.Status) {
+	var ce *coreError
+	if errors.As(err, &ce) {
+		e.coreFailed(ce.err, server, userRequested, attempt, generation, before)
+		return
+	}
 	message := err.Error()
 	var ue *userError
 	if !errors.As(err, &ue) {
@@ -287,31 +341,61 @@ func (e *Engine) startFailed(err error, server string, userRequested bool, attem
 		}
 		e.publish(ipc.Status{State: ipc.Connected, ProfileID: old.ID, ProfileName: old.Name, Message: "Не удалось применить изменения: " + message, ConnectedSince: since})
 		if action == tunnel.KeepOldAndRetry {
-			e.retryLater(generation, attempt+1)
+			e.retryLater(generation, attempt+1, false, tunnel.RetryDelay(attempt+1))
 		}
 	case tunnel.HoldAndRetry:
 		e.halt()
 		e.held = true
 		e.publish(ipc.Status{State: ipc.Connecting, ProfileName: before.ProfileName, Message: "Переподключение…"})
-		e.retryLater(generation, attempt+1)
+		e.retryLater(generation, attempt+1, false, tunnel.RetryDelay(attempt+1))
 	default:
-		e.halt()
-		e.held = false
-		e.d.Runtime.SetShouldRun(false)
-		e.publish(ipc.Status{State: ipc.Failed, Message: message})
+		e.giveUp(message)
 	}
 }
 
-// retryLater tries the start once more after a pause, as a start nobody
-// asked for just now, unless the tunnel was started or stopped meanwhile.
-func (e *Engine) retryLater(generation, attempt int) {
-	e.d.Clock.AfterFunc(tunnel.RetryDelay(attempt), func() {
+// coreFailed follows a core that did not start: it is tried again after a
+// pause (userRetries or autoRetries), unless the cause is final or the
+// tunnel should no longer run; then the error shows.
+func (e *Engine) coreFailed(err error, server string, userRequested bool, attempt, generation int, before ipc.Status) {
+	e.d.Log(fmt.Sprintf("core did not start (attempt %d): %s", attempt+1, withoutServer(err.Error(), server)))
+	e.halt()
+	message, final := e.d.Explain(err)
+	retries := autoRetries
+	if userRequested {
+		retries = userRetries
+	}
+	if final || attempt >= len(retries) || !userRequested && !e.d.Runtime.ShouldRun() {
+		e.giveUp(message)
+		return
+	}
+	e.held = true
+	status := ipc.Status{State: ipc.Connecting, ProfileName: before.ProfileName}
+	if !userRequested {
+		status.Message = "Переподключение…"
+	}
+	e.publish(status)
+	e.retryLater(generation, attempt+1, userRequested, retries[attempt])
+}
+
+// giveUp stops trying: the tunnel stays down and the window shows message.
+func (e *Engine) giveUp(message string) {
+	e.halt()
+	e.held = false
+	e.d.Runtime.SetShouldRun(false)
+	e.publish(ipc.Status{State: ipc.Failed, Message: message})
+}
+
+// retryLater tries the start once more after delay, unless the tunnel was
+// started or stopped meanwhile. A retry of the user's start keeps going
+// without should_run, which only a working tunnel sets.
+func (e *Engine) retryLater(generation, attempt int, userRequested bool, delay time.Duration) {
+	e.d.Clock.AfterFunc(delay, func() {
 		e.post(func() {
-			if generation != e.generation || !e.d.Runtime.ShouldRun() {
+			if generation != e.generation || !userRequested && !e.d.Runtime.ShouldRun() {
 				return
 			}
 			e.d.Log(fmt.Sprintf("starting again (attempt %d)", attempt+1))
-			e.start(false, attempt)
+			e.start(userRequested, attempt)
 		})
 	})
 }

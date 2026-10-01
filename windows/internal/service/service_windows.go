@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	stdlog "log"
 	"net"
@@ -19,6 +20,7 @@ import (
 	"github.com/klausms17/vpn/windows/internal/ipc"
 	"github.com/klausms17/vpn/windows/internal/netbind"
 	"github.com/klausms17/vpn/windows/internal/winsys"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 )
 
@@ -30,6 +32,17 @@ const (
 	adapter = "Kirov VPN"
 	// stopWait bounds how long stopping the tunnel may take.
 	stopWait = 15 * time.Second
+	// trimEvery is how often the core's log is cut while it runs: weeks of
+	// a tunnel would otherwise grow it without end.
+	trimEvery = 10 * time.Minute
+	// bootWindow: a service that starts this soon after Windows did was
+	// started by the boot, not by an update or after a crash.
+	bootWindow = 5 * time.Minute
+	// logTail is how much of each log the journal shows, as on Android.
+	logTail = 64 << 10
+	// The server checks of the window, as Android's.
+	pingURL       = "https://www.gstatic.com/generate_204"
+	pingTimeoutMs = 10_000
 )
 
 // pbtAPMResumeAutomatic is the power event of a wake from sleep.
@@ -116,6 +129,9 @@ func start(version string) (*app, error) {
 		s:   store.New(filepath.Join(dataDir, "runtime.json"), func() runtimeState { return runtimeState{} }, nil, log.Warn),
 		log: log.Error,
 	}
+	// Sealed too: the sites and programs say what the user does.
+	settings := store.New(filepath.Join(dataDir, "settings.json"), defaultSettings,
+		winsys.DPAPI{Name: "Kirov VPN settings"}, log.Warn)
 	var (
 		eng    *engine.Engine
 		server *ipc.Server
@@ -132,21 +148,31 @@ func start(version string) (*app, error) {
 	}
 	xrayLog := filepath.Join(logDir, "xray.log")
 	eng = engine.New(engine.Deps{
-		Core:     controller{libxray.NewController()},
+		Core:     controller{c: libxray.NewController(), log: log.Info},
 		Binder:   binder,
 		Runtime:  runtime,
 		Clock:    realClock{},
 		Profiles: profiles.ReadStrict,
-		Build:    buildConfig(xrayLog),
+		Build:    buildConfig(xrayLog, settings.Read),
 		TrimLog:  func() { tunnel.TrimLog(xrayLog, tunnel.LogMaxBytes, tunnel.LogKeepBytes) },
 		Publish:  func(s ipc.Status) { server.Broadcast(ipc.NewEvent(ipc.EventStatus, s)) },
+		Explain:  explainer{holder: addressHolder, ipv6Off: ipv6Off}.explain,
 		Log:      log.Info,
 	})
 	h := &handler{
 		tunnel:   eng,
 		profiles: profiles,
+		settings: settings,
+		pinger:   newPinger(measure, func(p ipc.Pings) { server.Broadcast(ipc.NewEvent(ipc.EventPings, p)) }),
 		keys: func(ctx context.Context, text string) ([]model.Key, []string, error) {
 			return importer.Keys(ctx, text, importer.ForService)
+		},
+		site: libxray.UserRuleEntry,
+		logs: func() ipc.Logs {
+			return ipc.Logs{Sections: []ipc.LogSection{
+				{Title: "Служба Kirov VPN", Text: applog.Tail(filepath.Join(logDir, "service.log"), logTail, false)},
+				{Title: "Ядро Xray", Text: applog.Tail(xrayLog, logTail, true)},
+			}}
 		},
 		broadcast: func(ev ipc.Event) { server.Broadcast(ev) },
 		log:       log.Info,
@@ -169,8 +195,42 @@ func start(version string) (*app, error) {
 			log.Error("pipe: " + err.Error())
 		}
 	}()
+	go func() {
+		t := time.NewTicker(trimEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				tunnel.TrimLog(xrayLog, tunnel.LogMaxBytes, tunnel.LogKeepBytes)
+			}
+		}
+	}()
+	if !settings.Read().AutoConnect && windows.DurationSinceBoot() < bootWindow {
+		log.Info("not connecting at boot: switched off in the settings")
+		runtime.SetShouldRun(false)
+	}
 	eng.Resume()
 	return a, nil
+}
+
+// measure checks how fast a server answers, through a core of its own, as
+// Android's ping does. The service runs it as SYSTEM, so the server's
+// outbounds pass the same check as when the tunnel starts.
+func measure(outbounds json.RawMessage) (int64, error) {
+	var obs []json.RawMessage
+	if err := json.Unmarshal(outbounds, &obs); err != nil {
+		return 0, err
+	}
+	if err := importer.ForService(obs); err != nil {
+		return 0, err
+	}
+	config, err := libxray.BuildProxyOnlyConfig(string(outbounds))
+	if err != nil {
+		return 0, err
+	}
+	return libxray.MeasureOutboundDelay(config, pingURL, pingTimeoutMs)
 }
 
 func (a *app) stop() {
@@ -186,10 +246,17 @@ func (a *app) stop() {
 
 // controller is libxray's Controller as the engine's Core: Xray creates
 // the adapter itself, so there is no descriptor to pass.
-type controller struct{ c *libxray.Controller }
+type controller struct {
+	c   *libxray.Controller
+	log func(string)
+}
 
-func (c controller) Start(config string) error { return c.c.Start(config, 0) }
-func (c controller) Stop() error               { return c.c.Stop() }
+func (c controller) Start(config string) error {
+	freeTunAddress(c.log)
+	return c.c.Start(config, 0)
+}
+
+func (c controller) Stop() error { return c.c.Stop() }
 
 type realClock struct{}
 

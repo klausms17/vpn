@@ -192,6 +192,9 @@ func newWorld(t *testing.T) *world {
 			return "config of " + p.ID, nil
 		},
 		TrimLog: func() {},
+		Explain: func(err error) (string, bool) {
+			return "explained: " + err.Error(), strings.HasPrefix(err.Error(), "final")
+		},
 		Publish: func(s ipc.Status) {
 			w.mu.Lock()
 			defer w.mu.Unlock()
@@ -304,33 +307,14 @@ func TestNoServerIsAnErrorForTheUser(t *testing.T) {
 	}
 }
 
-func TestAConnectTheUserAskedForGivesUpAtOnce(t *testing.T) {
+func TestAConnectTheUserAskedForIsTriedTwiceMore(t *testing.T) {
 	w := newWorld(t)
-	w.core.failNext(errors.New("unable to create the adapter"))
+	boom := errors.New("unable to set ips")
+	w.core.failNext(boom, boom, boom)
 	w.e.Connect()
 	w.sync()
-	w.expectStates(ipc.Connecting, ipc.Connecting, ipc.Failed)
-	if m := w.last().Message; m != "Ядро не запустилось: unable to create the adapter" {
-		t.Errorf("message %q", m)
-	}
-	if w.binder.last() != "deactivate" || w.runtime.ShouldRun() {
-		t.Errorf("binder %v, should_run %v", w.binder.calls, w.runtime.ShouldRun())
-	}
-	// Nothing is retried.
-	w.advance(time.Minute)
-	if _, starts, _ := w.core.state(); starts != 1 {
-		t.Errorf("%d starts", starts)
-	}
-}
-
-func TestATunnelThatShouldRunIsTriedThreeTimesAtBoot(t *testing.T) {
-	w := newWorld(t)
-	w.runtime.SetShouldRun(true)
-	boom := errors.New("routes cannot be set")
-	w.core.failNext(boom, boom, boom)
-	w.e.Resume()
-	w.sync()
-	if s := w.last(); s.State != ipc.Connecting || s.Message != "Переподключение…" {
+	// Quietly: the window keeps showing the connection being made.
+	if s := w.last(); s.State != ipc.Connecting || s.Message != "" {
 		t.Errorf("after the first failure: %+v", s)
 	}
 	w.advance(1499 * time.Millisecond)
@@ -338,21 +322,78 @@ func TestATunnelThatShouldRunIsTriedThreeTimesAtBoot(t *testing.T) {
 		t.Fatalf("retried early: %d starts", starts)
 	}
 	w.advance(time.Millisecond)
-	if _, starts, _ := w.core.state(); starts != 2 {
-		t.Fatalf("%d starts after 1.5 s", starts)
-	}
 	w.advance(5 * time.Second)
 	if _, starts, _ := w.core.state(); starts != 3 {
-		t.Fatalf("%d starts after 5 s more", starts)
+		t.Fatalf("%d starts", starts)
 	}
-	if s := w.last(); s.State != ipc.Failed || !strings.Contains(s.Message, "routes cannot be set") {
-		t.Errorf("after the third failure: %+v", s)
+	if s := w.last(); s.State != ipc.Failed || s.Message != "explained: unable to set ips" {
+		t.Errorf("status %+v", s)
+	}
+	if w.binder.last() != "deactivate" || w.runtime.ShouldRun() {
+		t.Errorf("binder %v, should_run %v", w.binder.calls, w.runtime.ShouldRun())
+	}
+	w.advance(time.Hour)
+	if _, starts, _ := w.core.state(); starts != 3 {
+		t.Errorf("%d starts", starts)
+	}
+	// Logged each time, with the core's own words.
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !slices.Contains(w.logs, "core did not start (attempt 3): unable to set ips") {
+		t.Errorf("logs %q", w.logs)
+	}
+}
+
+func TestAUserConnectThatWorksOnTheSecondTry(t *testing.T) {
+	w := newWorld(t)
+	w.core.failNext(errors.New("element not found"))
+	w.e.Connect()
+	w.advance(1500 * time.Millisecond)
+	if s := w.last(); s.State != ipc.Connected || s.ProfileID != "de" || !w.runtime.ShouldRun() {
+		t.Errorf("status %+v, should_run %v", s, w.runtime.ShouldRun())
+	}
+}
+
+func TestAFinalCauseShowsAtOnce(t *testing.T) {
+	w := newWorld(t)
+	w.core.failNext(errors.New("final: the address is taken"))
+	w.e.Connect()
+	w.sync()
+	w.expectStates(ipc.Connecting, ipc.Connecting, ipc.Failed)
+	w.advance(time.Minute)
+	if _, starts, _ := w.core.state(); starts != 1 {
+		t.Errorf("%d starts", starts)
+	}
+}
+
+func TestATunnelThatShouldRunKeepsTryingAtBoot(t *testing.T) {
+	w := newWorld(t)
+	w.runtime.SetShouldRun(true)
+	boom := errors.New("routes cannot be set")
+	w.core.failNext(boom, boom, boom, boom, boom, boom)
+	w.e.Resume()
+	w.sync()
+	if s := w.last(); s.State != ipc.Connecting || s.Message != "Переподключение…" {
+		t.Errorf("after the first failure: %+v", s)
+	}
+	for i, pause := range []time.Duration{1500 * time.Millisecond, 5 * time.Second, 15 * time.Second, 30 * time.Second, 60 * time.Second} {
+		w.advance(pause - time.Millisecond)
+		if _, starts, _ := w.core.state(); starts != i+1 {
+			t.Fatalf("retry %d early: %d starts", i+1, starts)
+		}
+		w.advance(time.Millisecond)
+		if _, starts, _ := w.core.state(); starts != i+2 {
+			t.Fatalf("retry %d: %d starts", i+1, starts)
+		}
+	}
+	if s := w.last(); s.State != ipc.Failed || s.Message != "explained: routes cannot be set" {
+		t.Errorf("after the last failure: %+v", s)
 	}
 	if w.runtime.ShouldRun() {
 		t.Error("should_run kept after giving up")
 	}
-	w.advance(time.Minute)
-	if _, starts, _ := w.core.state(); starts != 3 {
+	w.advance(time.Hour)
+	if _, starts, _ := w.core.state(); starts != 6 {
 		t.Errorf("%d starts", starts)
 	}
 }
@@ -530,7 +571,7 @@ func TestTheLogNeverNamesTheServer(t *testing.T) {
 	w.mu.Lock()
 	w.profiles.Profiles[0].Address = "vpn.example.com"
 	w.mu.Unlock()
-	w.core.failNext(errors.New(`invalid address: "vpn.example.com"`))
+	w.core.failNext(errors.New(`final: invalid address: "vpn.example.com"`))
 	w.e.Connect()
 	w.sync()
 	if got := w.last(); got.State != ipc.Failed || !strings.Contains(got.Message, "vpn.example.com") {
@@ -543,8 +584,56 @@ func TestTheLogNeverNamesTheServer(t *testing.T) {
 			t.Errorf("logged %q", l)
 		}
 	}
-	if !slices.ContainsFunc(w.logs, func(l string) bool { return strings.Contains(l, `invalid address: "<server>"`) }) {
+	if !slices.Contains(w.logs, `core did not start (attempt 1): final: invalid address: "<server>"`) {
 		t.Errorf("logs %q", w.logs)
+	}
+}
+
+func TestReconnectRestartsARunningTunnelOnceWithTheNewServer(t *testing.T) {
+	w := newWorld(t)
+	w.e.Connect()
+	w.sync()
+	w.mu.Lock()
+	w.profiles.Profiles = append(w.profiles.Profiles, model.StoredProfile{ID: "nl", Name: "Нидерланды"})
+	w.profiles.SelectedID = "nl"
+	w.mu.Unlock()
+	w.clear()
+	// A burst: one restart, 0.8 s after the last call.
+	w.e.Reconnect()
+	w.advance(500 * time.Millisecond)
+	w.e.Reconnect()
+	w.advance(799 * time.Millisecond)
+	if _, starts, _ := w.core.state(); starts != 1 {
+		t.Fatalf("restarted early: %d starts", starts)
+	}
+	w.advance(time.Millisecond)
+	if running, starts, stops := w.core.state(); !running || starts != 2 || stops != 1 || w.core.starts[1] != "config of nl" {
+		t.Errorf("running %v, starts %v, %d stops", running, w.core.starts, stops)
+	}
+	if s := w.last(); s.State != ipc.Connected || s.ProfileID != "nl" || s.Message != "" {
+		t.Errorf("status %+v", s)
+	}
+	// The old tunnel was shown as working until the new one took over.
+	if got := w.states(); got[0] != ipc.Connected {
+		t.Errorf("states %v", got)
+	}
+}
+
+func TestReconnectLeavesAStoppedTunnelAlone(t *testing.T) {
+	w := newWorld(t)
+	w.e.Reconnect()
+	w.advance(time.Minute)
+	if _, starts, _ := w.core.state(); starts != 0 || len(w.states()) != 0 {
+		t.Errorf("%d starts, states %v", starts, w.states())
+	}
+	// Nor does a pending one start a tunnel the user stopped meanwhile.
+	w.e.Connect()
+	w.sync()
+	w.e.Reconnect()
+	w.e.Disconnect()
+	w.advance(time.Minute)
+	if running, starts, _ := w.core.state(); running || starts != 1 {
+		t.Errorf("running %v, %d starts", running, starts)
 	}
 }
 

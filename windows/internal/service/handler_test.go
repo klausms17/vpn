@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -22,14 +23,23 @@ type fakeTunnel struct {
 	calls []string
 }
 
-func (f *fakeTunnel) Connect() { f.mu.Lock(); f.calls = append(f.calls, "connect"); f.mu.Unlock() }
-func (f *fakeTunnel) Disconnect() {
+func (f *fakeTunnel) record(c string) {
 	f.mu.Lock()
-	f.calls = append(f.calls, "disconnect")
-	f.mu.Unlock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, c)
 }
+
+func (f *fakeTunnel) Connect()    { f.record("connect") }
+func (f *fakeTunnel) Disconnect() { f.record("disconnect") }
+func (f *fakeTunnel) Reconnect()  { f.record("reconnect") }
 func (f *fakeTunnel) Status() ipc.Status {
 	return ipc.Status{State: ipc.Connected, ProfileID: "a", ProfileName: "A"}
+}
+
+func (f *fakeTunnel) took() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return strings.Join(f.calls, ",")
 }
 
 func key(link string) model.Key {
@@ -39,18 +49,37 @@ func key(link string) model.Key {
 type testEnv struct {
 	h      *handler
 	tunnel *fakeTunnel
+	mu     sync.Mutex
 	events []ipc.Event
 	logs   []string
 	// importing, if set, tells when an import reads its keys and holds it
 	// until the test sends.
 	importing chan struct{}
+	// measured answers the pinger's checks by server name.
+	measured map[string]int64
 }
 
 func newEnv(t *testing.T) *testEnv {
 	env := &testEnv{tunnel: &fakeTunnel{}}
+	dir := t.TempDir()
+	broadcast := func(ev ipc.Event) {
+		env.mu.Lock()
+		defer env.mu.Unlock()
+		env.events = append(env.events, ev)
+	}
 	env.h = &handler{
 		tunnel:   env.tunnel,
-		profiles: store.New(filepath.Join(t.TempDir(), "profiles.json"), func() model.ProfilesState { return model.ProfilesState{} }, nil, func(string) {}),
+		profiles: store.New(filepath.Join(dir, "profiles.json"), func() model.ProfilesState { return model.ProfilesState{} }, nil, func(string) {}),
+		settings: store.New(filepath.Join(dir, "settings.json"), defaultSettings, nil, func(string) {}),
+		pinger: newPinger(func(outbounds json.RawMessage) (int64, error) {
+			var obs []map[string]any
+			json.Unmarshal(outbounds, &obs)
+			name, _ := obs[0]["name"].(string)
+			if ms, ok := env.measured[name]; ok {
+				return ms, nil
+			}
+			return 0, errors.New("timeout")
+		}, func(p ipc.Pings) { broadcast(ipc.NewEvent(ipc.EventPings, p)) }),
 		keys: func(ctx context.Context, text string) ([]model.Key, []string, error) {
 			if env.importing != nil {
 				env.importing <- struct{}{}
@@ -65,11 +94,37 @@ func newEnv(t *testing.T) *testEnv {
 			}
 			return keys, []string{"bogus"}[:strings.Count(text, "bogus")], nil
 		},
-		broadcast: func(ev ipc.Event) { env.events = append(env.events, ev) },
-		log:       func(m string) { env.logs = append(env.logs, m) },
-		now:       func() time.Time { return time.UnixMilli(1234) },
+		site: func(e string) string {
+			if strings.Contains(e, " ") {
+				return ""
+			}
+			return strings.ToLower(e)
+		},
+		logs: func() ipc.Logs {
+			return ipc.Logs{Sections: []ipc.LogSection{{Title: "Kirov VPN", Text: "service started\n"}}}
+		},
+		broadcast: broadcast,
+		log: func(m string) {
+			env.mu.Lock()
+			defer env.mu.Unlock()
+			env.logs = append(env.logs, m)
+		},
+		now: func() time.Time { return time.UnixMilli(1234) },
 	}
 	return env
+}
+
+// named returns the events of one name, in order.
+func (env *testEnv) named(name string) []ipc.Event {
+	env.mu.Lock()
+	defer env.mu.Unlock()
+	var out []ipc.Event
+	for _, ev := range env.events {
+		if ev.Event == name {
+			out = append(out, ev)
+		}
+	}
+	return out
 }
 
 func (env *testEnv) call(op string, args any) (any, error) {
@@ -188,8 +243,8 @@ func TestConnectDisconnectAndStatus(t *testing.T) {
 	env := newEnv(t)
 	env.call(ipc.OpConnect, nil)
 	env.call(ipc.OpDisconnect, nil)
-	if strings.Join(env.tunnel.calls, ",") != "connect,disconnect" {
-		t.Errorf("calls %v", env.tunnel.calls)
+	if got := env.tunnel.took(); got != "connect,disconnect" {
+		t.Errorf("calls %v", got)
 	}
 	st, err := env.call(ipc.OpStatus, nil)
 	if err != nil || st.(ipc.Status).ProfileID != "a" {
@@ -203,11 +258,203 @@ func TestConnectDisconnectAndStatus(t *testing.T) {
 func TestGreeting(t *testing.T) {
 	env := newEnv(t)
 	evs := env.h.greet()
-	if len(evs) != 2 || evs[0].Event != ipc.EventStatus || evs[1].Event != ipc.EventProfiles {
+	if len(evs) != 4 || evs[0].Event != ipc.EventStatus || evs[1].Event != ipc.EventProfiles || evs[2].Event != ipc.EventPings || evs[3].Event != ipc.EventSettings {
 		t.Fatalf("greeting %v", evs)
 	}
 	// An empty list is [], never null: the window iterates it.
 	if !strings.Contains(string(evs[1].Data), `"profiles":[]`) {
 		t.Errorf("profiles %s", evs[1].Data)
+	}
+}
+
+// servers saves servers named after names and returns their ids.
+func (env *testEnv) servers(t *testing.T, names ...string) []string {
+	t.Helper()
+	var keys []model.Key
+	for _, n := range names {
+		k := key("vless://" + n)
+		k.Name = n
+		k.Outbounds = json.RawMessage(fmt.Sprintf(`[{"tag":"proxy","name":%q}]`, n))
+		keys = append(keys, k)
+	}
+	saved, err := env.h.profiles.Update(func(s model.ProfilesState) model.ProfilesState {
+		next, _, _ := s.WithNewKeys(keys, newID, 1)
+		return next
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, p := range saved.Profiles {
+		out = append(out, p.ID)
+	}
+	return out
+}
+
+func TestSelectingAnotherServerMovesTheTunnel(t *testing.T) {
+	env := newEnv(t)
+	ids := env.servers(t, "de", "nl")
+	if _, err := env.call(ipc.OpSelect, ipc.IDArgs{ID: ids[1]}); err != nil {
+		t.Fatal(err)
+	}
+	if got := env.h.profiles.Read().SelectedID; got != ids[1] {
+		t.Errorf("selected %q", got)
+	}
+	if env.tunnel.took() != "reconnect" || len(env.named(ipc.EventProfiles)) != 1 {
+		t.Errorf("tunnel %q, events %v", env.tunnel.took(), env.events)
+	}
+	// The same server again changes nothing.
+	if _, err := env.call(ipc.OpSelect, ipc.IDArgs{ID: ids[1]}); err != nil || env.tunnel.took() != "reconnect" {
+		t.Errorf("again: %v, tunnel %q", err, env.tunnel.took())
+	}
+	if _, err := env.call(ipc.OpSelect, ipc.IDArgs{ID: "gone"}); !errors.Is(err, errNoServer) {
+		t.Errorf("a server deleted meanwhile: %v", err)
+	}
+}
+
+func TestRename(t *testing.T) {
+	env := newEnv(t)
+	ids := env.servers(t, "de")
+	if _, err := env.call(ipc.OpRename, ipc.RenameArgs{ID: ids[0], Name: "  Дом  "}); err != nil {
+		t.Fatal(err)
+	}
+	if got := env.h.profiles.Read().Profiles[0].Name; got != "Дом" {
+		t.Errorf("name %q", got)
+	}
+	if _, err := env.call(ipc.OpRename, ipc.RenameArgs{ID: ids[0], Name: "  "}); err == nil {
+		t.Error("an empty name was taken")
+	}
+	if _, err := env.call(ipc.OpRename, ipc.RenameArgs{ID: "gone", Name: "x"}); !errors.Is(err, errNoServer) {
+		t.Errorf("unknown server: %v", err)
+	}
+	if env.tunnel.took() != "" {
+		t.Errorf("tunnel %q", env.tunnel.took())
+	}
+}
+
+func TestDeletingTheSelectedServerMovesOrStopsTheTunnel(t *testing.T) {
+	env := newEnv(t)
+	ids := env.servers(t, "de", "nl", "fi")
+	// Not the selected one: the tunnel stays as it is.
+	env.call(ipc.OpDelete, ipc.IDArgs{ID: ids[2]})
+	if env.tunnel.took() != "" {
+		t.Errorf("tunnel %q", env.tunnel.took())
+	}
+	// The selected one: on to the next server.
+	env.call(ipc.OpDelete, ipc.IDArgs{ID: ids[0]})
+	if got := env.h.profiles.Read(); len(got.Profiles) != 1 || got.SelectedID != ids[1] || env.tunnel.took() != "reconnect" {
+		t.Errorf("saved %+v, tunnel %q", got, env.tunnel.took())
+	}
+	// The last one: the tunnel stops.
+	env.call(ipc.OpDelete, ipc.IDArgs{ID: ids[1]})
+	if env.tunnel.took() != "reconnect,disconnect" {
+		t.Errorf("tunnel %q", env.tunnel.took())
+	}
+	if n := len(env.named(ipc.EventProfiles)); n != 3 {
+		t.Errorf("%d profiles events", n)
+	}
+}
+
+// pingsWhenDone waits until no check runs and their results went out,
+// in an event after the first seen ones.
+func (env *testEnv) pingsWhenDone(t *testing.T, seen int) ipc.Pings {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		evs := env.named(ipc.EventPings)
+		if len(evs) > seen {
+			var p ipc.Pings
+			json.Unmarshal(evs[len(evs)-1].Data, &p)
+			done := true
+			for _, x := range p {
+				done = done && x.State != ipc.PingTesting
+			}
+			if done && len(p) > 0 {
+				return p
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the checks did not finish")
+	return nil
+}
+
+func TestPingChecksServersAndTellsTheWindows(t *testing.T) {
+	env := newEnv(t)
+	env.measured = map[string]int64{"de": 120}
+	ids := env.servers(t, "de", "nl", "fi")
+	if _, err := env.call(ipc.OpPing, ipc.PingArgs{IDs: ids[:2]}); err != nil {
+		t.Fatal(err)
+	}
+	got := env.pingsWhenDone(t, 0)
+	want := ipc.Pings{ids[0]: {State: ipc.PingOK, Ms: 120}, ids[1]: {State: ipc.PingFailed}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("pings %+v", got)
+	}
+	// All of them; a deleted server's result goes.
+	seen := len(env.named(ipc.EventPings))
+	env.call(ipc.OpPing, ipc.PingArgs{})
+	if got := env.pingsWhenDone(t, seen); len(got) != 3 {
+		t.Errorf("pings %+v", got)
+	}
+	env.call(ipc.OpDelete, ipc.IDArgs{ID: ids[2]})
+	if _, ok := env.h.pinger.current()[ids[2]]; ok {
+		t.Error("the deleted server's check stayed")
+	}
+	// A new window gets them.
+	var greeted ipc.Pings
+	json.Unmarshal(env.h.greet()[2].Data, &greeted)
+	if len(greeted) != 2 {
+		t.Errorf("greeting %+v", greeted)
+	}
+}
+
+func TestSettingsAreCheckedSavedAndApplied(t *testing.T) {
+	env := newEnv(t)
+	s := defaultSettings()
+	s.Mode = ipc.ModeGlobal
+	s.DirectSites = []string{"Bank.example", "bank.example"}
+	s.DirectPrograms = []string{"Telegram.exe", "telegram.EXE"}
+	if _, err := env.call(ipc.OpSetSettings, s); err != nil {
+		t.Fatal(err)
+	}
+	saved := env.h.settings.Read()
+	if saved.Mode != ipc.ModeGlobal || !reflect.DeepEqual(saved.DirectSites, []string{"bank.example"}) || !reflect.DeepEqual(saved.DirectPrograms, []string{"Telegram.exe"}) || !saved.TorrentsDirect || !saved.AutoConnect {
+		t.Errorf("saved %+v", saved)
+	}
+	if env.tunnel.took() != "reconnect" || len(env.named(ipc.EventSettings)) != 1 {
+		t.Errorf("tunnel %q, events %v", env.tunnel.took(), env.events)
+	}
+	// The same settings again change nothing.
+	env.call(ipc.OpSetSettings, s)
+	if env.tunnel.took() != "reconnect" {
+		t.Errorf("tunnel %q", env.tunnel.took())
+	}
+	for _, c := range []struct {
+		change func(*ipc.Settings)
+		want   string
+	}{
+		{func(s *ipc.Settings) { s.Mode = "all" }, "неверный запрос"},
+		{func(s *ipc.Settings) { s.ProxySites = []string{"not a site"} }, "«not a site» не похоже на сайт или адрес"},
+		{func(s *ipc.Settings) { s.ProxyPrograms = []string{`C:\Tools\x.exe`} }, "не похоже на программу"},
+		{func(s *ipc.Settings) { s.ProxyPrograms = []string{"notes.txt"} }, "не похоже на программу"},
+		{func(s *ipc.Settings) { s.BlockSites = make([]string, maxSites+1) }, "Слишком много сайтов"},
+	} {
+		bad := defaultSettings()
+		c.change(&bad)
+		if _, err := env.call(ipc.OpSetSettings, bad); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%+v: %v", bad, err)
+		}
+	}
+	if got := env.h.settings.Read(); got.Mode != ipc.ModeGlobal {
+		t.Errorf("a refused change was saved: %+v", got)
+	}
+}
+
+func TestLogsGoToTheWindow(t *testing.T) {
+	env := newEnv(t)
+	res, err := env.call(ipc.OpLogs, nil)
+	if err != nil || len(res.(ipc.Logs).Sections) != 1 {
+		t.Errorf("%+v %v", res, err)
 	}
 }
