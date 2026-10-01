@@ -7,7 +7,11 @@
 //	kirovctl status          print the status
 //	kirovctl import          add the keys read from standard input
 //	kirovctl connect         connect and wait until connected
+//	kirovctl wait-connected  wait until the tunnel is up
 //	kirovctl disconnect      disconnect and wait until disconnected
+//	kirovctl ping            check every server and print the results
+//	kirovctl set-settings    save the settings read from standard input
+//	kirovctl logs            print the journal
 package main
 
 import (
@@ -28,11 +32,12 @@ const timeout = 90 * time.Second
 
 func main() {
 	if len(os.Args) != 2 {
-		fail(errors.New("usage: kirovctl wait-service | pipe-sddl | status | import | connect | disconnect"))
+		fail(errors.New("usage: kirovctl wait-service | pipe-sddl | status | import | connect | wait-connected | disconnect | ping | set-settings | logs"))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if os.Args[1] == "pipe-sddl" {
+	switch os.Args[1] {
+	case "pipe-sddl":
 		conn, err := ipc.Dial(ctx)
 		if err != nil {
 			fail(err)
@@ -45,8 +50,7 @@ func main() {
 		}
 		fmt.Println(sd.String())
 		return
-	}
-	if os.Args[1] == "wait-service" {
+	case "wait-service":
 		for {
 			if conn, err := ipc.Dial(ctx); err == nil {
 				conn.Close()
@@ -68,7 +72,7 @@ func main() {
 	c := ipc.NewClient(conn, w.onEvent)
 	defer c.Close()
 	// The greeting carries the status.
-	if err := w.until(ctx, func(ipc.Status) bool { return true }); err != nil {
+	if err := w.until(ctx, func(*watch) bool { return w.st != nil }); err != nil {
 		fail(err)
 	}
 	switch os.Args[1] {
@@ -89,12 +93,12 @@ func main() {
 		}
 	case "connect":
 		if w.status().State != ipc.Connected {
-			seen := w.events()
+			seen := w.statuses()
 			if err := c.Call(ctx, ipc.OpConnect, nil, nil); err != nil {
 				fail(err)
 			}
-			err := w.until(ctx, func(s ipc.Status) bool {
-				return w.events() > seen && (s.State == ipc.Connected || s.State == ipc.Failed)
+			err := w.until(ctx, func(w *watch) bool {
+				return w.n > seen && (w.st.State == ipc.Connected || w.st.State == ipc.Failed)
 			})
 			if err != nil {
 				fail(err)
@@ -104,37 +108,85 @@ func main() {
 		if w.status().State != ipc.Connected {
 			os.Exit(1)
 		}
+	case "wait-connected":
+		if err := w.until(ctx, func(w *watch) bool { return w.st.State == ipc.Connected && w.st.Message == "" }); err != nil {
+			fail(err)
+		}
+		print(w.status())
 	case "disconnect":
 		if err := c.Call(ctx, ipc.OpDisconnect, nil, nil); err != nil {
 			fail(err)
 		}
-		if err := w.until(ctx, func(s ipc.Status) bool { return s.State == ipc.Disconnected }); err != nil {
+		if err := w.until(ctx, func(w *watch) bool { return w.st.State == ipc.Disconnected }); err != nil {
 			fail(err)
 		}
 		print(w.status())
+	case "ping":
+		seen := w.pingEvents()
+		if err := c.Call(ctx, ipc.OpPing, ipc.PingArgs{}, nil); err != nil {
+			fail(err)
+		}
+		err := w.until(ctx, func(w *watch) bool {
+			if w.np <= seen || len(w.pings) == 0 {
+				return false
+			}
+			for _, p := range w.pings {
+				if p.State == ipc.PingTesting {
+					return false
+				}
+			}
+			return true
+		})
+		if err != nil {
+			fail(err)
+		}
+		print(w.lastPings())
+	case "set-settings":
+		var s ipc.Settings
+		if err := json.NewDecoder(io.LimitReader(os.Stdin, 1<<20)).Decode(&s); err != nil {
+			fail(err)
+		}
+		if err := c.Call(ctx, ipc.OpSetSettings, s, nil); err != nil {
+			fail(err)
+		}
+		fmt.Println("saved")
+	case "logs":
+		var l ipc.Logs
+		if err := c.Call(ctx, ipc.OpLogs, nil, &l); err != nil {
+			fail(err)
+		}
+		for _, s := range l.Sections {
+			fmt.Printf("=== %s ===\n%s\n", s.Title, s.Text)
+		}
 	default:
 		fail(fmt.Errorf("unknown command %q", os.Args[1]))
 	}
 }
 
-// watch keeps the latest status the service sent.
+// watch keeps the latest status and server checks the service sent.
 type watch struct {
 	mu      sync.Mutex
 	st      *ipc.Status
 	n       int
+	pings   ipc.Pings
+	np      int
 	changed chan struct{}
 }
 
 func (w *watch) onEvent(ev ipc.Event) {
-	if ev.Event != ipc.EventStatus {
-		return
-	}
-	var s ipc.Status
-	if json.Unmarshal(ev.Data, &s) != nil {
-		return
-	}
 	w.mu.Lock()
-	w.st, w.n = &s, w.n+1
+	switch ev.Event {
+	case ipc.EventStatus:
+		var s ipc.Status
+		if json.Unmarshal(ev.Data, &s) == nil {
+			w.st, w.n = &s, w.n+1
+		}
+	case ipc.EventPings:
+		var p ipc.Pings
+		if json.Unmarshal(ev.Data, &p) == nil {
+			w.pings, w.np = p, w.np+1
+		}
+	}
 	w.mu.Unlock()
 	select {
 	case w.changed <- struct{}{}:
@@ -148,30 +200,44 @@ func (w *watch) status() ipc.Status {
 	return *w.st
 }
 
-func (w *watch) events() int {
+func (w *watch) statuses() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.n
 }
 
-func (w *watch) until(ctx context.Context, ok func(ipc.Status) bool) error {
+func (w *watch) pingEvents() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.np
+}
+
+func (w *watch) lastPings() ipc.Pings {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.pings
+}
+
+// until waits until ok holds, which it tests under the watch's lock.
+func (w *watch) until(ctx context.Context, ok func(*watch) bool) error {
 	for {
 		w.mu.Lock()
-		st := w.st
+		done := w.st != nil && ok(w)
+		last := w.st
 		w.mu.Unlock()
-		if st != nil && ok(*st) {
+		if done {
 			return nil
 		}
 		select {
 		case <-w.changed:
 		case <-ctx.Done():
-			return fmt.Errorf("timed out; last status: %+v", st)
+			return fmt.Errorf("timed out; last status: %+v", last)
 		}
 	}
 }
 
-func print(s ipc.Status) {
-	out, _ := json.Marshal(s)
+func print(v any) {
+	out, _ := json.Marshal(v)
 	fmt.Println(string(out))
 }
 

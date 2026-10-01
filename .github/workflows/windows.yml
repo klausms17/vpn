@@ -88,6 +88,7 @@ jobs:
           # For the smoke test only, never shipped.
           go build "${flags[@]}" -o ../bin/tools/kirovctl.exe ./cmd/kirovctl
           go build "${flags[@]}" -o ../bin/tools/testserver.exe ./tools/testserver
+          go build "${flags[@]}" -o ../bin/tools/othervpn.exe ./tools/othervpn
           ls -la ../bin ../bin/tools
 
       - name: Licences of everything in the programs
