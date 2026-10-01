@@ -13,6 +13,8 @@ package privileged
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -79,7 +81,8 @@ func list(each rule) rule {
 
 // fields takes an object whose keys are all in allowed, each value passing
 // its rule. A key that two spellings name, which Xray would read in an
-// order of its own, is refused.
+// order of its own, is refused. Keys are checked in order, so the error
+// names the same one every time.
 func fields(allowed map[string]rule) rule {
 	lower := make(map[string]rule, len(allowed))
 	for k, r := range allowed {
@@ -91,14 +94,14 @@ func fields(allowed map[string]rule) rule {
 			return refused(path)
 		}
 		seen := make(map[string]bool, len(obj))
-		for k, child := range obj {
+		for _, k := range slices.Sorted(maps.Keys(obj)) {
 			name := fold(k)
 			r, ok := lower[name]
 			if !ok || seen[name] {
 				return refused(path + "." + clip(k))
 			}
 			seen[name] = true
-			if err := r(child, path+"."+k); err != nil {
+			if err := r(obj[k], path+"."+k); err != nil {
 				return err
 			}
 		}

@@ -96,6 +96,19 @@ func TestAnythingElseIsRefused(t *testing.T) {
 	}
 }
 
+func TestTheErrorNamesTheSameSettingEveryTime(t *testing.T) {
+	ob := []json.RawMessage{json.RawMessage(`{"protocol":"vless","settings":{},"streamSettings":{"xdriveSettings":{},"network":"xdrive","finalmask":{"udp":[{"type":"udphop"}]}}}`)}
+	want := privileged.Check(ob).Error()
+	for range 20 {
+		if got := privileged.Check(ob).Error(); got != want {
+			t.Fatalf("%q, then %q", want, got)
+		}
+	}
+	if !strings.HasSuffix(want, "(outbounds[0].streamSettings.finalmask.udp[0].type: udphop)") {
+		t.Errorf("error %q", want)
+	}
+}
+
 func TestEveryOutboundIsChecked(t *testing.T) {
 	good := outbounds(t, "trojan://secret@vpn.example.com:443#T")
 	if err := privileged.Check(append(good, json.RawMessage(`{"protocol":"freedom","tag":"fragment"}`))); err == nil {
