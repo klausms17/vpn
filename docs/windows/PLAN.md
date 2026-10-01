@@ -579,6 +579,7 @@ Each phase ends in an installer built by CI that the owner installs and tries.
 7. **Other security software** with its own WFP or TLS inspection (Kaspersky, ESET, AdGuard) may conflict with the tunnel or the filters. A third-party WFP callout can veto even Xray's hard permit.
 8. **Wintun stalls.** The unreleased master fixes of row 22 (4–5 s stalls) may show up as hiccups in the health checks.
 9. **One VPN for all users of a PC.** Everyone signed in shares its state and servers. Fine for a home PC; documented.
+10. **Fast Startup.** Windows' default fast startup hibernates the services instead of stopping them, so after a shutdown and power-on the service resumes as after sleep: the tunnel comes back as it was, whatever «Подключаться при запуске Windows» says. Phase 4 tells such a boot from a wake (the kernel's boot event) and applies the setting.
 10. **MachineGuid is copied on cloned images.** Two such PCs would share one device slot. Rare at home.
 11. **Windows 10 support ended on 14 Oct 2025.** Consumer ESU runs to 12 Oct 2027; Go 1.27 and WebView2 still support Windows 10.
 12. **No arm64 device** to try. Only CI on `windows-11-arm` covers it.

@@ -187,13 +187,37 @@ and give step-by-step instructions for anything he must do himself.
     to `Program Files\Kirov VPN\Data`; a page the window was led to could
     call the service; site names and addresses in `xray.log`; a bug in the
     engine ended the service.
+  - The owner tried 1.0.5 on 1 Oct: it connected, then a later start
+    failed with a core error that was gone an hour later. He asked for
+    ping, settings (a preset plus his own rules, more for advanced users)
+    and a journal in the app. Built the same day, with a third review:
+    - a failed start is retried (twice for the user's, about two minutes
+      for one nobody asked for) and explained: another VPN's connected
+      adapter holding the tunnel's address is named and refused at once,
+      IPv6 switched off, the adapter not ready, WFP; the address is freed
+      from other VPNs' disconnected adapters;
+    - «Серверы»: each server's check (graded as Android's), select,
+      rename, delete, «Проверить все»; checks run through the tunnel's
+      controller, never as cores of their own (the review found those
+      taking the tunnel's log, DNS and outbounds);
+    - «Настройки»: Android's three modes, own sites directly, through the
+      VPN or blocked, programs directly or through the VPN, «Торренты без
+      VPN» (on by default; the owner should confirm), connect at boot;
+      bounded in size, applied at once, only a routing change restarts;
+    - «Журнал»: the service's, the core's and the window's logs, without
+      addresses or host names, with «Скопировать»;
+    - a WFP hold: while a tunnel that was up restarts, only the
+      service's own traffic passes, for at most 20 s.
   - CI (`windows.yml`) passes: libxray's tests on Windows, and the smoke
     test (refuse a folder outside Program Files, install, the pipe's
     security, refuse a file-writing key, connect through a local REALITY
-    server, DNS filter, IPv6, 50 restarts in 164 s with 471 → 508 handles
-    and 19 → 20 threads, install over itself, uninstall). The installer is
-    on the `windows-build-claude-panel-privacy` release (1.0.5). The owner
-    has not tried it yet.
+    server, DNS filter, IPv6, the server check, the journal without
+    addresses, a site and a program sent directly, no DNS around the
+    tunnel during a restart (0 of 34 probes), 50 restarts in 165 s with
+    506 → 516 handles and 20 → 19 threads, the service killed while
+    connected and back, another VPN holding the address named at once,
+    install over itself, uninstall). The installer is on the
+    `windows-build-claude-panel-privacy` release.
 - **iPhone:** phases 1–2 of `docs/ios/PLAN.md` are done. The Go core builds
   for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
   passes its checks (geo files in the extension, no bitcode). The app is
@@ -225,11 +249,10 @@ and give step-by-step instructions for anything he must do himself.
    is professional, fast and maintainable. The plan is
    `docs/windows/PLAN.md` (checked 1 Oct 2026); build it in its phases,
    each ending in a CI-built installer the owner tries. Phase 1, the tunnel
-   on the owner's PC, is built; the owner tries its installer (the checks
-   are in the plan's section 10). Next, before phase 2 (subscriptions and
-   the Android logic): hold traffic with WFP while the core restarts, so
-   resets after a network change or sleep leak nothing (see the known
-   limits). In brief:
+   on the owner's PC, is built with what the owner asked for after his
+   first try (servers with checks, settings, journal, the restart hold);
+   the owner tries it (the checks are in the plan's section 10). Next:
+   phase 2, subscriptions and the Android logic. In brief:
    - Go only. An elevated service (LocalSystem) holds libxray and the
      Android logic, ported to `libxray/client/` with its JVM tests. A
      per-user tray icon and window (Wails v3, a pinned beta, on WebView2)
@@ -292,4 +315,7 @@ and give step-by-step instructions for anything he must do himself.
      sleep, a change of server or settings, a retry after a failure) a WFP
      hold lets only the service's own traffic through, for at most 20
      seconds; a tunnel not back by then lets traffic go directly until it
-     is.
+     is;
+   - Windows: with fast startup (on by default) a shutdown and power-on
+     resumes the service as after sleep, so «Подключаться при запуске
+     Windows» switched off does not apply then (phase 4).
