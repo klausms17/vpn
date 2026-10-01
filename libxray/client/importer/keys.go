@@ -8,6 +8,7 @@ import (
 
 	"github.com/klausms17/vpn/libxray"
 	"github.com/klausms17/vpn/libxray/client/model"
+	"github.com/klausms17/vpn/libxray/internal/privileged"
 )
 
 const (
@@ -18,13 +19,22 @@ const (
 	maxPins = 16
 )
 
+// Check refuses a key by its outbounds; its error says why, in Russian.
+type Check func(outbounds []json.RawMessage) error
+
+// ForService is the Check of a privileged service (the Windows service
+// runs the core as SYSTEM): it refuses anything beyond what share links
+// make.
+func ForService(outbounds []json.RawMessage) error { return privileged.Check(outbounds) }
+
 // Keys turns text into servers ready to save, as the Android app's
 // addLinks does: each link is parsed or, when there are none, the text is
-// read as a pasted subscription body. Links that ask to skip certificate
-// checks get the server's certificate pinned, four servers at a time, at
-// most maxPins, and none once ctx ends. skipped has a line in Russian for
-// each key that cannot be used; err means the text holds no keys at all.
-func Keys(ctx context.Context, text string) (keys []model.Key, skipped []string, err error) {
+// read as a pasted subscription body. A key check refuses is skipped
+// (check may be nil). Links that ask to skip certificate checks get the
+// server's certificate pinned, four servers at a time, at most maxPins,
+// and none once ctx ends. skipped has a line in Russian for each key that
+// cannot be used; err means the text holds no keys at all.
+func Keys(ctx context.Context, text string, check Check) (keys []model.Key, skipped []string, err error) {
 	var parsed []libxray.Profile
 	if links := Links(text); len(links) > 0 {
 		for _, link := range links {
@@ -62,6 +72,12 @@ func Keys(ctx context.Context, text string) (keys []model.Key, skipped []string,
 	var wg sync.WaitGroup
 	pins := 0
 	for i, p := range parsed {
+		if check != nil {
+			if err := check(p.Outbounds); err != nil {
+				results[i].fail = label(p) + ": " + err.Error()
+				continue
+			}
+		}
 		switch {
 		case !p.NeedsCertPin:
 			results[i].key, results[i].fail = ready(p)

@@ -27,7 +27,8 @@ type Tunnel interface {
 type handler struct {
 	tunnel   Tunnel
 	profiles *store.Store[model.ProfilesState]
-	// keys reads the keys in pasted text (importer.Keys).
+	// keys reads the keys in pasted text (importer.Keys, with the service's
+	// check).
 	keys      func(ctx context.Context, text string) ([]model.Key, []string, error)
 	broadcast func(ipc.Event)
 	log       func(string)

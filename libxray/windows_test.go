@@ -205,3 +205,10 @@ func TestServerHost(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowsRunsOnlyWhatShareLinksMake(t *testing.T) {
+	xdrive := []json.RawMessage{json.RawMessage(`{"protocol":"vless","settings":{"vnext":[{"address":"a.example","port":443,"users":[{"id":"x"}]}]},"streamSettings":{"network":"xdrive","xdriveSettings":{"service":"local","remoteFolder":"C:\\Windows"}}}`)}
+	if _, err := buildConfig(&BuildOptions{Outbounds: xdrive, Tun: true, Windows: true}); err == nil {
+		t.Error("the Windows config runs an xdrive outbound")
+	}
+}

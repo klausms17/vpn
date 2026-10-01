@@ -143,9 +143,11 @@ func start(version string) (*app, error) {
 		Log:      log.Info,
 	})
 	h := &handler{
-		tunnel:    eng,
-		profiles:  profiles,
-		keys:      importer.Keys,
+		tunnel:   eng,
+		profiles: profiles,
+		keys: func(ctx context.Context, text string) ([]model.Key, []string, error) {
+			return importer.Keys(ctx, text, importer.ForService)
+		},
 		broadcast: func(ev ipc.Event) { server.Broadcast(ev) },
 		log:       log.Info,
 		now:       time.Now,

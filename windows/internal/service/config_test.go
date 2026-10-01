@@ -11,7 +11,7 @@ import (
 )
 
 func TestTheConfigHasTheWindowsTunnel(t *testing.T) {
-	keys, _, err := importer.Keys(context.Background(), "vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?type=tcp&security=reality&pbk=Iv4yHdwV8Hc9BPh-c3zWJhDPLA1WZwpFNjTCn9JM2TM&sni=www.example.com&sid=ab&fp=chrome#DE")
+	keys, _, err := importer.Keys(context.Background(), "vless://11111111-2222-3333-4444-555555555555@vpn.example.com:443?type=tcp&security=reality&pbk=Iv4yHdwV8Hc9BPh-c3zWJhDPLA1WZwpFNjTCn9JM2TM&sni=www.example.com&sid=ab&fp=chrome#DE", importer.ForService)
 	if err != nil || len(keys) != 1 {
 		t.Fatal(keys, err)
 	}

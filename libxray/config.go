@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/klausms17/vpn/libxray/internal/privileged"
 )
 
 // Routing modes.
@@ -205,6 +207,13 @@ func buildConfig(o *BuildOptions) (map[string]any, error) {
 	case ModeRuDirect, ModeBlockedOnly, ModeGlobal:
 	default:
 		return nil, fmt.Errorf("unknown mode %q", o.Mode)
+	}
+	// The Windows service runs the core as SYSTEM, with keys any user of
+	// the PC may add.
+	if o.Windows {
+		if err := privileged.Check(o.Outbounds); err != nil {
+			return nil, err
+		}
 	}
 	outbounds, err := prepareOutbounds(o.Outbounds)
 	if err != nil {
