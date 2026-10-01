@@ -180,7 +180,7 @@ Android's UI process does imports, pings, subscription adds and update checks it
 **Start failures** follow Android's `StartFailurePolicy` for a config that cannot be built. A core that fails to start is different on Windows: Xray sets up the adapter, its addresses and the filters in steps that fail now and then for a moment, most of all right after boot or sleep (the owner's first try showed it).
 - A start the user asked for is tried twice more (after 1.5 s and 5 s), quietly; one nobody asked for (boot, sleep, a reset) keeps trying for about two minutes (1.5, 5, 15, 30 and 60 s). Then the error shows and `should_run` is cleared, as on Android.
 - The error says what to do (`internal/service/explain.go`): another program's connected adapter holds the tunnel's address (named; "another VPN active", not retried); IPv6 is switched off in Windows (`DisabledComponents`; Xray configures the adapter's IPv6 interface even without IPv6 routes, so it cannot start); the adapter was not ready; the WFP filters failed. The core's own words go to the log.
-- Before each start the tunnel's address is taken off adapters that are not connected, as WireGuard does (`tunaddr_windows.go`).
+- Before each start the service takes the tunnel's address off adapters that are not connected, as WireGuard does, and when a connected one has it, refuses at once and names it, whatever error Windows would give (`tunaddr_windows.go`).
 
 ### 2.5 Network changes, sleep and restarts
 

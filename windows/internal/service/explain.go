@@ -10,9 +10,18 @@ import (
 // The Windows errors the core's start reports most (winerror.h), as
 // syscall.Errno, which is what x/sys/windows returns.
 const (
+	errAlreadyExists       = syscall.Errno(183)  // ERROR_ALREADY_EXISTS
 	errObjectAlreadyExists = syscall.Errno(5010) // ERROR_OBJECT_ALREADY_EXISTS
 	errNotFound            = syscall.Errno(1168) // ERROR_NOT_FOUND
 )
+
+// addressTaken refuses a start because a connected adapter, not the
+// tunnel's, has the tunnel's address: most likely another VPN that runs.
+type addressTaken struct{ adapter string }
+
+func (e addressTaken) Error() string {
+	return fmt.Sprintf("the tunnel's address is taken by the connected adapter %q", e.adapter)
+}
 
 // explainer turns an error of the core's start into what the window shows
 // (engine.Deps.Explain). It looks at the PC only once the start failed.
@@ -25,11 +34,15 @@ type explainer struct {
 }
 
 func (x explainer) explain(err error) (message string, final bool) {
+	var taken addressTaken
+	if errors.As(err, &taken) {
+		return heldBy(taken.adapter), true
+	}
 	switch {
-	case errors.Is(err, errObjectAlreadyExists):
+	case errors.Is(err, errObjectAlreadyExists), errors.Is(err, errAlreadyExists):
 		// Windows refuses an address that another adapter has.
 		if name := x.holder(); name != "" {
-			return fmt.Sprintf("Адрес VPN уже занят адаптером «%s», скорее всего другим VPN. Выключите его и подключитесь снова.", name), true
+			return heldBy(name), true
 		}
 		return "Адрес VPN был занят другим сетевым адаптером. Подключитесь ещё раз; если не выйдет, перезагрузите компьютер.", false
 	case errors.Is(err, errNotFound):
@@ -42,6 +55,10 @@ func (x explainer) explain(err error) (message string, final bool) {
 		return "Не удалось включить защиту от утечек DNS (фильтры Windows). Перезагрузите компьютер и подключитесь снова.", false
 	}
 	return fmt.Sprintf("Не удалось запустить VPN (%s). Подключитесь ещё раз; если не выйдет, перезагрузите компьютер.", innermost(err)), false
+}
+
+func heldBy(adapter string) string {
+	return fmt.Sprintf("Адрес VPN уже занят адаптером «%s», скорее всего другим VPN. Выключите его и подключитесь снова.", adapter)
 }
 
 // innermost is the text of the error at the bottom of err's chain: the

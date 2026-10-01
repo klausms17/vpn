@@ -56,18 +56,22 @@ func addressHolder() string {
 	return ""
 }
 
-// freeTunAddress takes the tunnel's address off adapters that are not
-// connected, as WireGuard does: one left behind by another program would
-// keep the tunnel from getting it.
-func freeTunAddress(log func(string)) {
+// claimTunAddress readies the tunnel's address for the core. It takes the
+// address off adapters that are not connected, as WireGuard does: one left
+// behind by another program would keep the tunnel from getting it. A
+// connected adapter that has it, another VPN's most likely, has to go
+// first, whatever error Windows would give (addressTaken).
+func claimTunAddress(log func(string)) error {
+	var taken error
 	for _, h := range tunAddressHolders() {
-		if h.up {
-			continue
-		}
-		if err := h.luid.DeleteIPAddress(h.prefix); err == nil {
+		switch {
+		case h.up:
+			taken = addressTaken{h.name}
+		case h.luid.DeleteIPAddress(h.prefix) == nil:
 			log(fmt.Sprintf("took the tunnel's address off the disconnected adapter %q", h.name))
 		}
 	}
+	return taken
 }
 
 // ipv6Off reports whether IPv6 is switched off on Windows' ordinary (not

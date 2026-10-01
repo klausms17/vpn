@@ -22,7 +22,9 @@ func TestExplain(t *testing.T) {
 		want  string
 		final bool
 	}{
+		{"another VPN runs", none, addressTaken{"Meta"}, "Адрес VPN уже занят адаптером «Meta», скорее всего другим VPN.", true},
 		{"another VPN holds the address", clash, coreErr(errObjectAlreadyExists), "Адрес VPN уже занят адаптером «Meta», скорее всего другим VPN.", true},
+		{"Windows says it exists", clash, coreErr(errAlreadyExists), "Адрес VPN уже занят адаптером «Meta»", true},
 		{"the address was held for a moment", none, coreErr(errObjectAlreadyExists), "Адрес VPN был занят другим сетевым адаптером.", false},
 		{"IPv6 switched off", clash, coreErr(errNotFound), "В Windows выключен протокол IPv6", true},
 		{"the adapter not ready yet", none, coreErr(errNotFound), "Windows не успела подготовить сетевой адаптер Kirov VPN.", false},

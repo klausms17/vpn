@@ -252,7 +252,9 @@ type controller struct {
 }
 
 func (c controller) Start(config string) error {
-	freeTunAddress(c.log)
+	if err := claimTunAddress(c.log); err != nil {
+		return err
+	}
 	return c.c.Start(config, 0)
 }
 
