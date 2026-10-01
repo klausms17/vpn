@@ -519,3 +519,26 @@ func TestStoppingTheServiceKeepsShouldRun(t *testing.T) {
 		e.Connect()
 	}
 }
+
+func TestTheLogNeverNamesTheServer(t *testing.T) {
+	w := newWorld(t)
+	w.mu.Lock()
+	w.profiles.Profiles[0].Address = "vpn.example.com"
+	w.mu.Unlock()
+	w.core.failNext(errors.New(`invalid address: "vpn.example.com"`))
+	w.e.Connect()
+	w.sync()
+	if got := w.last(); got.State != ipc.Failed || !strings.Contains(got.Message, "vpn.example.com") {
+		t.Errorf("the user sees %+v", got)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, l := range w.logs {
+		if strings.Contains(l, "vpn.example.com") {
+			t.Errorf("logged %q", l)
+		}
+	}
+	if !slices.ContainsFunc(w.logs, func(l string) bool { return strings.Contains(l, `invalid address: "<server>"`) }) {
+		t.Errorf("logs %q", w.logs)
+	}
+}

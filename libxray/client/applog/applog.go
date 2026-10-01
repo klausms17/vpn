@@ -1,12 +1,14 @@
 // Package applog is the app's own small log, as Android's AppLog: lines
 // "MM-dd HH:mm:ss L message" appended to a file that moves to "<name>.1"
 // once it is over MaxBytes. Never log keys, links, passwords, IPs or
-// server names.
+// server names; IP addresses that an error text brings along are masked.
 package applog
 
 import (
 	"bytes"
+	"net/netip"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -47,7 +49,7 @@ func (l *Log) line(level byte, msg string) {
 	b.WriteByte(' ')
 	b.WriteByte(level)
 	b.WriteByte(' ')
-	b.WriteString(msg)
+	b.WriteString(MaskIPs(msg))
 	b.WriteByte('\n')
 
 	l.mu.Lock()
@@ -62,4 +64,23 @@ func (l *Log) line(level byte, msg string) {
 	}
 	_, _ = f.Write(b.Bytes())
 	_ = f.Close()
+}
+
+// Candidates only: netip decides, so times and version numbers stay.
+var (
+	ipv4Like = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+	ipv6Like = regexp.MustCompile(`(?i)[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}(?:%\w+)?`)
+)
+
+// MaskIPs replaces the IP addresses in text with "[IP]".
+func MaskIPs(text string) string {
+	for _, re := range []*regexp.Regexp{ipv4Like, ipv6Like} {
+		text = re.ReplaceAllStringFunc(text, func(s string) string {
+			if _, err := netip.ParseAddr(s); err == nil {
+				return "[IP]"
+			}
+			return s
+		})
+	}
+	return text
 }

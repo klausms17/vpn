@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -207,6 +208,7 @@ func (e *Engine) start(userRequested bool, attempt int) {
 		e.publish(ipc.Status{State: ipc.Connecting, ProfileName: before.ProfileName})
 	}
 	swapped := false
+	server := ""
 	err := func() error {
 		saved, err := e.d.Profiles()
 		if err != nil {
@@ -216,6 +218,7 @@ func (e *Engine) start(userRequested bool, attempt int) {
 		if !ok {
 			return &userError{"Не выбран сервер. Добавьте ключ."}
 		}
+		server = profile.Address
 		if e.Status().State == ipc.Connecting {
 			e.publish(ipc.Status{State: ipc.Connecting, ProfileID: profile.ID, ProfileName: profile.Name})
 		}
@@ -241,17 +244,17 @@ func (e *Engine) start(userRequested bool, attempt int) {
 		return nil
 	}()
 	if err != nil {
-		e.startFailed(err, userRequested, attempt, generation, restarting, swapped, before)
+		e.startFailed(err, server, userRequested, attempt, generation, restarting, swapped, before)
 	}
 }
 
-func (e *Engine) startFailed(err error, userRequested bool, attempt, generation int, restarting, swapped bool, before ipc.Status) {
+func (e *Engine) startFailed(err error, server string, userRequested bool, attempt, generation int, restarting, swapped bool, before ipc.Status) {
 	message := err.Error()
 	var ue *userError
 	if !errors.As(err, &ue) {
 		message = "Ошибка запуска: " + message
 	}
-	e.d.Log(fmt.Sprintf("tunnel start failed (attempt %d): %s", attempt+1, message))
+	e.d.Log(fmt.Sprintf("tunnel start failed (attempt %d): %s", attempt+1, withoutServer(message, server)))
 	action := tunnel.Decide(tunnel.StartFailure{
 		Restarting:    restarting,
 		Swapped:       swapped,
@@ -336,7 +339,7 @@ func (e *Engine) resetNow(why string) {
 	e.d.TrimLog()
 	e.d.Binder.Activate()
 	if err := e.d.Core.Start(running.config); err != nil {
-		e.d.Log("core restart failed: " + err.Error())
+		e.d.Log("core restart failed: " + withoutServer(err.Error(), running.profile.Address))
 		e.session = nil
 		e.d.Binder.Deactivate()
 		if !e.d.Runtime.ShouldRun() {
@@ -367,4 +370,14 @@ func (e *Engine) cancelReset() {
 		e.stopReset()
 		e.stopReset = nil
 	}
+}
+
+// withoutServer drops the server's address from an error text bound for
+// the log, as the core may quote its config. The log masks IP addresses
+// itself.
+func withoutServer(text, address string) string {
+	if address == "" {
+		return text
+	}
+	return strings.ReplaceAll(text, address, "<server>")
 }
