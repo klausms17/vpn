@@ -100,7 +100,9 @@ jobs:
             sort -u | while IFS=$'\t' read -r module dir; do
               [ -n "$dir" ] || continue
               for f in "$dir"/LICENSE* "$dir"/LICENCE* "$dir"/COPYING* "$dir"/NOTICE*; do
-                [ -f "$f" ] && cp "$f" "$out/$(echo "$module" | tr '/' '_')-$(basename "$f").txt"
+                if [ -f "$f" ]; then
+                  cp "$f" "$out/$(echo "$module" | tr '/' '_')-$(basename "$f").txt"
+                fi
               done
             done
           ls "$out" | wc -l

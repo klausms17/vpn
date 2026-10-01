@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -33,8 +34,9 @@ func Install(exe string) error {
 	}
 	s, err := m.OpenService(Name)
 	if err == nil {
-		// An update: the installer has stopped the old one.
-		cfg.BinaryPathName = exe
+		// An update: the installer has stopped the old one. Quoted, or
+		// Windows would try "C:\Program.exe" first.
+		cfg.BinaryPathName = syscall.EscapeArg(exe)
 		cfg.ServiceStartName = "LocalSystem"
 		err = s.UpdateConfig(cfg)
 	} else {
