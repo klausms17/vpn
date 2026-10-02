@@ -154,7 +154,7 @@ func start(version string) (*app, error) {
 	eng = engine.New(engine.Deps{
 		Core:     core,
 		Binder:   binder,
-		Hold:     wfpHold{},
+		Hold:     &boundedHold{on: wfpHoldOn, off: wfpHoldOff, backstop: holdBackstop, log: log.Warn},
 		Runtime:  runtime,
 		Clock:    realClock{},
 		Profiles: profiles.ReadStrict,
