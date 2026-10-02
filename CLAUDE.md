@@ -207,7 +207,8 @@ and give step-by-step instructions for anything he must do himself.
     - «Журнал»: the service's, the core's and the window's logs, without
       addresses or host names, with «Скопировать»;
     - a WFP hold: while a tunnel that was up restarts, only the
-      service's own traffic passes, for at most 20 s.
+      service's own traffic passes, for at most 20 s; should the engine
+      hang, the hold ends by itself after 25 s.
   - CI (`windows.yml`) passes: libxray's tests on Windows, and the smoke
     test (refuse a folder outside Program Files, install, the pipe's
     security, refuse a file-writing key, connect through a local REALITY
@@ -217,8 +218,11 @@ and give step-by-step instructions for anything he must do himself.
     515 → 517 handles and 19 → 19 threads, the service killed while
     connected and back, another VPN holding the address named at once,
     install over itself, uninstall). The installer is
-    `KirovVPN-Setup-1.0.10.exe` on the `windows-build-claude-panel-privacy`
-    release; the owner has not tried it yet.
+    `KirovVPN-Setup-1.0.11.exe` on the `windows-build-claude-panel-privacy`
+    release; the owner has not tried it yet. On 2 Oct he asked whether the
+    app could have broken his PC's network settings (internet trouble that
+    day): it changes nothing that outlives the tunnel; he was given steps
+    to tell the app from his ISP.
 - **iPhone:** phases 1–2 of `docs/ios/PLAN.md` are done. The Go core builds
   for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
   passes its checks (geo files in the extension, no bitcode). The app is
