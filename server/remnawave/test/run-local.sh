@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Local end-to-end test of server/remnawave. Not needed on real servers.
 #
-# First the monitor's unit tests (monitor_test.py, no Docker). Then brings
+# First the unit tests of the monitor and the accounts (monitor_test.py,
+# accounts_test.py, no Docker). Then brings
 # the whole friends' setup up on this one machine, with the real scripts
 # and images, and checks that a friend's subscription really works:
 #
@@ -58,6 +59,15 @@
 #   friend twice is no alert, two friends in the mobile whitelist regime
 #   are one note that never says "disable", two friends are exactly one
 #   Russian alert, then quiet; rate limit; no IPs or ids in the logs),
+#   accounts (klaus-accounts): no sign-up before mail-setup, which sends a
+#   test letter; a sign-up through Caddy, its letter, the confirmation page
+#   (a button, not the link), the owner's Telegram buttons and decision
+#   page, the access letter, sign-in, the account's link serving servers
+#   with traffic through the node, a user tidy-users leaves alone, a token
+#   that cannot list users, delete-user refused for an account's user, a
+#   password reset that signs devices out, a refusal from the CLI, no
+#   address or token in the logs; restored from the backup; deleted with
+#   its user,
 #   and a backup restored into a fresh panel serves the same link, the app
 #   (both builds) and the monitor, also after failed attempts (which leave no
 #   half-restored database, and a run without RESTORE refuses to build an
@@ -69,7 +79,7 @@
 # Needs root (it adds 11.11.11.11 to lo for the test page: the profile
 # blocks private addresses), Docker with compose, go, python3, jq, curl,
 # openssl, iproute2, the free ports 80, 443, 3000, 3001, 3010, 6767, 42222,
-# 44443, 44080, 18090 and no real Remnawave on this machine. Missing images
+# 44443, 44080, 18090, 18025 and no real Remnawave on this machine. Missing images
 # are pulled from mirror.gcr.io (Docker Hub limits anonymous pulls).
 #
 #   sudo bash server/remnawave/test/run-local.sh
@@ -95,6 +105,7 @@ UA_APP='KlausVPN/1.0.99 (Android)' # the app's User-Agent keeps its former name 
 UA_BROWSER='Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36'
 IMAGES="remnawave/backend:3 postgres:18.4 valkey/valkey:9-alpine remnawave/subscription-page:latest caddy:2 remnawave/node:latest python:3-alpine"
 MOCK_PORT=18090 # mock Telegram and GitHub APIs
+SMTP_PORT=18025 # the mock's mail server
 TG_BOT_TOKEN=123456789:AAklaus-e2e-bot-token-0123456789abcdef
 TG_CHAT=4242
 GH_TEST_TOKEN=github_pat_klaus_e2e_0123456789
@@ -115,9 +126,10 @@ fail() { printf '\033[1;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
 for c in docker go python3 jq curl openssl ip base64 sha256sum; do command -v "$c" >/dev/null || fail "missing $c"; done
 # The monitor's counting first: seconds, no Docker.
 python3 "$HERE/monitor_test.py" || fail "klaus-monitor unit tests"
+python3 -B "$HERE/accounts_test.py" || fail "klaus-accounts unit tests"
 docker info >/dev/null 2>&1 || fail "docker is not running"
 if [ -e /opt/remnawave ] || [ -e /opt/remnanode ]; then fail "this machine has a real Remnawave setup; not touching it"; fi
-for c in remnawave remnawave-db remnawave-redis remnawave-subscription-page caddy remnanode klaus-monitor; do
+for c in remnawave remnawave-db remnawave-redis remnawave-subscription-page caddy remnanode klaus-monitor klaus-accounts; do
   docker inspect "$c" >/dev/null 2>&1 && fail "container $c already exists"
 done
 for img in $IMAGES; do
@@ -225,7 +237,7 @@ db_volume() { docker volume inspect remnawave-db-data >/dev/null 2>&1; }
 install_panel() { # RW_DIR ADMIN_FILE [VAR=value...]
   local dir="$1" admin="$2"
   shift 2
-  limits_override "$dir" remnawave remnawave-db remnawave-redis remnawave-subscription-page caddy klaus-monitor
+  limits_override "$dir" remnawave remnawave-db remnawave-redis remnawave-subscription-page caddy klaus-monitor klaus-accounts
   env RW_DIR="$dir" ADMIN_FILE="$admin" SKIP_SYSTEM=1 CADDY_TLS=internal PANEL_IP=127.0.0.1 "$@" \
     bash "$RWS/install-panel.sh"
 }
@@ -264,7 +276,7 @@ python3 "$HERE/mock-apis.py" --port "$MOCK_PORT" --tg-token "$TG_BOT_TOKEN" --gh
   --tag "$RELEASE" --bad-tag klaus-bad-sum --temp-tag klaus-temp-key --apk "$APK" \
   --win-tag windows-stable --win-bad-tag klaus-win-bad --exe "$EXE" \
   --page main="$WORK/page-main.html" --page broken="$WORK/page-broken.html" --page cut="$WORK/page-cut.html" \
-  > "$WORK/mock.log" 2>&1 &
+  --smtp-port "$SMTP_PORT" > "$WORK/mock.log" 2>&1 &
 MOCK_PID=$!
 retry 10 mock /_mock/tg/sent -o /dev/null || fail "mock APIs did not start"
 pass "mock APIs answer"
@@ -332,6 +344,8 @@ step "install-panel.sh again (must change nothing)"
 caddy_started="$(docker inspect -f '{{.State.StartedAt}}' caddy)"
 panel_started="$(docker inspect -f '{{.State.StartedAt}}' remnawave)"
 monitor_started="$(docker inspect -f '{{.State.StartedAt}}' klaus-monitor)"
+accounts_started="$(docker inspect -f '{{.State.StartedAt}}' klaus-accounts)"
+cp "$WORK/opt/klaus-accounts.env" "$WORK/accounts.env.before"
 baks_before="$(find "$WORK/opt" -maxdepth 1 -name '*.bak-*' | sort)"
 cp "$WORK/opt/klaus-monitor.env" "$WORK/monitor.env.before"
 install_panel "$WORK/opt" "$WORK/admin.txt" 2>&1 | tee "$WORK/install-2.log"
@@ -340,6 +354,8 @@ if grep -E "Создаю|Обновляю|Перезапускаю" "$WORK/insta
 [ "$(docker inspect -f '{{.State.StartedAt}}' caddy)" = "$caddy_started" ] || fail "re-run restarted Caddy for nothing"
 [ "$(docker inspect -f '{{.State.StartedAt}}' remnawave)" = "$panel_started" ] || fail "re-run restarted the panel (Telegram lines of .env not kept?)"
 [ "$(docker inspect -f '{{.State.StartedAt}}' klaus-monitor)" = "$monitor_started" ] || fail "re-run restarted the monitor"
+[ "$(docker inspect -f '{{.State.StartedAt}}' klaus-accounts)" = "$accounts_started" ] || fail "re-run restarted the accounts"
+cmp -s "$WORK/opt/klaus-accounts.env" "$WORK/accounts.env.before" || fail "re-run changed the accounts' settings"
 [ "$(find "$WORK/opt" -maxdepth 1 -name '*.bak-*' | sort)" = "$baks_before" ] || fail "re-run rewrote settings files"
 cmp -s "$WORK/opt/klaus-monitor.env" "$WORK/monitor.env.before" || fail "re-run changed the monitor settings"
 counts="$(jq -n --argjson p "$(api /api/config-profiles)" --argjson s "$(api /api/internal-squads)" \
@@ -928,16 +944,143 @@ docker logs klaus-monitor > "$WORK/monitor.log" 2>&1
 docker logs caddy > "$WORK/caddy.log" 2>&1
 cat "$WORK/monitor.log"
 for secret in "$SHORT1" "$SHORT2" "$SHORT5" "unknown${SHORT1:7}" random0000 "$SPOOFED_IP" friend_; do
-  if grep -qF "$secret" "$WORK/monitor.log" "$WORK/caddy.log"; then fail "logs contain $secret"; fi
+  if grep -qF -e "$secret" "$WORK/monitor.log" "$WORK/caddy.log"; then fail "logs contain $secret"; fi
 done
 if grep -Eq '([0-9]{1,3}\.){3}[0-9]{1,3}' "$WORK/monitor.log"; then fail "the monitor's log contains an IP address"; fi
 if grep -Eq '"(remote_ip|client_ip|uri)"' "$WORK/caddy.log"; then fail "Caddy's log keeps request addresses or links"; fi
 pass "monitor token cannot list users; unknown friend 403, two friends in the whitelist regime one note without disable-node, one friend twice no alert, two friends one alert (Russian, blocking hint), cooldown, rate limit 30/h, 80 made-up ids do not block a friend; no IPs or ids in the logs"
 
+step "accounts: mail-setup, a sign-up, the letter, the owner's buttons, sign-in, the account's link"
+acc() { # METHOD NAME [JSON] [TOKEN] -> HTTP status of an app's request; body in $WORK/last.body
+  local args=(-X "$1" -A "$UA_APP" -H 'Content-Type: application/json' -H "X-Forwarded-For: $SPOOFED_IP")
+  [ -n "${3:-}" ] && args+=(--data-binary "$3")
+  [ -n "${4:-}" ] && args+=(-H "Authorization: Bearer $4")
+  sub_code "account/v1/$2" "${args[@]}"
+}
+web_page() { # URL [curl args] -> HTTP status of a page from a letter; page in $WORK/last.body
+  local url="$1"
+  shift
+  curl -sS --noproxy '*' --resolve "$SUB_DOMAIN:443:127.0.0.1" --cacert "$WORK/caddy-root.crt" \
+    -o "$WORK/last.body" -D "$WORK/last.headers" -w '%{http_code}' "$@" "$url"
+}
+letter_link() { # ADDRESS SUBJECT -> the account link in the last such letter
+  mock /_mock/mail | jq -r --arg a "$1" --arg s "$2" '[.[] | select((.to | index($a)) and .subject == $s)] | last | .text // ""' |
+    grep -o "https://$SUB_DOMAIN/account/[a-z]*?t=[A-Za-z0-9_-]*" | head -n 1
+}
+wait_link() { # ADDRESS SUBJECT -> the link, once the letter is there
+  local i link=""
+  for i in $(seq 1 15); do
+    link="$(letter_link "$1" "$2")"
+    [ -n "$link" ] && break
+    sleep 1
+  done
+  printf '%s' "$link"
+}
+has_letter() { mock /_mock/mail | jq -e --arg a "$1" --arg s "$2" 'any(.[]; (.to | index($a)) and .subject == $s)' >/dev/null; }
+ACC_TOKEN="$(sed -n 's/^PANEL_TOKEN=//p' "$WORK/opt/klaus-accounts.env")"
+code="$(curl -sS --noproxy '*' -o /dev/null -w '%{http_code}' -H 'X-Forwarded-For: 127.0.0.1' -H 'X-Forwarded-Proto: https' \
+  -H @<(printf 'Authorization: Bearer %s\n' "$ACC_TOKEN") "http://127.0.0.1:3000/api/users?start=0&size=1")"
+echo "the accounts' token lists users -> $code"
+[ "$code" = "403" ] || fail "the accounts' token can list users"
+[ "$(sub_code account/health)" = "200" ] || fail "accounts not behind Caddy"
+code="$(acc POST register '{"email":"ivan@mail.example","password":"correct horse"}')"
+echo "sign-up before mail-setup -> $code $(cat "$WORK/last.body")"
+{ [ "$code" = "503" ] && jq -e '.code == "mail_off"' "$WORK/last.body" >/dev/null; } || fail "sign-up without mail"
+if kp accounts | grep -q "ivan@mail.example"; then fail "an account was made without mail"; fi
+printf 'secret apps pass\n' | SMTP_TLS=none kp mail-setup kirov.mail@gmail.com --host "$GW" --port "$SMTP_PORT" --limit 50 |
+  tee "$WORK/mail-setup.log"
+grep -q "письма аккаунтов уходят с kirov.mail@gmail.com, не больше 50 в день" "$WORK/mail-setup.log" || fail "mail-setup"
+mock /_mock/mail | jq -e 'any(.[]; .subject == "Kirov VPN: проверка почты" and (.to | index("kirov.mail@gmail.com"))
+  and .login == "kirov.mail@gmail.com:secretappspass" and .from == "Kirov VPN <kirov.mail@gmail.com>")' >/dev/null ||
+  fail "no test letter, or not as the mailbox (spaces of the app password not dropped?)"
+[ "$(stat -c %a "$WORK/opt/klaus-accounts.env")" = "600" ] || fail "the accounts' settings (mail password) are readable by others"
+code="$(acc POST register '{"email":"Ivan@Mail.Example","password":"correct horse"}')"
+[ "$code" = "202" ] || fail "sign-up -> $code $(cat "$WORK/last.body")"
+CONFIRM="$(wait_link ivan@mail.example "Подтвердите почту для Kirov VPN")"
+[ -n "$CONFIRM" ] || { mock /_mock/mail | jq -c '.[] | {to, subject}'; docker logs klaus-accounts; fail "no confirmation letter"; }
+[ "$(web_page "$CONFIRM")" = "200" ] || fail "confirmation page"
+grep -q 'Подтвердите почту <span class="who">ivan@mail.example</span>' "$WORK/last.body" || fail "confirmation page text"
+grep -qi "^content-security-policy: default-src 'none'; style-src 'sha256-" "$WORK/last.headers" || fail "page CSP"
+grep -qi '^referrer-policy: no-referrer' "$WORK/last.headers" || fail "page referrer policy"
+if grep -q "Почта подтверждена" "$WORK/last.body"; then fail "opening the link confirmed it (mail scanners open links)"; fi
+[ "$(acc POST login '{"email":"ivan@mail.example","password":"correct horse"}')" = "403" ] || fail "sign-in before the confirmation"
+web_page "https://$SUB_DOMAIN/account/confirm" --data-urlencode "t=${CONFIRM#*t=}" >/dev/null
+grep -q "Почта подтверждена" "$WORK/last.body" || fail "confirmation"
+asked() { mock /_mock/tg/sent | jq -c '[.[] | select(.text | startswith("Kirov VPN: новая регистрация"))] | last // empty'; }
+owner_asked() { [ -n "$(asked)" ]; }
+retry 10 owner_asked || fail "the owner was not asked in Telegram"
+asked | tee "$WORK/asked.json"
+jq -e --arg c "$TG_CHAT" '.chat_id == $c and (.text | contains("ivan@mail.example"))
+  and ([.reply_markup.inline_keyboard[0][].text] == ["Выдать доступ", "Отклонить"])' "$WORK/asked.json" >/dev/null ||
+  fail "the owner's message or its buttons"
+APPROVE="$(jq -r '.reply_markup.inline_keyboard[0][0].url' "$WORK/asked.json")"
+[[ "$APPROVE" == "https://$SUB_DOMAIN/account/decide?t="*"&a=approve" ]] || fail "approve button: $APPROVE"
+code="$(acc POST login '{"email":"ivan@mail.example","password":"correct horse","device":"Pixel 9"}')"
+[ "$code" = "200" ] && jq -e '.account == {"email": "ivan@mail.example", "status": "pending"}' "$WORK/last.body" >/dev/null ||
+  fail "sign-in while waiting -> $code"
+SESSION="$(jq -r .token "$WORK/last.body")"
+[ "$(web_page "$APPROVE")" = "200" ] && grep -q "Выдать доступ к VPN?" "$WORK/last.body" || fail "decision page"
+DECIDE="${APPROVE#*t=}"
+web_page "https://$SUB_DOMAIN/account/decide" --data-urlencode "t=${DECIDE%%&*}" --data-urlencode "a=approve" >/dev/null
+grep -q "Доступ выдан: ivan@mail.example" "$WORK/last.body" || { cat "$WORK/last.body"; docker logs klaus-accounts; fail "approval"; }
+retry 10 has_letter ivan@mail.example "Доступ к Kirov VPN открыт" || fail "no access letter"
+edited() { mock /_mock/tg/edits | jq -e 'any(.[]; .text == "Kirov VPN: доступ выдан ✅\nivan@mail.example" and .reply_markup == null)' >/dev/null; }
+retry 10 edited || fail "the owner's message not settled"
+[ "$(acc GET me "" "$SESSION")" = "200" ] || fail "me"
+ACC_SUB="$(jq -r '.account.subscriptionUrl // ""' "$WORK/last.body")"
+jq -e '.account.status == "active"' "$WORK/last.body" >/dev/null && [[ "$ACC_SUB" == "https://$SUB_DOMAIN/"* ]] || fail "no link for the account"
+retry 10 "$WORK/e2e" check -sub "$ACC_SUB" -resolve "$SUB_DOMAIN:127.0.0.1" -cacert "$WORK/caddy-root.crt" \
+  -hwid dddddddddddddddddddddddddddddddd -url "http://$WEB/" -expect "$TOKEN" >/dev/null || fail "traffic with the account's link"
+ACC_USER="$(docker exec klaus-accounts python3 /app/klaus-accounts.py list | awk -F '\t' '$1 == "ivan@mail.example" { print $4 }')"
+echo "the account's user: $ACC_USER $(web_state "$ACC_USER")"
+[ "$(web_state "$ACC_USER")" = '{"squads":["KlausVPN"],"end":"2099-12-31T00:00:00"}' ] || fail "the account's user is not made like add-user"
+[ -z "$(kp tidy-users --quiet)" ] || fail "tidy-users changed the account's user"
+if kp delete-user "$ACC_USER" --yes 2>"$WORK/acc-del.err"; then fail "delete-user removed an account's user"; fi
+grep -q "account-delete ivan@mail.example" "$WORK/acc-del.err" || fail "delete-user does not point to account-delete"
+pass "no sign-up before mail-setup; test letter as the mailbox; letter, confirmation by button, the owner's buttons, access letter, link with traffic; user made like add-user; token cannot list users"
+
+step "accounts: password reset, a refusal from the CLI, the list, no addresses or tokens in the logs"
+# Letters to one address go at least 2 minutes apart, the sign-up's too.
+code="$(acc POST forgot '{"email":"ivan@mail.example"}')"
+echo "a reset right after the sign-up -> $code $(cat "$WORK/last.body")"
+[ "$code" = "429" ] && jq -e '.code == "too_often" and .retryAfter > 0 and .retryAfter <= 121' "$WORK/last.body" >/dev/null ||
+  fail "a second letter right away"
+sleep "$(jq -r .retryAfter "$WORK/last.body")"
+[ "$(acc POST forgot '{"email":"ivan@mail.example"}')" = "202" ] || fail "forgot -> $(cat "$WORK/last.body")"
+RESET="$(wait_link ivan@mail.example "Новый пароль для Kirov VPN")"
+[ -n "$RESET" ] || fail "no reset letter"
+[ "$(web_page "$RESET")" = "200" ] && grep -q 'name="again"' "$WORK/last.body" || fail "reset page"
+web_page "https://$SUB_DOMAIN/account/reset" --data-urlencode "t=${RESET#*t=}" --data-urlencode "password=brand new pass" \
+  --data-urlencode "again=brand new pass" >/dev/null
+grep -q "Пароль изменён" "$WORK/last.body" || fail "reset"
+[ "$(acc GET me "" "$SESSION")" = "401" ] || fail "the reset did not sign the device out"
+[ "$(acc POST login '{"email":"ivan@mail.example","password":"correct horse"}')" = "401" ] || fail "old password after the reset"
+[ "$(acc POST login '{"email":"ivan@mail.example","password":"brand new pass","device":"ПК"}')" = "200" ] || fail "new password"
+[ "$(acc POST register '{"email":"masha@mail.example","password":"another one"}')" = "202" ] || fail "second sign-up"
+MASHA="$(wait_link masha@mail.example "Подтвердите почту для Kirov VPN")"
+web_page "https://$SUB_DOMAIN/account/confirm" --data-urlencode "t=${MASHA#*t=}" >/dev/null
+kp account-reject masha@mail.example | tee "$WORK/reject.log"
+grep -q "Отклонено: masha@mail.example" "$WORK/reject.log" || fail "account-reject"
+[ "$(acc POST login '{"email":"masha@mail.example","password":"another one"}')" = "200" ] &&
+  jq -e '.account == {"email": "masha@mail.example", "status": "rejected"}' "$WORK/last.body" >/dev/null || fail "a refused account"
+kp accounts | tee "$WORK/accounts.txt"
+grep -q "ivan@mail.example.*доступ есть.*$ACC_USER" "$WORK/accounts.txt" && grep -q "masha@mail.example.*отклонён" "$WORK/accounts.txt" ||
+  fail "klaus-panel accounts"
+docker logs klaus-accounts > "$WORK/accounts.log" 2>&1
+docker logs caddy > "$WORK/caddy.log" 2>&1
+cat "$WORK/accounts.log"
+for secret in ivan masha mail.example "$SESSION" "${CONFIRM#*t=}" "${RESET#*t=}" "${ACC_SUB##*/}" "$SPOOFED_IP" "correct horse"; do
+  if grep -qF -e "$secret" "$WORK/accounts.log" "$WORK/caddy.log"; then fail "logs contain $secret"; fi
+done
+if grep -Eq '([0-9]{1,3}\.){3}[0-9]{1,3}' "$WORK/accounts.log"; then fail "the accounts' log contains an IP address"; fi
+pass "letters to one address 2 minutes apart; reset by its letter signs the device out; a refusal from the CLI shows in the app; the list; no addresses, tokens, links or IPs in the logs"
+
 step "backup; a restore that stops early (a .ru domain given by mistake)"
 BACKUP_DIR="$WORK/backups" kp backup
 BACKUP="$(ls "$WORK"/backups/*.tar.gz)"
 tar -tzf "$BACKUP" | sort | tr '\n' ' '; echo
+# grep -q would stop reading and fail tar with SIGPIPE (pipefail).
+grep -qx './accounts.db' <<<"$(tar -tzf "$BACKUP")" || fail "the backup has no accounts"
 docker compose --project-directory "$WORK/opt" down -v >/dev/null 2>&1
 CONF="$WORK/opt2/klaus-panel.env"
 if install_panel "$WORK/opt2" "$WORK/admin2.txt" RESTORE="$BACKUP" PANEL_DOMAIN=panel.klaus.ru > "$WORK/install-restore-1.log" 2>&1; then
@@ -992,11 +1135,25 @@ cmp -s "$WORK/last.body" "$EXE" || fail "restored installer differs"
 grep -qx "TELEGRAM_NOTIFY_NODES=$TG_CHAT" "$WORK/opt2/.env" || fail "Telegram settings not restored"
 monitor_up() { [ "$(sub_code klaus/health)" = "200" ]; }
 retry 20 monitor_up || fail "monitor not running after restore"
+accounts_up() { [ "$(sub_code account/health)" = "200" ]; }
+retry 20 accounts_up || fail "accounts not running after restore"
+[ "$(acc POST login '{"email":"ivan@mail.example","password":"brand new pass"}')" = "200" ] || fail "account lost in the restore"
+SESSION="$(jq -r .token "$WORK/last.body")"
+[ "$(jq -r .account.subscriptionUrl "$WORK/last.body")" = "$ACC_SUB" ] || fail "the account's link changed in the restore"
+grep -q '^SMTP_PASSWORD="secretappspass"$' "$WORK/opt2/klaus-accounts.env" || fail "mail settings not restored"
 # The restored monitor token works: a known friend is accepted.
 code="$(report "$SHORT2" wifi)"
 echo "report after restore -> $code"
 [ "$code" = "200" ] || fail "restored monitor refuses a known friend"
-pass "restored panel: same link, node reconnected by itself, traffic flows; app (Android and Windows), Telegram and monitor back"
+pass "restored panel: same link, node reconnected by itself, traffic flows; app (Android and Windows), Telegram, monitor and accounts back"
+
+step "accounts: deleting one removes its user"
+[ "$(acc POST delete '{"password":"wrong password"}' "$SESSION")" = "401" ] || fail "deleted with a wrong password"
+[ "$(acc POST delete '{"password":"brand new pass"}' "$SESSION")" = "200" ] || fail "delete -> $(cat "$WORK/last.body")"
+[ "$(api "/api/users/by-username/$ACC_USER" -o /dev/null -w '%{http_code}')" = "404" ] || fail "the account's user is still there"
+[ "$(acc GET me "" "$SESSION")" = "401" ] || fail "the session outlived the account"
+if kp accounts | grep -q "ivan@mail.example"; then fail "the account is still listed"; fi
+pass "an account deleted with its password takes its panel user and sessions along"
 
 step "RESTORE over the working panel is refused"
 if install_panel "$WORK/opt2" "$WORK/admin2.txt" RESTORE="$BACKUP" > "$WORK/install-restore-3.log" 2>&1; then

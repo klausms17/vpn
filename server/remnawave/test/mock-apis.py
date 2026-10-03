@@ -4,13 +4,18 @@
   mock-apis.py --port 18090 --tg-token T --gh-token G --repo klausms17/vpn \
       --tag TAG --bad-tag TAG2 --temp-tag TAG3 --apk KirovVPN-1.0.99.apk \
       --win-tag TAG4 --win-bad-tag TAG5 --exe KirovVPN-Setup-1.0.42.exe \
-      --page main=page.html [--page BRANCH=FILE ...]
+      --page main=page.html [--page BRANCH=FILE ...] [--smtp-port 18025]
 
 Telegram (/bot<token>/<method>, GET or POST, JSON or form): getMe,
 getUpdates (serves the messages queued with POST /_mock/tg/say
 {"chat_id": 1, "first_name": "…", "text": "…"}, long polling up to 3 s; a
 negative offset keeps only the last updates, as in Telegram) and
-sendMessage (kept; GET /_mock/tg/sent lists them).
+sendMessage (kept, with its buttons; GET /_mock/tg/sent lists them) and
+editMessageText (GET /_mock/tg/edits).
+
+Mail (--smtp-port): a plain SMTP server without TLS that takes any login
+and keeps the letters; GET /_mock/mail lists them as {to, subject, text,
+login}.
 
 GitHub: GET /repos/<repo> answers for that one repository, a private one,
 only with "Bearer G" (others, and it without the token, are 404, as GitHub
@@ -32,10 +37,13 @@ file in base64 for any other.
 
 import argparse
 import base64
+import email
+import email.policy
 import hashlib
 import http.server
 import json
 import os
+import socketserver
 import threading
 import time
 import urllib.parse
@@ -43,6 +51,8 @@ import urllib.parse
 LOCK = threading.Lock()
 UPDATES = []
 SENT = []
+EDITS = []
+MAIL = []
 NEXT_ID = [1]
 PAGE_PATH = "server/remnawave/klaus-page.html"
 
@@ -58,6 +68,7 @@ def main():
     ap.add_argument("--bad-tag", required=True)
     ap.add_argument("--temp-tag", required=True)
     ap.add_argument("--apk", required=True)
+    ap.add_argument("--smtp-port", type=int, default=0)
     ap.add_argument("--win-tag", required=True)
     ap.add_argument("--win-bad-tag", required=True)
     ap.add_argument("--exe", required=True)
@@ -153,6 +164,12 @@ def main():
             if path == "/_mock/tg/sent":
                 with LOCK:
                     return self.reply(200, list(SENT))
+            if path == "/_mock/tg/edits":
+                with LOCK:
+                    return self.reply(200, list(EDITS))
+            if path == "/_mock/mail":
+                with LOCK:
+                    return self.reply(200, list(MAIL))
             if path.startswith("/bot"):
                 return self.telegram(path, p)
             if path.startswith("/repos/") or path.startswith("/dl/"):
@@ -183,8 +200,13 @@ def main():
             if method == "sendMessage":
                 with LOCK:
                     SENT.append({"chat_id": str(p.get("chat_id")), "text": p.get("text", ""),
-                                 "parse_mode": p.get("parse_mode")})
+                                 "parse_mode": p.get("parse_mode"), "reply_markup": p.get("reply_markup")})
                 return self.reply(200, {"ok": True, "result": {"message_id": len(SENT)}})
+            if method == "editMessageText":
+                with LOCK:
+                    EDITS.append({"chat_id": str(p.get("chat_id")), "message_id": p.get("message_id"),
+                                  "text": p.get("text", ""), "reply_markup": p.get("reply_markup")})
+                return self.reply(200, {"ok": True, "result": {"message_id": p.get("message_id")}})
             self.reply(404, {"ok": False, "error_code": 404, "description": "Not Found"})
 
         def github(self, path, p):
@@ -234,10 +256,65 @@ def main():
                                   {"Location": "http://127.0.0.2:%d/dl/%d?X-Amz-Signature=e2e" % (args.port, aid)})
             self.reply(404, {"message": "Not Found"})
 
+    if args.smtp_port:
+        smtp = socketserver.ThreadingTCPServer(("0.0.0.0", args.smtp_port), Smtp)
+        smtp.daemon_threads = True
+        threading.Thread(target=smtp.serve_forever, daemon=True).start()
     server = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     server.daemon_threads = True
     print("mock Telegram and GitHub APIs on :%d" % args.port, flush=True)
     server.serve_forever()
+
+
+class Smtp(socketserver.StreamRequestHandler):
+    """Just enough SMTP for smtplib: EHLO, AUTH PLAIN, MAIL, RCPT, DATA."""
+
+    def say(self, line):
+        self.wfile.write(line.encode() + b"\r\n")
+
+    def handle(self):
+        self.say("220 mock ESMTP")
+        login, rcpt = "", []
+        while True:
+            line = self.rfile.readline(4096).decode(errors="replace").rstrip("\r\n")
+            if not line:
+                return
+            verb = line.split(" ", 1)[0].upper()
+            if verb in ("EHLO", "HELO"):
+                self.wfile.write(b"250-mock\r\n250-AUTH PLAIN\r\n250 8BITMIME\r\n")
+            elif verb == "AUTH":
+                parts = line.split()
+                if len(parts) == 3 and parts[1].upper() == "PLAIN":
+                    fields = base64.b64decode(parts[2]).split(b"\0")
+                    login = "%s:%s" % (fields[1].decode(), fields[2].decode())
+                    self.say("235 ok")
+                else:
+                    self.say("504 only AUTH PLAIN")
+            elif verb == "MAIL":
+                rcpt = []
+                self.say("250 ok")
+            elif verb == "RCPT":
+                rcpt.append(line.split(":", 1)[1].strip().strip("<>"))
+                self.say("250 ok")
+            elif verb == "DATA":
+                self.say("354 go on")
+                data = []
+                while True:
+                    chunk = self.rfile.readline(1 << 20)
+                    if chunk in (b".\r\n", b".\n", b""):
+                        break
+                    data.append(chunk[1:] if chunk.startswith(b"..") else chunk)
+                msg = email.message_from_bytes(b"".join(data), policy=email.policy.default)
+                text = msg.get_body(preferencelist=("plain",))
+                with LOCK:
+                    MAIL.append({"to": rcpt, "subject": str(msg["Subject"]), "from": str(msg["From"]),
+                                 "text": text.get_content() if text else "", "login": login})
+                self.say("250 queued")
+            elif verb == "QUIT":
+                self.say("221 bye")
+                return
+            else:
+                self.say("250 ok")
 
 
 if __name__ == "__main__":

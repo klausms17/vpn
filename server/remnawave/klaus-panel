@@ -22,6 +22,9 @@ BACKUP_DIR="${BACKUP_DIR:-/root/remnawave-backups}"
 # A Telegram API address given on the command line wins over the saved one
 # (the local test's mock); telegram-setup saves it.
 TELEGRAM_API_BASE_ENV="${TELEGRAM_API_BASE:-}"
+# For the local test's mail server only: SMTP_TLS=none on the command line
+# makes mail-setup send without TLS.
+SMTP_TLS_ENV="${SMTP_TLS:-}"
 
 say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mВнимание:\033[0m %s\n' "$*" >&2; }
@@ -64,6 +67,19 @@ VPN-серверы:
                                windows-stable; раз в час это делается само)
   update-page                  взять страницу для знакомых из GitHub (ветка PAGE_BRANCH,
                                по умолчанию main; раз в 15 минут это делается само)
+
+Аккаунты в приложениях (вход по почте и паролю вместо ссылки):
+  mail-setup АДРЕС [--host СЕРВЕР] [--port 587] [--limit 300]
+                               почта, с которой уходят письма аккаунтов; пароль спросит
+                               скрыто (для Gmail — пароль приложения); затем проверочное
+                               письмо на этот же адрес
+  mail-off                     перестать отправлять письма (регистрация закроется)
+  accounts                     все аккаунты: почта, состояние, устройства
+  account-approve ПОЧТА        выдать доступ (то же, что кнопка в Telegram)
+  account-reject ПОЧТА         отклонить
+  account-link ПОЧТА ИМЯ       выдать доступ через существующего пользователя ИМЯ
+                               (его ссылка, трафик и устройства остаются)
+  account-delete ПОЧТА [--yes] удалить аккаунт и пользователя, созданного для него
 
 Прочее:
   hwid-limit N [--yes]         включить лимит устройств (N на человека); off — выключить
@@ -113,6 +129,30 @@ TELEGRAM_API_BASE=$TELEGRAM_API_BASE
 REPORT_THRESHOLD=${REPORT_THRESHOLD:-2}
 REPORT_WINDOW_MIN=${REPORT_WINDOW_MIN:-20}
 REPORT_COOLDOWN_MIN=${REPORT_COOLDOWN_MIN:-180}
+EOF
+}
+
+# The accounts' settings, from klaus-panel.env (setup, telegram-setup and
+# mail-setup call this). Values never hold quotes, \ or $ (mail-setup
+# checks the password).
+write_accounts_env() {
+  squad_uuid
+  write_file "$RW_DIR/klaus-accounts.env" <<EOF
+# Written by klaus-panel from klaus-panel.env; rewritten on every change.
+PUBLIC_URL=https://$SUB_DOMAIN
+PANEL_URL=http://remnawave:3000
+PANEL_TOKEN=${ACCOUNTS_TOKEN:-}
+PANEL_SQUAD=$SQUAD_UUID
+TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+TELEGRAM_API_BASE=$TELEGRAM_API_BASE
+SMTP_HOST=${SMTP_HOST:-}
+SMTP_PORT=${SMTP_PORT:-}
+SMTP_TLS=${SMTP_TLS:-}
+SMTP_USER=${SMTP_USER:-}
+SMTP_PASSWORD="${SMTP_PASSWORD:-}"
+SMTP_FROM="${SMTP_FROM:-}"
+MAIL_DAILY_LIMIT=${MAIL_DAILY_LIMIT:-}
 EOF
 }
 
@@ -456,6 +496,7 @@ cmd_setup() {
   link_former_apk
   setup_subpage
   write_monitor_env
+  write_accounts_env
   say "Настройки панели применены"
 }
 
@@ -555,6 +596,11 @@ user_action() { # ACTION NAME
     disable) api_ok POST "/api/users/$id/actions/disable"; say "$2 отключён: подписка и подключения больше не работают" ;;
     enable) api_ok POST "/api/users/$id/actions/enable"; say "$2 снова включён" ;;
     delete)
+      if docker inspect klaus-accounts >/dev/null 2>&1; then
+        local owner
+        owner="$(accounts_cli owner-of "$id")" || die "аккаунты не ответили (docker ps: запущен ли klaus-accounts?)"
+        [ -z "$owner" ] || die "этим пользователем входит аккаунт $owner: удалите аккаунт (klaus-panel account-delete $owner), пользователь удалится с ним"
+      fi
       confirm "Удалить $2 насовсем? Его ссылка перестанет работать."
       api_ok DELETE "/api/users/$id"
       say "$2 удалён"
@@ -794,6 +840,14 @@ cmd_backup() {
     cp -a "${win[@]}" "$tmp/app/windows/"
   fi
   if [ -n "${ADMIN_FILE:-}" ] && [ -f "$ADMIN_FILE" ]; then cp -p "$ADMIN_FILE" "$tmp/admin.txt"; fi
+  if grep -qx klaus-accounts <<<"$(docker ps --format '{{.Names}}')"; then
+    say "Копирую аккаунты"
+    # A copy made by the service itself: the file alone may lack what it
+    # just wrote.
+    rm -f "$RW_DIR/accounts/backup.db"
+    accounts_cli backup /data/backup.db >/dev/null && mv "$RW_DIR/accounts/backup.db" "$tmp/accounts.db" ||
+      die "не удалось скопировать аккаунты"
+  fi
   if grep -qx caddy <<<"$(docker ps --format '{{.Names}}')"; then
     docker exec caddy tar -C /data -cf - . > "$tmp/caddy-data.tar" || warn "не удалось скопировать сертификаты Caddy (не страшно: получит новые)"
   fi
@@ -899,6 +953,7 @@ cmd_telegram_setup() {
   set_line "$RW_DIR/.env" TELEGRAM_BOT_API_ROOT "$TELEGRAM_API_BASE"
   set_line "$RW_DIR/.env" TELEGRAM_NOTIFY_NODES "$chat"
   write_monitor_env
+  if docker inspect klaus-accounts >/dev/null 2>&1; then write_accounts_env; fi
   say "Перезапускаю панель и монитор блокировок с новыми настройками"
   # Exactly what install-panel.sh would start: every container whose
   # settings changed is recreated.
@@ -1256,6 +1311,121 @@ cmd_update_page() {
   fi
 }
 
+# ---------------------------------------------------------------- accounts
+# Accounts in the apps (klaus-accounts.py). Its commands run inside its
+# container, on its own database.
+need_accounts() {
+  docker inspect klaus-accounts >/dev/null 2>&1 ||
+    die "аккаунтов на этой панели ещё нет: обновите её (cd ~/vpn && git pull && sudo bash server/remnawave/install-panel.sh)"
+}
+accounts_cli() { docker exec klaus-accounts python3 /app/klaus-accounts.py "$@"; }
+
+cmd_accounts() {
+  need_accounts
+  accounts_cli list | table
+}
+
+account_decide() { # approve|reject EMAIL
+  [ -n "${2:-}" ] || die "укажите почту: klaus-panel account-$1 ПОЧТА"
+  need_accounts
+  accounts_cli "$1" "$2"
+}
+
+cmd_account_link() {
+  local email="${1:-}" name="${2:-}" id url owner
+  { [ -n "$email" ] && [ -n "$name" ]; } || die "укажите почту и пользователя: klaus-panel account-link ПОЧТА ИМЯ"
+  need_accounts
+  user_json "$name"
+  id="$(jq -r '.response.id' <<<"$RESP")"
+  url="$(jq -r '.response.subscriptionUrl' <<<"$RESP")"
+  owner="$(accounts_cli owner-of "$id")" || die "аккаунты не ответили"
+  [ -z "$owner" ] || die "пользователем $name уже входит аккаунт $owner"
+  accounts_cli link "$email" "$id" "$name" "$url"
+}
+
+cmd_account_delete() {
+  [ -n "${1:-}" ] || die "укажите почту: klaus-panel account-delete ПОЧТА"
+  need_accounts
+  confirm "Удалить аккаунт $1? Если для него создавался пользователь панели, его ссылка перестанет работать."
+  accounts_cli delete "$1"
+}
+
+# Where the letters go from. Known mail services need only the address.
+mail_host() {
+  case "${1#*@}" in
+    gmail.com | googlemail.com) echo smtp.gmail.com ;;
+    *) echo "" ;;
+  esac
+}
+
+cmd_mail_setup() {
+  local from="" host="" port="" limit="" password="" tls
+  # What env files and klaus-panel.env keep as written: no space, quote,
+  # backslash, $ or #.
+  local safe='^[A-Za-z0-9._~!@%^&*()+=,:;?/-]{1,200}$'
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --host) host="${2:-}"; shift 2 ;;
+      --port) port="${2:-}"; shift 2 ;;
+      --limit) limit="${2:-}"; shift 2 ;;
+      -*) die "непонятный параметр: $1" ;;
+      *) [ -z "$from" ] || die "лишний параметр: $1"; from="$1"; shift ;;
+    esac
+  done
+  need_accounts
+  [ -n "$from" ] || die "укажите адрес, с которого уходят письма: klaus-panel mail-setup kirovvpn.mail@gmail.com"
+  [[ "$from" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || die "странный адрес: $from"
+  host="${host:-$(mail_host "$from")}"
+  [ -n "$host" ] || die "для ${from#*@} укажите сервер почты: --host smtp.example.com (его пишут в справке почтового сервиса)"
+  [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]] || die "странный сервер: $host"
+  port="${port:-587}"
+  case "$port" in *[!0-9]* | "") die "--port: нужно число" ;; esac
+  limit="${limit:-300}"
+  case "$limit" in *[!0-9]* | "" | 0) die "--limit: нужно число больше нуля" ;; esac
+  if [ "$port" = "465" ]; then tls=ssl; else tls=starttls; fi
+  case "$SMTP_TLS_ENV" in "") ;; none | ssl | starttls) tls="$SMTP_TLS_ENV" ;; *) die "SMTP_TLS: none, ssl или starttls" ;; esac
+  if [ -t 0 ]; then
+    read -r -s -p "Пароль от $from (для Gmail — пароль приложения из 16 букв): " password
+    echo
+  else
+    IFS= read -r password || true
+  fi
+  # Gmail shows its app passwords in groups of four.
+  password="${password// /}"
+  [ -n "$password" ] || die "пароль не введён"
+  [[ "$password" =~ $safe ]] ||
+    die "в пароле есть символы, которые нельзя сохранить в настройках (пробел, кавычки, \\, \$ или #). Создайте другой пароль"
+  SMTP_HOST="$host" SMTP_PORT="$port" SMTP_TLS="$tls" SMTP_USER="$from" SMTP_PASSWORD="$password"
+  SMTP_FROM="Kirov VPN <$from>" MAIL_DAILY_LIMIT="$limit"
+  local v
+  for v in SMTP_HOST SMTP_PORT SMTP_TLS SMTP_USER SMTP_PASSWORD SMTP_FROM MAIL_DAILY_LIMIT; do
+    set_line "$CONF" "$v" "$(printf '%q' "${!v}")"
+  done
+  write_accounts_env
+  say "Перезапускаю аккаунты с новой почтой"
+  compose up -d klaus-accounts || die "аккаунты не перезапустились (подробности выше)"
+  say "Отправляю проверочное письмо на $from"
+  if ! accounts_cli mail-test "$from"; then
+    case "$host" in
+      smtp.gmail.com) echo "Для Gmail: включите двухэтапную проверку, создайте пароль приложения (Аккаунт Google → Безопасность → Пароли приложений) и запустите mail-setup ещё раз с ним." >&2 ;;
+    esac
+    die "письмо не ушло: проверьте адрес и пароль"
+  fi
+  say "Готово: письма аккаунтов уходят с $from, не больше $limit в день. Проверьте ящик (и папку «Спам»)."
+}
+
+cmd_mail_off() {
+  need_accounts
+  local v
+  for v in SMTP_HOST SMTP_PORT SMTP_TLS SMTP_USER SMTP_PASSWORD SMTP_FROM; do
+    set_line "$CONF" "$v" "''"
+    printf -v "$v" '%s' ""
+  done
+  write_accounts_env
+  compose up -d klaus-accounts || die "аккаунты не перезапустились (подробности выше)"
+  say "Письма выключены: регистрация и восстановление пароля не работают, вход — работает"
+}
+
 # ---------------------------------------------------------------- main
 cmd="${1:-help}"
 [ $# -gt 0 ] && shift
@@ -1287,6 +1457,13 @@ case "$cmd" in
   backup) cmd_backup ;;
   telegram-setup) cmd_telegram_setup "$@" ;;
   telegram-test) cmd_telegram_test ;;
+  mail-setup) cmd_mail_setup "$@" ;;
+  mail-off) cmd_mail_off ;;
+  accounts) cmd_accounts ;;
+  account-approve) account_decide approve "$@" ;;
+  account-reject) account_decide reject "$@" ;;
+  account-link) cmd_account_link "$@" ;;
+  account-delete) cmd_account_delete "$@" ;;
   publish-apk) cmd_publish_apk "$@" ;;
   publish-windows) cmd_publish_windows "$@" ;;
   update-page) cmd_update_page "$@" ;;
