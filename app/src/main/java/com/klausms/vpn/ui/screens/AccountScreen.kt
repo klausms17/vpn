@@ -184,7 +184,7 @@ private fun SignedOut(
         RowDivider()
         Field(password, onPassword, "Пароль", secret = true, onDone = { actions.login(email, password) })
     }
-    Note(view, otherwise = "Новый пароль — не короче 8 символов.")
+    Note(view, hint = "Новый пароль — не короче 8 символов.")
     Buttons {
         PrimaryButton(if (view.busy) "Минуту…" else "Войти", { actions.login(email, password) }, enabled = !view.busy)
         SecondaryButton("Создать аккаунт", { actions.register(email, password) })
@@ -210,7 +210,7 @@ private fun Unconfirmed(view: AccountView, password: String, onPassword: (String
     InsetGroup {
         Field(password, onPassword, "Пароль", secret = true, onDone = { actions.login(view.email, password) })
     }
-    Note(view, otherwise = "Письма нет? Загляните в папку «Спам».")
+    Note(view, hint = "Письма нет? Загляните в папку «Спам».")
     Buttons {
         PrimaryButton(if (view.busy) "Минуту…" else "Войти", { actions.login(view.email, password) }, enabled = !view.busy)
         SecondaryButton("Отправить письмо ещё раз", actions.resend)
@@ -235,7 +235,7 @@ private fun SignedIn(view: AccountView, actions: AccountActions, onLogout: () ->
     }
     Note(
         view,
-        otherwise = when (view.status) {
+        hint = when (view.status) {
             AccountStatus.ACTIVE -> "Серверы аккаунта — в списке серверов, они обновляются сами."
             AccountStatus.REJECTED -> "Доступ не выдан. Если это ошибка, напишите тому, кто дал вам Kirov VPN."
             else -> "Ждём, когда вам откроют доступ. Мы пришлём письмо, а серверы появятся в приложении сами."
@@ -254,15 +254,13 @@ private fun SignedIn(view: AccountView, actions: AccountActions, onLogout: () ->
     }
 }
 
-/** Under a group: what the last request said, else [otherwise]. */
+/** Under a group: [hint], which always stays, then what the last request said. */
 @Composable
-private fun Note(view: AccountView, otherwise: String) {
-    val text = view.note
-    if (text == null) {
-        SectionFooter(otherwise)
-    } else {
+private fun Note(view: AccountView, hint: String) {
+    SectionFooter(hint)
+    view.note?.let {
         Text(
-            text,
+            it,
             style = IosType.footnote,
             color = if (view.noteIsError) kc.red else kc.green,
             modifier = Modifier.padding(start = 36.dp, end = 36.dp, top = 7.dp),
