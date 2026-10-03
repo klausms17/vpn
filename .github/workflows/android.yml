@@ -156,8 +156,23 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          # Values pasted into GitHub's form may end with a line break: base64
+          # has no whitespace, and a password or alias no line break.
+          KEYSTORE_BASE64="${KEYSTORE_BASE64//[[:space:]]/}"
+          STORE_PASSWORD="${STORE_PASSWORD%%[$'\r\n']*}"
+          KEY_PASSWORD="${KEY_PASSWORD%%[$'\r\n']*}"
+          KEY_ALIAS="${KEY_ALIAS//[[:space:]]/}"
           if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            if ! printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks" 2>/dev/null; then
+              echo "::error::ANDROID_KEYSTORE_BASE64 is not a key file in base64: copy it again (docs/README.ru.md, section 9)"
+              exit 1
+            fi
+            # Said here rather than as a signing error deep in Gradle.
+            export STORE_PASSWORD
+            if ! keytool -list -keystore "$RUNNER_TEMP/release.jks" -storepass:env STORE_PASSWORD -alias "${KEY_ALIAS:-release}" >/dev/null 2>&1; then
+              echo "::error::ANDROID_KEYSTORE_PASSWORD does not open the key in ANDROID_KEYSTORE_BASE64, or it has no key named ${KEY_ALIAS:-release}"
+              exit 1
+            fi
             {
               echo "SIGNING_KEYSTORE_PATH=$RUNNER_TEMP/release.jks"
               echo "SIGNING_STORE_PASSWORD=$STORE_PASSWORD"
