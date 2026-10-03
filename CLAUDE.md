@@ -311,6 +311,11 @@ and give step-by-step instructions for anything he must do himself.
      so it needs a stable build first (no token while the repository is
      public). The owner updates the panel with `cd ~/vpn && git pull &&
      sudo bash server/remnawave/install-panel.sh`.
+   - On 3 Oct the owner asked whether Claude could keep the friend page
+     current without him. He was asked to run that update once (it adds
+     the page timer, the tokenless `publish-apk` and the Windows tab), and
+     whether Claude may merge its own PRs into `main` once CI is green,
+     since the page follows `main`. Until he answers, he merges (step 7).
    - The Beget VPS is not needed: a Russian exit bypasses nothing, and a
      panel there would put friends' data under Russian requests and its
      links to the nodes behind TSPU. Later it might be a whitelist relay.
