@@ -35,11 +35,12 @@ and give step-by-step instructions for anything he must do himself.
     threading rules: Main vs. the single worker vs. IO, `Epoch`, and the
     non-reentrant start `Mutex`.
   - `ui/`: `MainActivity`, `MainViewModel`, `UiSession` (app-scoped
-    feedback), `TunnelController` (connect/reconnect rules), `screens/`,
+    feedback), `AccountSession` (the account, app-scoped),
+    `TunnelController` (connect/reconnect rules), `screens/`,
     `components/`.
   - `data/`: `JsonFileStore` (profiles and settings, shared by both
     processes behind a file lock), `Models`, `SubscriptionUpdater`,
-    `GeoFiles`, `ProfilesOps`.
+    `GeoFiles`, `ProfilesOps`, `AccountApi` and `AccountState`.
   - `widget/`, `core/` (`XrayCore`, `CoreHandle`, `DirectNet`,
     `CoreErrors`) and `util/`.
 - `windows/`: the Windows app, a Go module of its own on top of `libxray`.
@@ -148,7 +149,7 @@ and give step-by-step instructions for anything he must do himself.
   blocked.** Compose screens, resources and lint are checked only in CI.
   Locally:
   - Kotlin: `gradle -p tools/jvm-check test` compiles everything but the
-    Compose UI and runs the JVM tests, currently 234.
+    Compose UI and runs the JVM tests, currently 252.
   - Go:
     `scripts/fetch-geo.sh /tmp/geo && cd libxray && go vet . && GEO_DIR=/tmp/geo go test ./...`
   - iOS compile check of the core:
@@ -302,10 +303,13 @@ and give step-by-step instructions for anything he must do himself.
   - Phase B, Windows, is built: `libxray.Request`, `libxray/client/account`,
     the service's `account.go`, pipe protocol 4, an «Аккаунт» view in the
     rail (only in a build with the repository variable `ACCOUNT_URL`), and
-    a smoke-test group against the test server.
-  - Next: phase C (Android), then D (iPhone, and the Mac app with accounts
-    from its first version). Not merged yet; the owner's steps are in the
-    plan's section 7.
+    a smoke-test group against the test server; merged with phase A
+    (https://github.com/klausms17/vpn/pull/5).
+  - Phase C, Android, is built: «Аккаунт» first in «Настройки» (again only
+    with `ACCOUNT_URL`), `AccountSession` with JVM tests, the account's
+    subscription signing out instead of being deleted.
+  - Next: D (iPhone, and the Mac app with accounts from its first
+    version). The owner's steps are in the plan's section 7.
 - **iPhone:** phases 1–2 of `docs/ios/PLAN.md` are done. The Go core builds
   for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
   passes its checks (geo files in the extension, no bitcode). The app is

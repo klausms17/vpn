@@ -31,6 +31,7 @@ import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.klausms.vpn.data.AccountStatus
 import com.klausms.vpn.data.AppSettings
 import com.klausms.vpn.data.AppUpdate
 import com.klausms.vpn.data.ProfilesState
@@ -39,6 +40,8 @@ import com.klausms.vpn.data.Subscription
 import com.klausms.vpn.data.SubscriptionUpdater
 import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.service.VpnStatus
+import com.klausms.vpn.ui.screens.AccountActions
+import com.klausms.vpn.ui.screens.AccountContent
 import com.klausms.vpn.ui.screens.ServerActions
 import com.klausms.vpn.ui.screens.HomeContent
 import com.klausms.vpn.ui.screens.SettingsContent
@@ -152,11 +155,38 @@ class ScreenshotTest {
         SettingsContent(
             settings = AppSettings(excludedApps = setOf("ru.sberbankmobile", "ru.gosuslugi")),
             geoVersion = 1_790_000_000L,
+            account = AccountView(available = true),
             onRussianApps = {},
             onUpdateGeo = {},
             onBack = {},
             onNavigate = {},
         )
+    }
+
+    @Test fun accountSignedOut() = account("account-signed-out", AccountView(available = true))
+
+    @Test fun accountSignedOutError() = account(
+        "account-signed-out-error",
+        AccountView(available = true, note = "Неверная почта или пароль.", noteIsError = true),
+    )
+
+    @Test fun accountUnconfirmed() = account(
+        "account-unconfirmed",
+        AccountView(available = true, email = "tes333t@mail.ru", status = AccountStatus.UNCONFIRMED),
+    )
+
+    @Test fun accountPending() = account(
+        "account-pending",
+        AccountView(available = true, email = "tes333t@mail.ru", status = AccountStatus.PENDING, note = "Вы вошли."),
+    )
+
+    @Test fun accountActive() = account(
+        "account-active",
+        AccountView(available = true, email = "tes333t@mail.ru", status = AccountStatus.ACTIVE),
+    )
+
+    private fun account(name: String, view: AccountView) = shot(name) {
+        AccountContent(view, AccountActions({ _, _ -> }, { _, _ -> }, {}, {}, {}, {}, {}), onBack = {})
     }
 
     private fun connected() = VpnStatus(

@@ -4,8 +4,18 @@ import android.app.Application
 import android.content.Context
 import android.os.Build
 import androidx.core.content.edit
+import com.klausms.vpn.core.CoreAccountTransport
+import com.klausms.vpn.core.XrayCore
+import com.klausms.vpn.data.AccountApi
 import com.klausms.vpn.data.AppRepository
+import com.klausms.vpn.data.DeviceHeaders
+import com.klausms.vpn.data.Downloader
+import com.klausms.vpn.data.Stores
+import com.klausms.vpn.data.SubscriptionUpdater
+import com.klausms.vpn.data.httpsUrl
 import com.klausms.vpn.service.RuntimeState
+import com.klausms.vpn.ui.AccountServers
+import com.klausms.vpn.ui.AccountSession
 import com.klausms.vpn.ui.UiSession
 import com.klausms.vpn.util.AppLog
 import com.klausms.vpn.util.ProcessExits
@@ -22,6 +32,41 @@ class App : Application() {
 
     /** UI process only: what the screens show about work that outlives them. */
     val ui: UiSession by lazy { UiSession(this, repository, appScope) }
+
+    /**
+     * UI process: how subscriptions are downloaded. Directly first (panels
+     * are usually reachable); then through the selected server in case the
+     * panel is blocked.
+     */
+    val downloader: Downloader by lazy {
+        Downloader { url, headers ->
+            try {
+                XrayCore.fetch(url, null, headers)
+            } catch (direct: Exception) {
+                val via = repository.profiles.value.selected?.outbounds ?: throw direct
+                AppLog.w("subscription direct download failed, retrying via proxy", direct)
+                XrayCore.fetch(url, via, headers)
+            }
+        }
+    }
+
+    /** UI process only: this phone's account, with the build's accounts service (none without ACCOUNT_URL). */
+    val account: AccountSession by lazy {
+        val api = httpsUrl(BuildConfig.ACCOUNT_URL)?.let { base ->
+            val device = "Android " + DeviceHeaders.model(Build.MANUFACTURER.orEmpty(), Build.MODEL.orEmpty())
+            AccountApi(base, device, CoreAccountTransport { repository.profiles.value.selected?.outbounds })
+        }
+        val updater = SubscriptionUpdater(this, repository)
+        AccountSession(api, Stores.account(this), repository, object : AccountServers {
+            override suspend fun add(url: String) {
+                updater.add(url, downloader)
+            }
+
+            override suspend fun refresh(id: String) {
+                updater.refresh(id, downloader)
+            }
+        })
+    }
 
     /**
      * UI process: work that must finish even if the screen closes meanwhile
@@ -47,10 +92,14 @@ class App : Application() {
             logLastExit(wanted)
             VpnWidget.update(this)
         } else {
-            // Decodes the saved servers and settings off the main thread
-            // before the first screen asks for them. The lazy is synchronized:
-            // the ViewModel waits for this read, or reads again if it failed.
-            appScope.launch(Dispatchers.IO) { runCatching { repository } }
+            // Decodes the saved servers, settings and account off the main
+            // thread before the first screen asks for them. The lazies are
+            // synchronized: the ViewModel waits for these reads, or reads
+            // again if one failed.
+            appScope.launch(Dispatchers.IO) {
+                runCatching { repository }
+                runCatching { account }
+            }
         }
     }
 

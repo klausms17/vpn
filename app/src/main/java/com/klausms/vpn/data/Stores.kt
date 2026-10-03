@@ -12,4 +12,8 @@ object Stores {
 
     fun settings(context: Context) =
         JsonFileStore(File(dataDir(context), "settings.json"), AppSettings.serializer()) { AppSettings() }
+
+    /** The UI process's only: see [com.klausms.vpn.ui.AccountSession]. */
+    fun account(context: Context) =
+        JsonFileStore(File(dataDir(context), "account.json"), AccountState.serializer()) { AccountState() }
 }

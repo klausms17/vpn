@@ -83,6 +83,10 @@ jobs:
           # variable; without it the build has no accounts.
           ACCOUNT_URL: ${{ vars.ACCOUNT_URL }}
         run: |
+          if [[ -n "$ACCOUNT_URL" && ! "$ACCOUNT_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]]; then
+            echo "::error::ACCOUNT_URL must be like https://sub.example.com"
+            exit 1
+          fi
           go run ./tools/mkres "$VERSION"
           export GOOS=windows GOARCH=amd64 CGO_ENABLED=0
           flags=(-trimpath -buildvcs=false)

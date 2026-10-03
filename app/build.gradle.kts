@@ -8,6 +8,14 @@ plugins {
 // release build falls back to the debug key so it can still be installed.
 val signingKeystore: String? = System.getenv("SIGNING_KEYSTORE_PATH")
 
+// The accounts service (docs/accounts/PLAN.md): the repository variable
+// ACCOUNT_URL in CI. Without it the app has no accounts.
+val accountUrl: String = System.getenv("ACCOUNT_URL").orEmpty().trim().also {
+    require(it.isEmpty() || Regex("https://[A-Za-z0-9.-]+(:[0-9]+)?/?").matches(it)) {
+        "ACCOUNT_URL must be like https://sub.example.com"
+    }
+}
+
 android {
     namespace = "com.klausms.vpn"
     compileSdk = 37
@@ -18,6 +26,7 @@ android {
         targetSdk = 37
         versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
         versionName = System.getenv("VERSION_NAME") ?: "1.0.0-dev"
+        buildConfigField("String", "ACCOUNT_URL", "\"$accountUrl\"")
 
         // One APK for every phone (Android 8+, 64- and 32-bit ARM).
         ndk {

@@ -105,6 +105,9 @@ jobs:
     env:
       VERSION_CODE: ${{ github.run_number }}
       VERSION_NAME: 1.0.${{ github.run_number }}
+      # The accounts service (docs/accounts/PLAN.md), a repository variable;
+      # without it the build has no accounts.
+      ACCOUNT_URL: ${{ vars.ACCOUNT_URL }}
     steps:
       - uses: actions/checkout@v7
 
