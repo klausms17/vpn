@@ -86,6 +86,10 @@ func TestDeepLinkIgnoresAnythingElse(t *testing.T) {
 		// Only links and keys reach the confirmation.
 		"klausvpn://add/hello",
 		"klausvpn://add/https%3A%2F%2Fx.example%0A%0Dy",
+		// A deep link inside one would be decoded twice, past the dialog.
+		"klausvpn://add/klausvpn%3A%2F%2Fadd%2Fhttps%3A%2F%2Fevil.example%2Fsub",
+		"klausvpn://add/KLAUSVPN://add/https://evil.example/sub",
+		"klausvpn://install-config?url=klausvpn%3A%2F%2Fimport%2Fvless%3A%2F%2Fx",
 	} {
 		if got := DeepLink(in); got != "" {
 			t.Errorf("%.60q: %q, want nothing", in, got)

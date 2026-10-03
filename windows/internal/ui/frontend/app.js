@@ -15,9 +15,15 @@ let snap = null;
 function render(s) {
   if (snap && s && s.seq < snap.seq) return;
   snap = s;
-  renderServers(s);
-  renderPane(s);
-  renderSettings(s);
+  // Odd data in one part must not leave the others, the button among
+  // them, showing an old state.
+  for (const part of [renderServers, renderPane, renderSettings]) {
+    try {
+      part(s);
+    } catch (err) {
+      console.error(err);
+    }
+  }
 }
 
 // ---------------------------------------------------------------- views

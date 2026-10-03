@@ -76,6 +76,11 @@ func (u *Updater) Add(ctx context.Context, link string) (Outcome, error) {
 	if err != nil {
 		return Outcome{}, err
 	}
+	// Cancelled meanwhile: the servers that were still being pinned are
+	// missing from f, so nothing is saved (Android's CancellationException).
+	if err := ctx.Err(); err != nil {
+		return Outcome{}, err
+	}
 	sub := model.Subscription{ID: u.NewID(), Name: model.ClipName(cmp.Or(f.Title, host(link), "Подписка")), URL: link}
 	now := u.Now()
 	var before, after model.ProfilesState
@@ -133,6 +138,9 @@ func (u *Updater) Refresh(ctx context.Context, id, runningID string, repin bool)
 		}
 		return Outcome{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return Outcome{}, err
+	}
 	now := u.Now()
 	var before, after model.ProfilesState
 	if err := u.Save(func(s model.ProfilesState) model.ProfilesState {
@@ -163,7 +171,7 @@ func outcome(before, after model.ProfilesState, id string, f Fetched, runningID 
 		}
 	}
 	if o.Applied {
-		o.Dropped = len(f.Keys) - o.Servers
+		o.Dropped = len(f.Keys) - o.Servers + f.Dropped
 	}
 	return o, nil
 }

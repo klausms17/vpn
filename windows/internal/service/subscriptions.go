@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/klausms17/vpn/libxray/client/importer"
@@ -14,8 +15,8 @@ import (
 )
 
 // subscriptions adds and refreshes the subscriptions, for the windows and
-// by itself. Downloads run one at a time; while one runs, its subscription
-// shows as updating.
+// by itself. Downloads run one at a time, the others wait for it or until
+// their window goes away; meanwhile their subscriptions show as updating.
 type subscriptions struct {
 	updater *subscription.Updater
 	// saved reads the servers as saved; running names the server the
@@ -31,10 +32,13 @@ type subscriptions struct {
 	now   func() int64
 	log   func(string)
 
-	busy sync.Mutex
+	// busy holds a token while a download runs.
+	busy chan struct{}
 
-	mu       sync.Mutex
-	updating map[string]bool
+	mu sync.Mutex
+	// updating counts the refreshes of each subscription asked for and not
+	// finished.
+	updating map[string]int
 	kicked   bool
 }
 
@@ -62,7 +66,8 @@ func newSubscriptions(h *handler, fetch subscription.Fetch, now func() int64) *s
 		},
 		now:      now,
 		log:      h.log,
-		updating: map[string]bool{},
+		busy:     make(chan struct{}, 1),
+		updating: map[string]int{},
 	}
 }
 
@@ -73,8 +78,10 @@ var (
 
 // add downloads link and saves it as a new subscription.
 func (s *subscriptions) add(ctx context.Context, link string) (ipc.ImportResult, error) {
-	s.busy.Lock()
-	defer s.busy.Unlock()
+	if err := s.lock(ctx); err != nil {
+		return ipc.ImportResult{}, err
+	}
+	defer s.unlock()
 	o, err := s.updater.Add(ctx, link)
 	if err != nil {
 		return ipc.ImportResult{}, err
@@ -86,7 +93,7 @@ func (s *subscriptions) add(ctx context.Context, link string) (ipc.ImportResult,
 		message = fmt.Sprintf("Подписка «%s» добавлена без серверов: %s", o.Subscription.Name,
 			cmp.Or(o.Subscription.Notice, "сервер подписки их не прислал"))
 	}
-	return ipc.ImportResult{Added: o.Servers, Message: message + tooMany(o)}, nil
+	return ipc.ImportResult{Added: o.Servers, Message: message + tooMany(o) + skipped(o)}, nil
 }
 
 // refresh downloads subscription id again, or each one when id is empty,
@@ -161,10 +168,15 @@ func (s *subscriptions) kick(ctx context.Context) {
 // refreshOne downloads subscription id again; repin is a refresh the user
 // asked for. A failed download is saved on the subscription.
 func (s *subscriptions) refreshOne(ctx context.Context, id string, repin bool) (subscription.Outcome, error) {
-	s.busy.Lock()
-	defer s.busy.Unlock()
+	if !slices.ContainsFunc(s.saved().Subscriptions, func(sub model.Subscription) bool { return sub.ID == id }) {
+		return subscription.Outcome{}, errNoSubscription
+	}
 	s.setUpdating(id, true)
 	defer s.setUpdating(id, false)
+	if err := s.lock(ctx); err != nil {
+		return subscription.Outcome{}, err
+	}
+	defer s.unlock()
 	o, err := s.updater.Refresh(ctx, id, s.running(), repin)
 	if errors.Is(err, subscription.ErrGone) {
 		return o, errNoSubscription
@@ -177,11 +189,26 @@ func (s *subscriptions) refreshOne(ctx context.Context, id string, repin bool) (
 	return o, nil
 }
 
+// lock waits until no other download runs, or until ctx ends.
+func (s *subscriptions) lock(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case s.busy <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *subscriptions) unlock() { <-s.busy }
+
 func (s *subscriptions) setUpdating(id string, on bool) {
 	s.mu.Lock()
 	if on {
-		s.updating[id] = true
-	} else {
+		s.updating[id]++
+	} else if s.updating[id]--; s.updating[id] <= 0 {
 		delete(s.updating, id)
 	}
 	s.mu.Unlock()
@@ -191,7 +218,7 @@ func (s *subscriptions) setUpdating(id string, on bool) {
 // shown is sub as the windows show it.
 func (s *subscriptions) shown(sub model.Subscription) ipc.Subscription {
 	s.mu.Lock()
-	updating := s.updating[sub.ID]
+	updating := s.updating[sub.ID] > 0
 	s.mu.Unlock()
 	u := subscription.ParseUsage(sub.UserInfo)
 	return ipc.Subscription{
@@ -206,7 +233,7 @@ func refreshed(o subscription.Outcome) string {
 	if !o.Applied {
 		return cmp.Or(o.Subscription.Notice, "Сервер подписки не прислал серверов, оставлены прежние")
 	}
-	return fmt.Sprintf("Подписка обновлена: серверов %d", o.Servers) + tooMany(o)
+	return fmt.Sprintf("Подписка обновлена: серверов %d", o.Servers) + tooMany(o) + skipped(o)
 }
 
 func failure(err error) error {
@@ -214,6 +241,15 @@ func failure(err error) error {
 		return err
 	}
 	return fmt.Errorf("Не удалось обновить подписку: %w", err)
+}
+
+// skipped says how many of the panel's servers cannot be used here, and
+// why the first one.
+func skipped(o subscription.Outcome) string {
+	if len(o.Errors) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(". Пропущено: %d (%s)", len(o.Errors), o.Errors[0])
 }
 
 // tooMany says that servers of o did not fit.

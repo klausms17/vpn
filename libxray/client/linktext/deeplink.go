@@ -58,8 +58,10 @@ func DeepLink(data string) string {
 		text, _, _ = strings.Cut(text, "#")
 	}
 	// Only a link or key goes on to the confirmation: no control
-	// characters, and a scheme at the very start.
-	if strings.ContainsFunc(text, unicode.IsControl) || !linkStart.MatchString(text) {
+	// characters, and a scheme at the very start. Never another deep link:
+	// decoded again, it would carry a link the user was not shown.
+	if strings.ContainsFunc(text, unicode.IsControl) || !linkStart.MatchString(text) ||
+		strings.EqualFold(text[:min(len(text), len(deepLinkScheme))], deepLinkScheme) {
 		return ""
 	}
 	if text == "" || utf8.RuneCountInString(text) > maxDeepLink {

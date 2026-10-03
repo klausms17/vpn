@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -206,5 +207,42 @@ func TestAddIsBounded(t *testing.T) {
 	}
 	if downloads != 0 {
 		t.Errorf("%d downloads for links refused", downloads)
+	}
+}
+
+// A window that goes away while the list downloads cancels the refresh:
+// the servers still being pinned are missing, so nothing may be saved.
+func TestACancelledDownloadSavesNothing(t *testing.T) {
+	m := &memory{}
+	o, err := updater(m, answer(libxray.FetchResult{Body: body(keyDE)})).Add(context.Background(), link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, saves := m.state, m.saves
+	// run calls u with a context cancelled while the list downloads.
+	cancelled := func(run func(ctx context.Context, u *Updater) error) error {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		return run(ctx, updater(m, func(context.Context, string) (*libxray.FetchResult, error) {
+			cancel()
+			return &libxray.FetchResult{Body: body(keyNL)}, nil
+		}))
+	}
+	err = cancelled(func(ctx context.Context, u *Updater) error {
+		_, err := u.Refresh(ctx, o.Subscription.ID, "", true)
+		return err
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("refresh: %v", err)
+	}
+	err = cancelled(func(ctx context.Context, u *Updater) error {
+		_, err := u.Add(ctx, "https://other.example.com/x")
+		return err
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("add: %v", err)
+	}
+	if m.saves != saves || !reflect.DeepEqual(m.state, before) {
+		t.Errorf("%d saves, state %+v", m.saves-saves, m.state)
 	}
 }

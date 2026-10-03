@@ -251,3 +251,74 @@ func TestDueSubscriptionsAreRefreshedQuietly(t *testing.T) {
 		t.Errorf("asked %d, %+v", asked, env.h.profiles.Read().Subscriptions[0])
 	}
 }
+
+func TestARefreshOfNoSubscriptionChangesNothing(t *testing.T) {
+	env := newEnv(t)
+	env.serves("Kirov VPN", keyDE)
+	env.importText(t, subLink)
+	events := len(env.named(ipc.EventProfiles))
+	if _, err := env.call(ipc.OpRefresh, ipc.IDArgs{ID: "no-such-id"}); !errors.Is(err, errNoSubscription) {
+		t.Errorf("err %v", err)
+	}
+	if n := len(env.named(ipc.EventProfiles)); n != events {
+		t.Errorf("%d servers events for nothing", n-events)
+	}
+}
+
+// Refreshes wait for the download that runs; one whose window went away
+// gives up without downloading.
+func TestAWaitingRefreshGivesUpWithItsWindow(t *testing.T) {
+	env := newEnv(t)
+	env.serves("Kirov VPN", keyDE)
+	env.importText(t, subLink)
+	id := env.h.profiles.Read().Subscriptions[0].ID
+	answered := env.panel
+	reached, release := make(chan struct{}), make(chan struct{})
+	var downloads int
+	env.panel = func(url string) (*libxray.FetchResult, error) {
+		downloads++
+		if downloads == 1 {
+			close(reached)
+			<-release
+		}
+		return answered(url)
+	}
+	done := make(chan error)
+	go func() {
+		_, err := env.call(ipc.OpRefresh, ipc.IDArgs{ID: id})
+		done <- err
+	}()
+	<-reached
+	ctx, cancel := context.WithCancel(context.Background())
+	waiting := make(chan error)
+	go func() {
+		_, err := env.h.subs.refresh(ctx, id)
+		waiting <- err
+	}()
+	cancel()
+	if err := <-waiting; !errors.Is(err, context.Canceled) {
+		t.Errorf("the waiting refresh: %v", err)
+	}
+	// The first one still shows as updating, and finishes.
+	if p := env.last(t); !p.Subscriptions[0].Updating {
+		t.Error("the running refresh no longer shows")
+	}
+	close(release)
+	if err := <-done; err != nil || downloads != 1 {
+		t.Errorf("err %v, %d downloads", err, downloads)
+	}
+	if p := env.last(t); p.Subscriptions[0].Updating {
+		t.Error("still shown as updating")
+	}
+}
+
+func TestServersThatCannotBeUsedAreCounted(t *testing.T) {
+	env := newEnv(t)
+	// Its certificate cannot be fetched: the server is left out.
+	insecure := "vless://11111111-2222-3333-4444-555555555555@127.0.0.1:1?security=tls&allowInsecure=1&type=tcp#self"
+	env.serves("Kirov VPN", keyDE, insecure)
+	r := env.importText(t, subLink)
+	if r.Added != 1 || !strings.HasPrefix(r.Message, "Подписка «Kirov VPN»: серверов 1. Пропущено: 1 (self: не удалось получить сертификат сервера") {
+		t.Errorf("result %+v", r)
+	}
+}

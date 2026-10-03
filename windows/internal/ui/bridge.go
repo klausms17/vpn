@@ -77,22 +77,23 @@ func (b *Bridge) DeleteSubscription(id string) error {
 // answer, for a page that just loaded.
 func (b *Bridge) PendingLink() LinkPrompt { return b.links.prompt() }
 
-// AddPendingLink adds what the waiting link carries and returns what it
-// did. The link waits on if that fails, so the user can try again.
-func (b *Bridge) AddPendingLink() (string, error) {
-	text := b.links.peek()
+// AddPendingLink adds what link seq, the one the window asked about,
+// carries and returns what it did. The link waits on if that fails, so
+// the user can try again.
+func (b *Bridge) AddPendingLink(seq uint64) (string, error) {
+	text := b.links.peek(seq)
 	if text == "" {
 		return "", errors.New("Эта ссылка уже добавлена или отменена")
 	}
 	message, err := b.Import(text)
 	if err == nil {
-		b.links.drop(text)
+		b.links.drop(seq)
 	}
 	return message, err
 }
 
-// DropPendingLink forgets the waiting link: the user said no.
-func (b *Bridge) DropPendingLink() { b.links.drop(b.links.peek()) }
+// DropPendingLink forgets link seq: the user said no.
+func (b *Bridge) DropPendingLink(seq uint64) { b.links.drop(seq) }
 
 // Select makes server id the one to connect to.
 func (b *Bridge) Select(id string) error { return b.request(ipc.OpSelect, ipc.IDArgs{ID: id}, nil) }

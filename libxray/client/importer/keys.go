@@ -76,9 +76,9 @@ type Saved func(libxray.Profile) json.RawMessage
 // certificate checks get the server's certificate pinned, four at a time,
 // at most maxPins, none once ctx ends; reuse may give the outbounds pinned
 // for the very same link before, so an unchanged server is not contacted
-// again, and when a certificate cannot be fetched, fallback may keep the
-// server as it was saved (either may be nil). failed has a line in
-// Russian for each profile that cannot be used.
+// again, and when a certificate cannot be fetched, or past maxPins,
+// fallback may keep the server as it was saved (either may be nil).
+// failed has a line in Russian for each profile that cannot be used.
 func Ready(ctx context.Context, parsed []libxray.Profile, check Check, reuse, fallback Saved) (keys []model.Key, failed []string) {
 	results := make([]struct {
 		key  model.Key
@@ -103,7 +103,11 @@ func Ready(ctx context.Context, parsed []libxray.Profile, check Check, reuse, fa
 			continue
 		}
 		if pins == maxPins {
-			results[i].fail = label(p) + ": слишком много ключей без проверки сертификата за раз, добавьте его отдельно"
+			if saved := call(fallback, p); saved != nil {
+				results[i].key, results[i].fail = keyOf(p, saved)
+			} else {
+				results[i].fail = label(p) + ": слишком много ключей без проверки сертификата за раз, добавьте его отдельно"
+			}
 			continue
 		}
 		pins++

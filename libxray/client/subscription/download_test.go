@@ -95,6 +95,27 @@ func TestThePanelsTextsAreBounded(t *testing.T) {
 	}
 }
 
+func TestDownloadErrorsAreBounded(t *testing.T) {
+	long := func(context.Context, string) (*libxray.FetchResult, error) {
+		return nil, fmt.Errorf("%s: %w", strings.Repeat("x", 3000), context.DeadlineExceeded)
+	}
+	_, err := Download(context.Background(), "https://sub.example.com/x", long, nil, nil, nil)
+	if err == nil || len([]rune(err.Error())) != maxPanelText || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("an error of %d characters: %v", len([]rune(err.Error())), errors.Is(err, context.DeadlineExceeded))
+	}
+}
+
+func TestNoMoreThanCanBeSavedIsMadeReady(t *testing.T) {
+	var keys []string
+	for i := range model.MaxProfiles + 2 {
+		keys = append(keys, fmt.Sprintf("vless://11111111-2222-3333-4444-555555555555@s%d.example.com:443?type=tcp&security=reality&pbk=Iv4yHdwV8Hc9BPh-c3zWJhDPLA1WZwpFNjTCn9JM2TM&sni=www.example.com&sid=ab#s%d", i, i))
+	}
+	f, err := Download(context.Background(), "https://sub.example.com/x", answer(libxray.FetchResult{Body: body(keys...)}), nil, nil, nil)
+	if err != nil || len(f.Keys) != model.MaxProfiles || f.Dropped != 2 {
+		t.Errorf("%d keys, %d dropped, %v", len(f.Keys), f.Dropped, err)
+	}
+}
+
 func TestServersThatCannotBeUsedAreAnError(t *testing.T) {
 	xdrive := "vless://11111111-2222-3333-4444-555555555555@h.example.com:443?type=xhttp&security=tls&extra=" +
 		"%7B%22downloadSettings%22%3A%7B%22network%22%3A%22xdrive%22%7D%7D#bad"
@@ -190,6 +211,10 @@ func TestParseUsage(t *testing.T) {
 		"total=1073741824":                        {Total: 1 << 30},
 		"":                                        {},
 		"garbage; upload; =5; download=-1; expire=1e9 ": {Used: -1},
+		// No date a window can show: unknown.
+		"total=3; expire=99999999999999": {Total: 3},
+		"expire=-5":                      {},
+		"expire=253402300799":            {Expire: 253402300799},
 	} {
 		if got := ParseUsage(in); got != want {
 			t.Errorf("%q: %+v, want %+v", in, got, want)

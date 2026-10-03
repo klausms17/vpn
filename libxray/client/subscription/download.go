@@ -48,6 +48,8 @@ type Fetched struct {
 	Notice string
 	// Errors has a line for each entry that could not be used.
 	Errors []string
+	// Dropped counts the entries past model.MaxProfiles, never made ready.
+	Dropped int
 
 	Title, UserInfo, SupportURL, Announce, ReportURL, AppURL string
 }
@@ -59,7 +61,7 @@ type Fetched struct {
 func Download(ctx context.Context, url string, fetch Fetch, check importer.Check, reuse, fallback importer.Saved) (Fetched, error) {
 	r, err := fetch(ctx, url)
 	if err != nil {
-		return Fetched{}, err
+		return Fetched{}, bounded{err}
 	}
 	f := Fetched{
 		Title:      decodeTitle(r.ProfileTitle),
@@ -80,11 +82,16 @@ func Download(ctx context.Context, url string, fetch Fetch, check importer.Check
 	}
 	out, err := libxray.ParseSubscription(r.Body)
 	if err != nil {
-		return Fetched{}, err
+		return Fetched{}, bounded{err}
 	}
 	var res libxray.SubscriptionResult
 	if err := json.Unmarshal([]byte(out), &res); err != nil {
 		return Fetched{}, err
+	}
+	// No more than can be saved is made ready.
+	if len(res.Profiles) > model.MaxProfiles {
+		f.Dropped = len(res.Profiles) - model.MaxProfiles
+		res.Profiles = res.Profiles[:model.MaxProfiles]
 	}
 	parsed := make([]libxray.Profile, 0, len(res.Profiles))
 	for _, p := range res.Profiles {
@@ -95,7 +102,7 @@ func Download(ctx context.Context, url string, fetch Fetch, check importer.Check
 	// Servers came and none can be used: an error, not an empty list.
 	if len(keys) == 0 && len(parsed) > 0 {
 		if len(f.Errors) > 0 {
-			return Fetched{}, errors.New(f.Errors[0])
+			return Fetched{}, errors.New(clip(f.Errors[0], maxPanelText))
 		}
 		return Fetched{}, errors.New("в подписке нет подходящих серверов")
 	}
@@ -158,3 +165,10 @@ func clip(text string, max int) string {
 	}
 	return string([]rune(text)[:max])
 }
+
+// bounded cuts an error's text, which may carry what a panel sent (an
+// HTTP status line may be megabytes long), to maxPanelText.
+type bounded struct{ err error }
+
+func (b bounded) Error() string { return clip(b.err.Error(), maxPanelText) }
+func (b bounded) Unwrap() error { return b.err }

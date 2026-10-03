@@ -145,27 +145,43 @@ addText.addEventListener("keydown", (e) => {
 const linkDialog = $("link-dialog");
 const linkAdd = $("link-add");
 
+// The number of the link the dialog asks about: the answer names it, so
+// it never adds or drops a link that came later.
+let asked = 0;
+
 // offerLink asks before adding what an "Add to Kirov VPN" link carries;
 // the link itself stays with the app's Go side.
 export function offerLink(prompt) {
   if (!prompt || !prompt.present) return;
+  asked = prompt.seq;
   $("link-text").textContent = prompt.host
     ? `Подписка с адреса ${prompt.host}. Добавляйте только ссылки от тех, кому доверяете.`
     : "Kirov VPN получил ключ сервера. Добавляйте только ключи от тех, кому доверяете.";
   open(linkDialog, linkAdd);
 }
 
+// A link that came after the one answered, even while it was being added,
+// is asked about next.
+function askNext(answered) {
+  call("PendingLink").then((prompt) => {
+    if (prompt.present && prompt.seq !== answered) offerLink(prompt);
+  }, () => {});
+}
+
 linkAdd.addEventListener("click", async () => {
+  const seq = asked;
   try {
-    toast(await busy(linkAdd, "Добавление…", () => call("AddPendingLink")));
+    toast(await busy(linkAdd, "Добавление…", () => call("AddPendingLink", seq)));
     close(linkDialog);
+    askNext(seq);
   } catch (err) {
     fail(err);
   }
 });
 $("link-cancel").addEventListener("click", () => {
+  const seq = asked;
   close(linkDialog);
-  call("DropPendingLink").catch(() => {});
+  call("DropPendingLink", seq).then(() => askNext(seq), () => {});
 });
 
 // ---------------------------------------------------------------- rename

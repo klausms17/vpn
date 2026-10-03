@@ -84,17 +84,18 @@ const dayMonth = new Intl.DateTimeFormat("ru", { day: "numeric", month: "long" }
 const clock = new Intl.DateTimeFormat("ru", { hour: "2-digit", minute: "2-digit" });
 const numeric = new Intl.DateTimeFormat("ru", { day: "2-digit", month: "2-digit", year: "numeric" });
 
-// "25 октября", with the year when it is not this one.
+// "25 октября", with the year when it is not this one; "" for no date.
 export function russianDate(ms) {
   const d = new Date(ms);
+  if (!Number.isFinite(d.getTime())) return "";
   const day = dayMonth.format(d);
   return d.getFullYear() === new Date().getFullYear() ? day : `${day} ${d.getFullYear()}`;
 }
 
 // When a subscription last got a fresh list, as Android says it.
 export function updatedText(ms) {
-  if (!ms) return "Ещё не обновлялась";
   const d = new Date(ms);
+  if (!ms || !Number.isFinite(d.getTime())) return "Ещё не обновлялась";
   const today = d.toDateString() === new Date().toDateString();
   return today ? `Обновлено сегодня в ${clock.format(d)}` : `Обновлено ${numeric.format(d)} в ${clock.format(d)}`;
 }

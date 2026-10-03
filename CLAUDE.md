@@ -252,7 +252,13 @@ and give step-by-step instructions for anything he must do himself.
     - `klausvpn://` registered by the installer; the window names the
       subscription's host and asks before adding;
     - the smoke test adds and refreshes a subscription served over HTTPS
-      and checks the device headers and the link registration.
+      and checks the device headers and the link registration;
+    - an independent review found, and the fixes cover: a `klausvpn://`
+      link inside another got past the dialog; a refresh cancelled
+      halfway, or one past 16 servers that need a pinned certificate,
+      dropped servers; a far-off `expire` from a panel stopped every
+      window; a panel's error texts were unbounded; queued refreshes
+      outlived their window; the dialog could answer for a newer link.
 - **iPhone:** phases 1–2 of `docs/ios/PLAN.md` are done. The Go core builds
   for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
   passes its checks (geo files in the extension, no bitcode). The app is

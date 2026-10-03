@@ -153,9 +153,10 @@ function updateGroup(node, g) {
   if (sub) {
     if (sub.total > 0) parts.push(`${bytes(sub.used || 0)} из ${bytes(sub.total)}`);
     else if (sub.used > 0) parts.push(bytes(sub.used));
-    if (sub.expire > 0) {
+    const until = sub.expire > 0 ? russianDate(sub.expire * 1000) : "";
+    if (until) {
       expired = sub.expire * 1000 < Date.now();
-      parts.push(`${expired ? "истекла" : "до"} ${russianDate(sub.expire * 1000)}`);
+      parts.push(`${expired ? "истекла" : "до"} ${until}`);
     }
   }
   node.meta.textContent = parts.join(" · ");
