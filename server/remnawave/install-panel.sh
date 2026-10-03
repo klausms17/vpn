@@ -14,8 +14,9 @@
 #   APK_URL        https link to the Kirov VPN APK (adds a download button;
 #                  without it the button appears once "klaus-panel
 #                  publish-apk" has put the app on https://SUB_DOMAIN/app/)
-#   GITHUB_TOKEN   read-only GitHub token for the app's releases: the panel
-#                  then publishes every new stable build by itself (hourly)
+#   GITHUB_TOKEN   read-only GitHub token, needed only while the repository
+#                  is private: the panel publishes every new stable build of
+#                  the app by itself (hourly)
 #   GITHUB_REPO    repository with the releases (default klausms17/vpn)
 #   RELEASE_TAG    release whose APK is published (default stable: the build
 #                  CI makes on purpose from a v* tag or a manual run; the
@@ -919,8 +920,8 @@ for i in $(seq 1 20); do
 done
 
 if [ "$SKIP_SYSTEM" != "1" ]; then
-  # New app builds reach the subscription address by themselves (quietly,
-  # and only while GITHUB_TOKEN is set).
+  # New app builds reach the subscription address by themselves (quietly;
+  # a private repository needs GITHUB_TOKEN).
   units_changed=0
   put_unit() { # NAME: stdin -> /etc/systemd/system/NAME when it differs
     local dst="/etc/systemd/system/$1" tmp
@@ -1026,11 +1027,7 @@ if [ -z "$TELEGRAM_CHAT_ID" ]; then
 else
   echo "  3. Оповещения в Telegram включены (проверка: klaus-panel telegram-test)"
 fi
-if [ -z "$GITHUB_TOKEN" ]; then
-  echo "  4. Раздача приложения с этого сервера: запустите ещё раз с GITHUB_TOKEN=… (инструкция, раздел 12)"
-else
-  echo "  4. Новые сборки из релиза $RELEASE_TAG публикуются сами; сейчас:  klaus-panel publish-apk"
-fi
+echo "  4. Новые сборки приложения из релиза $RELEASE_TAG публикуются сами; сейчас:  klaus-panel publish-apk"
 echo "  5. Резервная копия:  klaus-panel backup"
 echo
 echo "Все команды: klaus-panel help"

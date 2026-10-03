@@ -57,8 +57,9 @@ VPN-серверы:
                                откройте показанную ссылку и нажмите «Запустить»
   telegram-test                отправить проверочное сообщение
   publish-apk [--tag РЕЛИЗ]    выложить новую сборку приложения на адрес подписки (из
-                               RELEASE_TAG, по умолчанию стабильные — релиз stable; нужен
-                               GITHUB_TOKEN; раз в час это делается само)
+                               RELEASE_TAG, по умолчанию стабильные — релиз stable; для
+                               закрытого репозитория нужен GITHUB_TOKEN; раз в час это
+                               делается само)
 
 Прочее:
   hwid-limit N [--yes]         включить лимит устройств (N на человека); off — выключить
@@ -909,18 +910,18 @@ cmd_telegram_test() {
 }
 
 # ---------------------------------------------------------------- app
-# New builds of the app from the GitHub releases (private repository: a
-# read-only token) go to https://SUB_DOMAIN/app/: KirovVPN.apk,
+# New builds of the app from the GitHub releases (a private repository
+# needs a read-only token) go to https://SUB_DOMAIN/app/: KirovVPN.apk,
 # KirovVPN-<version>.apk and version.json, which the app checks for updates.
 # Only from RELEASE_TAG, "stable" by default: CI makes it on purpose, never
 # on every push like the build-<branch> test builds.
-gh_get() { # URL FILE [ACCEPT] [SECONDS]; sets GH_CODE. The token goes to curl
+gh_get() { # URL FILE [ACCEPT] [SECONDS]; sets GH_CODE. A token goes to curl
   # through a file; curl does not pass it on when GitHub redirects a
   # download to its file storage.
   local tmp
   tmp="$(mktemp -d)"
-  printf 'Authorization: Bearer %s\nAccept: %s\nX-GitHub-Api-Version: 2022-11-28\n' \
-    "$GITHUB_TOKEN" "${3:-application/vnd.github+json}" > "$tmp/h"
+  printf 'Accept: %s\nX-GitHub-Api-Version: 2022-11-28\n' "${3:-application/vnd.github+json}" > "$tmp/h"
+  if [ -n "${GITHUB_TOKEN:-}" ]; then printf 'Authorization: Bearer %s\n' "$GITHUB_TOKEN" >> "$tmp/h"; fi
   GH_CODE="$(curl -sS -L --max-time "${4:-60}" --max-filesize 314572800 -A klaus-panel \
     -H "@$tmp/h" -o "$2" -w '%{http_code}' "$1" 2>/dev/null)" || GH_CODE=000
   rm -rf "$tmp"
@@ -950,11 +951,6 @@ cmd_publish_apk() {
       *) die "непонятный параметр: $1" ;;
     esac
   done
-  if [ -z "${GITHUB_TOKEN:-}" ]; then
-    # The hourly timer: nothing to do until a token is given.
-    [ "$quiet" = "1" ] && return 0
-    die "нет GITHUB_TOKEN: создайте токен только для чтения (инструкция, раздел 12) и запустите sudo GITHUB_TOKEN=… bash install-panel.sh"
-  fi
   [[ "$tag" =~ ^[A-Za-z0-9._/-]+$ ]] || die "странное имя релиза: $tag"
   note() { if [ "$quiet" != "1" ]; then say "$@"; fi; }
   mkdir -p "$APP_DIR"
@@ -968,9 +964,14 @@ cmd_publish_apk() {
     200) ;;
     401) die "GitHub не принял GITHUB_TOKEN (истёк или отозван?)" ;;
     404)
-      # GitHub says the same about a repository the token cannot see; the
-      # repository itself tells the two apart.
+      # GitHub says the same about a repository the token cannot see, or,
+      # without a token, about a private one; the repository itself tells
+      # them apart. The timer waits quietly for a token.
       gh_get "$gh/repos/$repo" "$TMPD/repo.json"
+      if [ "$GH_CODE" != "200" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+        [ "$quiet" = "1" ] && return 0
+        die "репозиторий $repo закрытый или его нет: для закрытого нужен токен только для чтения (инструкция, раздел 12), затем sudo GITHUB_TOKEN=… bash install-panel.sh"
+      fi
       [ "$GH_CODE" = "200" ] ||
         die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)"
       # No stable build made yet, or CI is replacing it right now: the
@@ -980,7 +981,13 @@ cmd_publish_apk() {
         die "в $repo ещё нет релиза stable: стабильную сборку выпускает GitHub Actions по тегу v… или по кнопке Run workflow с галочкой stable (инструкция, раздел 12)"
       fi
       die "в $repo нет релиза $tag" ;;
-    403) die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)" ;;
+    403)
+      # Without a token GitHub allows 60 requests an hour per address.
+      if [ -z "${GITHUB_TOKEN:-}" ]; then
+        [ "$quiet" = "1" ] && return 0
+        die "GitHub пока не отвечает на запросы без токена (лимит в час): попробуйте позже"
+      fi
+      die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)" ;;
     000) die "нет связи с $gh" ;;
     *) die "GitHub ответил $GH_CODE" ;;
   esac

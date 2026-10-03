@@ -10,8 +10,10 @@ getUpdates (serves the messages queued with POST /_mock/tg/say
 negative offset keeps only the last updates, as in Telegram) and
 sendMessage (kept; GET /_mock/tg/sent lists them).
 
-GitHub (needs "Bearer G"): GET /repos/<repo> answers for that one repository
-only (others are 404, as GitHub says for a repository the token cannot see);
+GitHub: GET /repos/<repo> answers for that one repository, a private one,
+only with "Bearer G" (others, and it without the token, are 404, as GitHub
+says for a repository one cannot see; a wrong token is 401), and for
+--public-repo also without a token;
 /repos/<repo>/releases/tags/<tag> lists the APK and SHA256SUMS.txt;
 /repos/<repo>/releases/assets/<id> with
 "Accept: application/octet-stream" redirects to http://127.0.0.2:<port>/dl/,
@@ -42,6 +44,7 @@ def main():
     ap.add_argument("--tg-token", required=True)
     ap.add_argument("--gh-token", required=True)
     ap.add_argument("--repo", default="klausms17/vpn")
+    ap.add_argument("--public-repo", default="klausms17/open")
     ap.add_argument("--tag", required=True)
     ap.add_argument("--bad-tag", required=True)
     ap.add_argument("--temp-tag", required=True)
@@ -152,12 +155,17 @@ def main():
                     return self.reply(400, b"Only one auth mechanism allowed", "text/plain")
                 aid = int(path[len("/dl/"):])
                 return self.reply(200, assets[aid][1], "application/octet-stream")
-            if self.headers.get("Authorization") != "Bearer " + args.gh_token:
+            auth = self.headers.get("Authorization")
+            if auth is not None and auth != "Bearer " + args.gh_token:
                 return self.reply(401, {"message": "Bad credentials"})
-            base = "http://127.0.0.1:%d/repos/%s" % (args.port, args.repo)
-            if path == "/repos/" + args.repo:
-                return self.reply(200, {"full_name": args.repo, "private": True})
-            prefix = "/repos/%s/releases/" % args.repo
+            repo = next((r for r in (args.repo, args.public_repo)
+                         if path == "/repos/" + r or path.startswith("/repos/%s/" % r)), None)
+            if repo is None or (repo == args.repo and auth is None):
+                return self.reply(404, {"message": "Not Found"})
+            base = "http://127.0.0.1:%d/repos/%s" % (args.port, repo)
+            if path == "/repos/" + repo:
+                return self.reply(200, {"full_name": repo, "private": repo == args.repo})
+            prefix = "/repos/%s/releases/" % repo
             if not path.startswith(prefix):
                 return self.reply(404, {"message": "Not Found"})
             rest = path[len(prefix):]

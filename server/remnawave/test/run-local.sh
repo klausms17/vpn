@@ -20,7 +20,8 @@
 #   publish-apk       against a mock GitHub API with a fake "stable"
 #                     release (the default; a panel that saved the old
 #                     default, the work branch's test builds, moves to it
-#                     once, a branch chosen on purpose stays)
+#                     once, a branch chosen on purpose stays); an open
+#                     repository needs no token, a closed one does
 #
 # and then
 #   (a) the app's User-Agent gets a base64 list with a vless REALITY link
@@ -487,9 +488,6 @@ page_apk_buttons() { # -> the Kirov VPN block's download buttons in the panel's 
   api "/api/subscription-page-configs/$u" > "$WORK/page-config.json"
   jq -c '[.response.config.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external") | {link, text: .text.ru}]' "$WORK/page-config.json"
 }
-if kp publish-apk > "$WORK/publish-0.log" 2>&1; then fail "publish-apk without GITHUB_TOKEN went through"; fi
-tail -n 1 "$WORK/publish-0.log"
-grep -q "нет GITHUB_TOKEN" "$WORK/publish-0.log" || fail "wrong refusal without a token"
 # The owner adds the token later (and drops APK_URL: the app comes from here
 # now) with the new install-panel.sh, on a panel whose settings were saved by
 # an older one: its release is the old default, the work branch's test builds.
@@ -512,6 +510,22 @@ if KLAUS_PANEL_CONF="$WORK/other-repo.env" no_proxy='*' NO_PROXY='*' bash "$RWS/
 cat "$WORK/publish-norepo.log"
 grep -q "нет доступа" "$WORK/publish-norepo.log" || fail "wrong message for a repository without access"
 rm -f "$WORK/other-repo.env"
+# Without a token an open repository is read as it is (its temporary-key
+# build refused as any); a closed one asks for the token, quietly for the
+# timer.
+sed -e '/^GITHUB_TOKEN=/d' -e 's#^GITHUB_REPO=.*#GITHUB_REPO=klausms17/open#' "$CONF" > "$WORK/open-repo.env"
+if KLAUS_PANEL_CONF="$WORK/open-repo.env" no_proxy='*' NO_PROXY='*' bash "$RWS/klaus-panel" publish-apk --tag klaus-temp-key \
+  > "$WORK/publish-open.log" 2>&1; then fail "a temporary-key build of an open repository went through"; fi
+cat "$WORK/publish-open.log"
+grep -q "временным ключом" "$WORK/publish-open.log" || fail "an open repository was not read without a token"
+sed -e '/^GITHUB_TOKEN=/d' "$CONF" > "$WORK/closed-repo.env"
+KLAUS_PANEL_CONF="$WORK/closed-repo.env" no_proxy='*' NO_PROXY='*' bash "$RWS/klaus-panel" publish-apk --quiet ||
+  fail "the timer's run without a token failed on a closed repository"
+if KLAUS_PANEL_CONF="$WORK/closed-repo.env" no_proxy='*' NO_PROXY='*' bash "$RWS/klaus-panel" publish-apk \
+  > "$WORK/publish-closed.log" 2>&1; then fail "a closed repository was read without a token"; fi
+cat "$WORK/publish-closed.log"
+grep -q "закрытый" "$WORK/publish-closed.log" || fail "wrong message for a closed repository without a token"
+rm -f "$WORK/open-repo.env" "$WORK/closed-repo.env"
 if compgen -G "$WORK/opt/app/*" >/dev/null; then fail "something was published from a missing release"; fi
 echo "download buttons without APK_URL, nothing published: $(page_apk_buttons)"
 [ "$(page_apk_buttons)" = "[]" ] || fail "download button without an APK"
@@ -601,7 +615,7 @@ install_tip || fail "no install tip for Samsung and Huawei next to the download 
 # build it finds on /app/.
 jq -e '.apkUrl == ""' <<<"$(page_config "$SUB_DOMAIN")" >/dev/null || fail "APK_URL left on Kirov VPN's page"
 [ "$(sub_code app/version.json)" = "200" ] || fail "the page finds no published app"
-pass "old default moved to the $RELEASE release; a missing release is quiet for the timer, an unseen repository is not; wrong checksum and temporary key refused; the page entry, remark and build of the former name taken over; replaced builds kept 13 h, then a redirect to the current one (also from the former name); KirovVPN.apk, KirovVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»; the Samsung and Huawei install tip with and without it"
+pass "old default moved to the $RELEASE release; a missing release is quiet for the timer, an unseen repository is not; an open repository read without a token, a closed one asks for it; wrong checksum and temporary key refused; the page entry, remark and build of the former name taken over; replaced builds kept 13 h, then a redirect to the current one (also from the former name); KirovVPN.apk, KirovVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»; the Samsung and Huawei install tip with and without it"
 
 step "(c) the device is recorded without the friend's IP (the limit itself is off); no history, no page log"
 USER_ID="$(api "/api/users/by-username/friend_1" | jq -r '.response.id')"

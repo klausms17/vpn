@@ -162,7 +162,7 @@
   .seg {
     position: relative;
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, 1fr);
     padding: 4px;
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.42);
@@ -175,13 +175,14 @@
     top: 4px;
     bottom: 4px;
     left: 4px;
-    width: calc(50% - 4px);
+    width: calc((100% - 8px) / 3);
     border-radius: 999px;
     background: linear-gradient(180deg, #FFFFFF, rgba(255, 255, 255, 0.85));
     box-shadow: 0 4px 12px rgba(22, 44, 96, 0.16), inset 0 1px 0 #FFFFFF;
     transition: transform 0.4s cubic-bezier(0.3, 1.35, 0.5, 1);
   }
   .seg[data-active="iphone"] .thumb { transform: translateX(100%); }
+  .seg[data-active="windows"] .thumb { transform: translateX(200%); }
   .seg button {
     position: relative;
     z-index: 1;
@@ -432,10 +433,11 @@
     <p class="lede">Ссылка на эту страницу работает как ключ. Не пересылайте её никому.</p>
   </section>
 
-  <div class="seg" id="seg" role="tablist" aria-label="Ваш телефон" data-active="android">
+  <div class="seg" id="seg" role="tablist" aria-label="Ваше устройство" data-active="android">
     <span class="thumb" aria-hidden="true"></span>
     <button type="button" role="tab" id="tab-android" aria-controls="panel-android" aria-selected="true">Android</button>
     <button type="button" role="tab" id="tab-iphone" aria-controls="panel-iphone" aria-selected="false" tabindex="-1">iPhone</button>
+    <button type="button" role="tab" id="tab-windows" aria-controls="panel-windows" aria-selected="false" tabindex="-1">Windows</button>
   </div>
 
   <section class="sheet" id="panel-android" role="tabpanel" aria-labelledby="tab-android">
@@ -496,6 +498,16 @@
     <h2>Kirov VPN для iPhone</h2>
     <p>Приложение для iPhone готовится. Когда оно выйдет, здесь появится кнопка установки, а ваша ссылка останется той же.</p>
     <p class="note">Пока его нет, спросите у того, кто дал вам ссылку, как подключиться.</p>
+  </section>
+
+  <section class="sheet soon" id="panel-windows" role="tabpanel" aria-labelledby="tab-windows" hidden>
+    <span class="soon-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#0A74FF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="11.5" rx="2"/><path d="M2 19.5h20"/></svg>
+    </span>
+    <span class="badge">Скоро</span>
+    <h2>Kirov VPN для Windows</h2>
+    <p>Программа для компьютера уже проверяется. Когда она выйдет, здесь появится кнопка «Скачать», а ваша ссылка останется той же.</p>
+    <p class="note">Пока её нет, спросите у того, кто дал вам ссылку, как подключиться.</p>
   </section>
 
   <footer class="foot">
@@ -574,14 +586,13 @@
     });
 
     var seg = document.getElementById("seg");
-    var tabs = {
-      android: document.getElementById("tab-android"),
-      iphone: document.getElementById("tab-iphone")
-    };
-    var panels = {
-      android: document.getElementById("panel-android"),
-      iphone: document.getElementById("panel-iphone")
-    };
+    var order = ["android", "iphone", "windows"];
+    var tabs = {};
+    var panels = {};
+    order.forEach(function (k) {
+      tabs[k] = document.getElementById("tab-" + k);
+      panels[k] = document.getElementById("panel-" + k);
+    });
     function select(which, focus) {
       seg.setAttribute("data-active", which);
       Object.keys(tabs).forEach(function (k) {
@@ -592,18 +603,20 @@
       });
       if (focus) tabs[which].focus();
     }
-    tabs.android.addEventListener("click", function () { select("android"); });
-    tabs.iphone.addEventListener("click", function () { select("iphone"); });
+    order.forEach(function (k) {
+      tabs[k].addEventListener("click", function () { select(k); });
+    });
     seg.addEventListener("keydown", function (e) {
       if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-        select(seg.getAttribute("data-active") === "android" ? "iphone" : "android", true);
+        var i = order.indexOf(seg.getAttribute("data-active")) + (e.key === "ArrowRight" ? 1 : -1);
+        select(order[(i + order.length) % order.length], true);
         e.preventDefault();
       }
     });
     // iPadOS also says Macintosh; a touch screen tells them apart.
-    var ios = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
-      (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-    select(ios ? "iphone" : "android");
+    var ua = navigator.userAgent;
+    var ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+    select(ios ? "iphone" : /Windows NT/.test(ua) ? "windows" : "android");
   })();
 </script>
 </body>
