@@ -78,13 +78,14 @@ and give step-by-step instructions for anything he must do himself.
   - `install-relay.sh`: a Russian relay for mobile "whitelist" mode.
   - `remnawave/`: the panel for friends. `install-panel.sh` and
     `install-node.sh` install it; `klaus-panel` is the owner's CLI (friends,
-    nodes, publish-apk, telegram-setup; publish-apk needs `GITHUB_TOKEN`
-    only for a private repository); `klaus-monitor.py` turns block
+    nodes, publish-apk and publish-windows, telegram-setup; publishing
+    needs `GITHUB_TOKEN` only for a private repository); `klaus-monitor.py` turns block
     reports from the app into Telegram alerts; `klaus-page.html` is the
     light iOS-style page a friend's browser gets for the link (Caddy serves
     it for `Accept: text/html`, apps still get their list from Remnawave;
-    tabs Android, iPhone and Windows, the last two «Скоро», the device's
-    own opens). `klaus-panel write-page` puts it in place with the APK and
+    tabs Android, iPhone and Windows, the device's own opens; iPhone says
+    «Скоро», Windows too until `publish-windows` has put the installer on
+    `/app/windows/`). `klaus-panel write-page` puts it in place with the APK and
     support links, and a timer runs `klaus-panel update-page` every 15
     minutes: the page in `main` (`PAGE_BRANCH`) reaches friends with
     nobody on the server, so a page change is live once it is in `main`.
@@ -290,9 +291,11 @@ and give step-by-step instructions for anything he must do himself.
    on the owner's PC, is built with what the owner asked for after his
    first try (servers with checks, settings, journal, the restart hold);
    the owner tries it (the checks are in the plan's section 10). Phase 2a
-   (subscriptions, `klausvpn://`, the desktop window) is built; next: the
-   panel's `publish-windows` with a download on the page's Windows tab
-   (step 5), then phase 2b, the failover logic. In brief:
+   (subscriptions, `klausvpn://`, the desktop window) is built, with the
+   panel's `publish-windows` and the page's Windows tab; next: the owner
+   tries the new build, then a `windows-stable` build for friends (only
+   when he says so: Actions → Windows → Run workflow with «stable»), then
+   phase 2b, the failover logic. In brief:
    - Go only. An elevated service (LocalSystem) holds libxray and the
      Android logic, ported to `libxray/client/` with its JVM tests. A
      per-user tray icon and window (Wails v3, a pinned beta, on WebView2)
@@ -332,16 +335,18 @@ and give step-by-step instructions for anything he must do himself.
      stops the Xray of `install.sh`.
    - `klaus-panel telegram-setup`, a backup, and deleting the test user
      `test` (its link was posted in a chat).
-   - The panel publishes only `KirovVPN-*.apk` from the `stable` release,
-     so it needs a stable build first (no token while the repository is
-     public). The owner updates the panel with `cd ~/vpn && git pull &&
+   - The panel publishes only `KirovVPN-*.apk` from the `stable` release
+     and the Windows installer from `windows-stable`, so each needs a
+     stable build first (no token while the repository is public). The owner updates the panel with `cd ~/vpn && git pull &&
      sudo bash server/remnawave/install-panel.sh`.
    - On 3 Oct the owner was asked to run once on the panel server
      `cd ~/vpn && git checkout main && git pull && sudo bash
      server/remnawave/install-panel.sh`: it moves the checkout to `main`
      and adds the page timer, the tokenless `publish-apk` and the Windows
      tab. From then on a page change merged into `main` reaches friends by
-     itself. He has not confirmed running it yet.
+     itself. He ran it the same day («готово, панель работает»). Changes
+     to the panel itself, such as `publish-windows`, still need that
+     command once.
    - The Beget VPS is not needed: a Russian exit bypasses nothing, and a
      panel there would put friends' data under Russian requests and its
      links to the nodes behind TSPU. Later it might be a whitelist relay.

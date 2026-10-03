@@ -60,6 +60,8 @@ VPN-серверы:
                                RELEASE_TAG, по умолчанию стабильные — релиз stable; для
                                закрытого репозитория нужен GITHUB_TOKEN; раз в час это
                                делается само)
+  publish-windows [--tag РЕЛИЗ]  выложить новую программу для Windows (из релиза
+                               windows-stable; раз в час это делается само)
   update-page                  взять страницу для знакомых из GitHub (ветка PAGE_BRANCH,
                                по умолчанию main; раз в 15 минут это делается само)
 
@@ -742,6 +744,7 @@ cmd_hwid_limit() {
   missing="$(jq -r --slurpfile dev "$TMPD/devices.json" '($dev[0] | map(.userId)) as $ids
     | [.[] | select(.status == "ACTIVE") | select(.id as $i | $ids | index($i) | not) | .username] | join(", ")' "$TMPD/users.json")"
   echo "Лимит устройств на человека: $n (кроме тех, кому задан свой через --devices)."
+  echo "Телефон и компьютер с Kirov VPN для Windows — два устройства."
   echo "Включайте, только когда у всех стоит версия Kirov VPN, которая сообщает панели"
   echo "устройство, и сборки подписаны постоянным ключом (раздел «Подпись приложения»)."
   if [ -n "$missing" ]; then
@@ -780,6 +783,15 @@ cmd_backup() {
     if [ -f "$APP_DIR/KirovVPN.apk" ]; then files+=("$APP_DIR/KirovVPN.apk"); fi
     mkdir -p "$tmp/app"
     cp -a "${files[@]}" "$tmp/app/"
+  fi
+  # The Windows installer the same way, in app/windows.
+  if [ -f "$APP_DIR/windows/version.json" ]; then
+    local exe win=("$APP_DIR/windows/version.json")
+    exe="$(jq -r '.file // ""' "$APP_DIR/windows/version.json")"
+    if [[ "$exe" =~ ^KirovVPN-Setup-[0-9A-Za-z._-]+\.exe$ ]] && [ -f "$APP_DIR/windows/$exe" ]; then win+=("$APP_DIR/windows/$exe"); fi
+    if [ -f "$APP_DIR/windows/KirovVPN-Setup.exe" ]; then win+=("$APP_DIR/windows/KirovVPN-Setup.exe"); fi
+    mkdir -p "$tmp/app/windows"
+    cp -a "${win[@]}" "$tmp/app/windows/"
   fi
   if [ -n "${ADMIN_FILE:-}" ] && [ -f "$ADMIN_FILE" ]; then cp -p "$ADMIN_FILE" "$tmp/admin.txt"; fi
   if grep -qx caddy <<<"$(docker ps --format '{{.Names}}')"; then
@@ -942,6 +954,44 @@ page_button() { # the page's download button; if the panel cannot take it
   [ "$rc" = "0" ] || warn "кнопку «Скачать приложение» на странице подписки поставить не удалось, попробую при следующей проверке"
 }
 
+# Release TAG of the repository into $TMPD/release.json; false when the
+# timer (quiet) should just look again later: no such release yet, or
+# GitHub's hourly limit without a token. MISSING tells the owner how CI
+# makes release DEFAULT. Uses the caller's repo, gh and quiet.
+release_json() { # TAG DEFAULT MISSING
+  local tag="$1"
+  gh_get "$gh/repos/$repo/releases/tags/$tag" "$TMPD/release.json"
+  case "$GH_CODE" in
+    200) return 0 ;;
+    401) die "GitHub не принял GITHUB_TOKEN (истёк или отозван?)" ;;
+    404)
+      # GitHub says the same about a repository the token cannot see, or,
+      # without a token, about a private one; the repository itself tells
+      # them apart. The timer waits quietly for a token.
+      gh_get "$gh/repos/$repo" "$TMPD/repo.json"
+      if [ "$GH_CODE" != "200" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+        [ "$quiet" = "1" ] && return 1
+        die "репозиторий $repo закрытый или его нет: для закрытого нужен токен только для чтения (инструкция, раздел 12), затем sudo GITHUB_TOKEN=… bash install-panel.sh"
+      fi
+      [ "$GH_CODE" = "200" ] ||
+        die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)"
+      # No stable build made yet, or CI is replacing it right now: the
+      # timer looks again in an hour.
+      [ "$quiet" = "1" ] && return 1
+      [ "$tag" != "$2" ] || die "$3"
+      die "в $repo нет релиза $tag" ;;
+    403 | 429)
+      # Without a token GitHub allows 60 requests an hour per address.
+      if [ -z "${GITHUB_TOKEN:-}" ]; then
+        [ "$quiet" = "1" ] && return 1
+        die "GitHub пока не отвечает на запросы без токена (лимит в час): попробуйте позже"
+      fi
+      die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)" ;;
+    000) die "нет связи с $gh" ;;
+    *) die "GitHub ответил $GH_CODE" ;;
+  esac
+}
+
 cmd_publish_apk() {
   local tag="${RELEASE_TAG:-stable}" repo="${GITHUB_REPO:-klausms17/vpn}"
   local gh="${GITHUB_API:-https://api.github.com}" quiet=0
@@ -961,38 +1011,8 @@ cmd_publish_apk() {
   if command -v flock >/dev/null; then flock -n 9 || die "публикация уже идёт"; fi
   tmpdir
 
-  gh_get "$gh/repos/$repo/releases/tags/$tag" "$TMPD/release.json"
-  case "$GH_CODE" in
-    200) ;;
-    401) die "GitHub не принял GITHUB_TOKEN (истёк или отозван?)" ;;
-    404)
-      # GitHub says the same about a repository the token cannot see, or,
-      # without a token, about a private one; the repository itself tells
-      # them apart. The timer waits quietly for a token.
-      gh_get "$gh/repos/$repo" "$TMPD/repo.json"
-      if [ "$GH_CODE" != "200" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
-        [ "$quiet" = "1" ] && return 0
-        die "репозиторий $repo закрытый или его нет: для закрытого нужен токен только для чтения (инструкция, раздел 12), затем sudo GITHUB_TOKEN=… bash install-panel.sh"
-      fi
-      [ "$GH_CODE" = "200" ] ||
-        die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)"
-      # No stable build made yet, or CI is replacing it right now: the
-      # timer looks again in an hour.
-      [ "$quiet" = "1" ] && return 0
-      if [ "$tag" = "stable" ]; then
-        die "в $repo ещё нет релиза stable: стабильную сборку выпускает GitHub Actions по тегу v… или по кнопке Run workflow с галочкой stable (инструкция, раздел 12)"
-      fi
-      die "в $repo нет релиза $tag" ;;
-    403 | 429)
-      # Without a token GitHub allows 60 requests an hour per address.
-      if [ -z "${GITHUB_TOKEN:-}" ]; then
-        [ "$quiet" = "1" ] && return 0
-        die "GitHub пока не отвечает на запросы без токена (лимит в час): попробуйте позже"
-      fi
-      die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)" ;;
-    000) die "нет связи с $gh" ;;
-    *) die "GitHub ответил $GH_CODE" ;;
-  esac
+  release_json "$tag" stable "в $repo ещё нет релиза stable: стабильную сборку выпускает GitHub Actions по тегу v… или по кнопке Run workflow с галочкой stable (инструкция, раздел 12)" ||
+    return 0
   # CI marks builds signed with a throwaway key (no signing key in its
   # secrets): every one has another signature, so Android refuses to put
   # it over the installed app. Friends are not offered such builds.
@@ -1067,6 +1087,98 @@ cmd_publish_apk() {
   find "$APP_DIR" -maxdepth 1 -type f \( -name 'KirovVPN-*.apk' ! -name "$apk" -o -name 'KlausVPN*.apk' \) -mmin +780 -delete
   page_button
   note "Опубликована версия $ver: https://$SUB_DOMAIN/app/KirovVPN.apk (приложения знакомых предложат обновиться)"
+}
+
+# The Windows installer goes to https://SUB_DOMAIN/app/windows/ the same
+# way: KirovVPN-Setup-<version>.exe, KirovVPN-Setup.exe and version.json,
+# the manifest CI makes (docs/windows/PLAN.md, section 7.2), copied as it
+# is. The friends' page offers the download once version.json is there.
+# From WINDOWS_RELEASE_TAG, "windows-stable" by default. Unsigned builds
+# are normal on Windows, so there is no gate as for the APK's temporary key.
+cmd_publish_windows() {
+  local tag="${WINDOWS_RELEASE_TAG:-windows-stable}" repo="${GITHUB_REPO:-klausms17/vpn}"
+  local gh="${GITHUB_API:-https://api.github.com}" quiet=0 dir="$APP_DIR/windows"
+  local exe exe_url sums_url manifest_url ver code sha size cur_code=0 cur_file="" got staging
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tag) tag="${2:-}"; shift 2 ;;
+      --quiet) quiet=1; shift ;;
+      *) die "непонятный параметр: $1" ;;
+    esac
+  done
+  [[ "$tag" =~ ^[A-Za-z0-9._/-]+$ ]] || die "странное имя релиза: $tag"
+  note() { if [ "$quiet" != "1" ]; then say "$@"; fi; }
+  mkdir -p "$dir"
+  exec 9>"$RW_DIR/.publish-windows.lock"
+  if command -v flock >/dev/null; then flock -n 9 || die "публикация уже идёт"; fi
+  tmpdir
+
+  release_json "$tag" windows-stable "в $repo ещё нет релиза windows-stable: стабильную сборку для Windows выпускает GitHub Actions (Windows) по тегу v… или по кнопке Run workflow с галочкой stable" ||
+    return 0
+  exe="$(jq -r 'first(.assets[]? | select(.name | test("^KirovVPN-Setup-[0-9A-Za-z._-]+\\.exe$")) | .name) // empty' "$TMPD/release.json")"
+  exe_url="$(jq -r --arg n "$exe" 'first(.assets[]? | select(.name == $n) | .url) // empty' "$TMPD/release.json")"
+  sums_url="$(jq -r 'first(.assets[]? | select(.name == "SHA256SUMS.txt") | .url) // empty' "$TMPD/release.json")"
+  manifest_url="$(jq -r 'first(.assets[]? | select(.name == "version.json") | .url) // empty' "$TMPD/release.json")"
+  { [ -n "$exe" ] && [ -n "$exe_url" ]; } || die "в релизе $tag нет файла KirovVPN-Setup-….exe"
+  [ -n "$sums_url" ] || die "в релизе $tag нет SHA256SUMS.txt: без контрольной суммы файл не публикуется"
+  [ -n "$manifest_url" ] || die "в релизе $tag нет version.json"
+  ver="${exe#KirovVPN-Setup-}"
+  ver="${ver%.exe}"
+  [[ "$ver" =~ ([0-9]+)$ ]] || die "из имени $exe не понять номер версии"
+  code=$((10#${BASH_REMATCH[1]}))
+
+  gh_get "$sums_url" "$TMPD/sums" application/octet-stream
+  [ "$GH_CODE" = "200" ] || die "не удалось скачать SHA256SUMS.txt (ответ $GH_CODE)"
+  sha="$(awk -v f="$exe" '($2 == f || $2 == "*" f) && $1 ~ /^[0-9A-Fa-f]+$/ && length($1) == 64 { print tolower($1); exit }' "$TMPD/sums")"
+  [ -n "$sha" ] || die "в SHA256SUMS.txt нет контрольной суммы $exe"
+  gh_get "$manifest_url" "$TMPD/version.json" application/octet-stream
+  [ "$GH_CODE" = "200" ] || die "не удалось скачать version.json (ответ $GH_CODE)"
+  # The manifest must name this very file: the app will go by it.
+  size="$(jq -r --arg f "$exe" --arg s "$sha" --argjson c "$code" \
+    'select(.file == $f and (.sha256 | ascii_downcase) == $s and .versionCode == $c) | .size' "$TMPD/version.json" 2>/dev/null)" || size=""
+  [[ "$size" =~ ^[0-9]+$ ]] || die "version.json в релизе $tag не совпадает с $exe и SHA256SUMS.txt. Ничего не опубликовано"
+
+  if [ -f "$dir/version.json" ]; then
+    cur_code="$(jq -r '.versionCode // 0' "$dir/version.json" 2>/dev/null)" || cur_code=0
+    cur_file="$(jq -r '.file // ""' "$dir/version.json" 2>/dev/null)" || cur_file=""
+    [[ "$cur_code" =~ ^[0-9]+$ ]] || cur_code=0
+  fi
+  if cmp -s "$TMPD/version.json" "$dir/version.json" && [ -f "$dir/$exe" ] && [ -f "$dir/KirovVPN-Setup.exe" ]; then
+    note "Версия $ver для Windows уже опубликована: https://$SUB_DOMAIN/app/windows/KirovVPN-Setup.exe"
+    return 0
+  fi
+  if [ "$cur_code" -gt "$code" ]; then
+    note "На сервере уже версия для Windows новее ($cur_file), чем $exe в релизе $tag: оставляю её"
+    return 0
+  fi
+
+  note "Скачиваю $exe из релиза $tag"
+  staging="$RW_DIR/.windows-staging"
+  rm -rf "$staging"
+  mkdir -p "$staging"
+  gh_get "$exe_url" "$staging/$exe" application/octet-stream 900
+  if [ "$GH_CODE" != "200" ]; then rm -rf "$staging"; die "не удалось скачать $exe (ответ $GH_CODE)"; fi
+  got="$(sha256sum "$staging/$exe" | cut -d' ' -f1)"
+  if [ "$got" != "$sha" ] || [ "$(stat -c %s "$staging/$exe")" != "$size" ]; then
+    rm -rf "$staging"
+    die "контрольная сумма $exe не совпала с SHA256SUMS.txt: файл повреждён или подменён. Ничего не опубликовано"
+  fi
+  # The versioned file first, then the fixed name, then version.json: it
+  # never names a file that is not there yet.
+  chmod 644 "$staging/$exe"
+  mv -f "$staging/$exe" "$dir/$exe"
+  ln -f "$dir/$exe" "$staging/KirovVPN-Setup.exe"
+  mv -f "$staging/KirovVPN-Setup.exe" "$dir/KirovVPN-Setup.exe"
+  install -m 644 "$TMPD/version.json" "$staging/version.json"
+  mv -f "$staging/version.json" "$dir/version.json"
+  rm -rf "$staging"
+  # A replaced installer stays 13 hours, as an APK does, then goes; its
+  # link leads to the current one then.
+  if [[ "$cur_file" =~ ^KirovVPN-Setup-[0-9A-Za-z._-]+\.exe$ ]] && [ "$cur_file" != "$exe" ] && [ -f "$dir/$cur_file" ]; then
+    touch "$dir/$cur_file"
+  fi
+  find "$dir" -maxdepth 1 -type f -name 'KirovVPN-Setup-*.exe' ! -name "$exe" -mmin +780 -delete
+  note "Опубликована версия $ver для Windows: https://$SUB_DOMAIN/app/windows/KirovVPN-Setup.exe (на странице подписки появилась кнопка «Скачать для Windows»)"
 }
 
 # ---------------------------------------------------------------- page
@@ -1176,6 +1288,7 @@ case "$cmd" in
   telegram-setup) cmd_telegram_setup "$@" ;;
   telegram-test) cmd_telegram_test ;;
   publish-apk) cmd_publish_apk "$@" ;;
+  publish-windows) cmd_publish_windows "$@" ;;
   update-page) cmd_update_page "$@" ;;
   write-page) cmd_write_page "$@" ;;
   *) usage >&2; exit 1 ;;

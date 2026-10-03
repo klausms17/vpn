@@ -3,6 +3,7 @@
 
   mock-apis.py --port 18090 --tg-token T --gh-token G --repo klausms17/vpn \
       --tag TAG --bad-tag TAG2 --temp-tag TAG3 --apk KirovVPN-1.0.99.apk \
+      --win-tag TAG4 --win-bad-tag TAG5 --exe KirovVPN-Setup-1.0.42.exe \
       --page main=page.html [--page BRANCH=FILE ...]
 
 Telegram (/bot<token>/<method>, GET or POST, JSON or form): getMe,
@@ -15,7 +16,9 @@ GitHub: GET /repos/<repo> answers for that one repository, a private one,
 only with "Bearer G" (others, and it without the token, are 404, as GitHub
 says for a repository one cannot see; a wrong token is 401), and for
 --public-repo also without a token;
-/repos/<repo>/releases/tags/<tag> lists the APK and SHA256SUMS.txt;
+/repos/<repo>/releases/tags/<tag> lists the APK and SHA256SUMS.txt, and
+<win-tag> the Windows installer, its SHA256SUMS.txt and the version.json
+manifest CI makes (in <win-bad-tag> one that names another checksum);
 /repos/<repo>/releases/assets/<id> with
 "Accept: application/octet-stream" redirects to http://127.0.0.2:<port>/dl/,
 which, like GitHub's file storage, refuses requests that still carry the
@@ -55,6 +58,9 @@ def main():
     ap.add_argument("--bad-tag", required=True)
     ap.add_argument("--temp-tag", required=True)
     ap.add_argument("--apk", required=True)
+    ap.add_argument("--win-tag", required=True)
+    ap.add_argument("--win-bad-tag", required=True)
+    ap.add_argument("--exe", required=True)
     ap.add_argument("--page", action="append", default=[], help="BRANCH=FILE: the page in that branch")
     args = ap.parse_args()
 
@@ -76,10 +82,29 @@ def main():
         3: (name, apk),
         4: ("SHA256SUMS.txt", ("%s  %s\n" % (bad_sum, name)).encode()),
     }
-    releases = {args.tag: [1, 2], args.bad_tag: [3, 4], args.temp_tag: [1, 2]}
+    with open(args.exe, "rb") as f:
+        exe = f.read()
+    exe_name = os.path.basename(args.exe)
+    exe_version = exe_name[len("KirovVPN-Setup-"):-len(".exe")]
+
+    def manifest(sha):
+        return (json.dumps({"versionCode": int(exe_version.split(".")[-1]), "versionName": exe_version,
+                            "file": exe_name, "size": len(exe), "sha256": sha, "minBuild": 17763}) + "\n").encode()
+
+    exe_sum = hashlib.sha256(exe).hexdigest()
+    assets.update({
+        5: (exe_name, exe),
+        6: ("SHA256SUMS.txt", ("%s *%s\n" % (exe_sum, exe_name)).encode()),
+        7: ("version.json", manifest(exe_sum)),
+        8: ("version.json", manifest(hashlib.sha256(exe + b"tampered").hexdigest())),
+    })
+    releases = {args.tag: [1, 2], args.bad_tag: [3, 4], args.temp_tag: [1, 2],
+                args.win_tag: [5, 6, 7], args.win_bad_tag: [5, 6, 8]}
     version = name[len("KirovVPN-"):-len(".apk")]
     titles = {args.tag: "Kirov VPN %s (%s)" % (version, args.tag), args.bad_tag: "Kirov VPN %s (main)" % version,
-              args.temp_tag: "Kirov VPN %s (main) — временная подпись" % version}
+              args.temp_tag: "Kirov VPN %s (main) — временная подпись" % version,
+              args.win_tag: "Kirov VPN для Windows %s (stable)" % exe_version,
+              args.win_bad_tag: "Kirov VPN для Windows %s (main)" % exe_version}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *a):

@@ -22,6 +22,9 @@
 #                     default, the work branch's test builds, moves to it
 #                     once, a branch chosen on purpose stays); an open
 #                     repository needs no token, a closed one does
+#   publish-windows   the same for a fake "windows-stable" release with
+#                     the installer, its checksum and CI's manifest (one
+#                     that does not match is refused)
 #   update-page       the friends' page from the mock's "main" branch (the
 #                     default; PAGE_BRANCH= keeps the page of the folder),
 #                     a broken or cut one refused, a missing one quiet for
@@ -47,14 +50,16 @@
 #   error log (the profile's policy and log settings), the APK is published
 #   with a verified checksum (a wrong one is refused, a missing release is
 #   quiet for the timer) on https://SUB/app/ with version.json and the
-#   page's download button (and its Samsung and Huawei tip), the page
+#   page's download button (and its Samsung and Huawei tip), the Windows
+#   installer on https://SUB/app/windows/ as a download with the same
+#   rules and the page's Windows steps, a PC as one more device, the page
 #   entry, remark and published build of the app's former name taken
 #   over by setup, block reports (unknown friend refused, one
 #   friend twice is no alert, two friends in the mobile whitelist regime
 #   are one note that never says "disable", two friends are exactly one
 #   Russian alert, then quiet; rate limit; no IPs or ids in the logs),
 #   and a backup restored into a fresh panel serves the same link, the app
-#   and the monitor, also after failed attempts (which leave no
+#   (both builds) and the monitor, also after failed attempts (which leave no
 #   half-restored database, and a run without RESTORE refuses to build an
 #   empty panel over them).
 #
@@ -85,6 +90,7 @@ WEB_IP=11.11.11.11
 WEB="$WEB_IP:18080"
 TOKEN="klaus-e2e-$RANDOM$RANDOM"
 HWID=5f2a9c1e7b3d4e6f8a0b1c2d3e4f5a6b
+HWID_PC=c0ffee11c0ffee22c0ffee33c0ffee44 # the same friend's PC
 UA_APP='KlausVPN/1.0.99 (Android)' # the app's User-Agent keeps its former name on purpose
 UA_BROWSER='Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36'
 IMAGES="remnawave/backend:3 postgres:18.4 valkey/valkey:9-alpine remnawave/subscription-page:latest caddy:2 remnawave/node:latest python:3-alpine"
@@ -95,6 +101,7 @@ GH_TEST_TOKEN=github_pat_klaus_e2e_0123456789
 RELEASE=stable
 RELEASE_OLD=build-claude-compassionate-mayer-6jph8m # the default before "stable"
 APK_VERSION=1.0.99
+EXE_VERSION=1.0.42
 SPOOFED_IP=203.0.113.77 # a client IP that must never reach the monitor's log
 # This machine's own tokens must never reach the panel under test.
 unset GITHUB_TOKEN GH_TOKEN TELEGRAM_API_BASE PAGE_BRANCH
@@ -244,6 +251,8 @@ pass "test page answers"
 step "Mock Telegram and GitHub APIs on :$MOCK_PORT (a fake release with KirovVPN-$APK_VERSION.apk)"
 APK="$WORK/KirovVPN-$APK_VERSION.apk"
 head -c 3000000 /dev/urandom > "$APK"
+EXE="$WORK/KirovVPN-Setup-$EXE_VERSION.exe"
+head -c 2000000 /dev/urandom > "$EXE"
 # The friends' page as the repository's branches have it: main with a mark
 # of its own, one without its settings block and one cut off.
 PAGE_MARK="klaus-e2e-page-from-main"
@@ -253,6 +262,7 @@ grep -v 'id="klaus-config"' "$RWS/klaus-page.html" > "$WORK/page-broken.html"
 head -c 6000 "$RWS/klaus-page.html" > "$WORK/page-cut.html"
 python3 "$HERE/mock-apis.py" --port "$MOCK_PORT" --tg-token "$TG_BOT_TOKEN" --gh-token "$GH_TEST_TOKEN" \
   --tag "$RELEASE" --bad-tag klaus-bad-sum --temp-tag klaus-temp-key --apk "$APK" \
+  --win-tag windows-stable --win-bad-tag klaus-win-bad --exe "$EXE" \
   --page main="$WORK/page-main.html" --page broken="$WORK/page-broken.html" --page cut="$WORK/page-cut.html" \
   > "$WORK/mock.log" 2>&1 &
 MOCK_PID=$!
@@ -633,6 +643,55 @@ jq -e '.apkUrl == ""' <<<"$(page_config "$SUB_DOMAIN")" >/dev/null || fail "APK_
 [ "$(sub_code app/version.json)" = "200" ] || fail "the page finds no published app"
 pass "old default moved to the $RELEASE release; a missing release is quiet for the timer, an unseen repository is not; an open repository read without a token, a closed one asks for it; wrong checksum and temporary key refused; the page entry, remark and build of the former name taken over; replaced builds kept 13 h, then a redirect to the current one (also from the former name); KirovVPN.apk, KirovVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»; the Samsung and Huawei install tip with and without it"
 
+step "publish-windows: the installer to https://$SUB_DOMAIN/app/windows/ (checksum and manifest verified)"
+code="$(sub_code app/windows/version.json)"
+echo "https://$SUB_DOMAIN/app/windows/version.json before publishing -> $code"
+[ "$code" = "404" ] || fail "a Windows version.json before publishing"
+kp publish-windows --tag no-such-release --quiet || fail "the timer's run failed on a Windows release that is not there yet"
+if kp publish-windows --tag klaus-win-bad > "$WORK/publish-win-bad.log" 2>&1; then fail "an installer with a wrong manifest was published"; fi
+tail -n 1 "$WORK/publish-win-bad.log"
+grep -q "не совпадает" "$WORK/publish-win-bad.log" || fail "wrong refusal of a manifest that does not match"
+if compgen -G "$WORK/opt/app/windows/*" >/dev/null || [ -e "$WORK/opt/.windows-staging" ]; then fail "the refused installer was left behind"; fi
+# The build being replaced stays 13 hours; one replaced 14 hours ago goes.
+echo old > "$WORK/opt/app/windows/KirovVPN-Setup-1.0.10.exe"
+echo recent > "$WORK/opt/app/windows/KirovVPN-Setup-1.0.11.exe"
+jq -n '{versionCode: 11, versionName: "1.0.11", file: "KirovVPN-Setup-1.0.11.exe", size: 7, sha256: "0", minBuild: 17763}' \
+  > "$WORK/opt/app/windows/version.json"
+touch -d '14 hours ago' "$WORK/opt/app/windows/KirovVPN-Setup-1.0.10.exe" "$WORK/opt/app/windows/KirovVPN-Setup-1.0.11.exe"
+kp publish-windows | tee "$WORK/publish-win-1.log"
+grep -q "Опубликована версия $EXE_VERSION для Windows" "$WORK/publish-win-1.log" || fail "publish-windows"
+ls "$WORK/opt/app/windows"
+[ ! -e "$WORK/opt/app/windows/KirovVPN-Setup-1.0.10.exe" ] || fail "an installer replaced 14 hours ago was kept"
+[ -e "$WORK/opt/app/windows/KirovVPN-Setup-1.0.11.exe" ] || fail "the installer just replaced was deleted"
+[ "$WORK/opt/app/windows/KirovVPN-Setup.exe" -ef "$WORK/opt/app/windows/KirovVPN-Setup-$EXE_VERSION.exe" ] ||
+  fail "KirovVPN-Setup.exe is not the published build"
+code="$(sub_code app/windows/version.json)"
+cat "$WORK/last.body"
+[ "$code" = "200" ] || fail "the Windows version.json not served"
+jq -e --arg v "$EXE_VERSION" --arg sha "$(sha256sum "$EXE" | cut -d' ' -f1)" \
+  '.versionCode == 42 and .versionName == $v and .file == "KirovVPN-Setup-\($v).exe" and .sha256 == $sha' \
+  "$WORK/last.body" >/dev/null || fail "the Windows version.json content"
+for f in KirovVPN-Setup.exe "KirovVPN-Setup-$EXE_VERSION.exe"; do
+  code="$(sub_code "app/windows/$f" -D "$WORK/exe.headers")"
+  echo "https://$SUB_DOMAIN/app/windows/$f -> $code, $(grep -iE '^content-(type|disposition)' "$WORK/exe.headers" | tr -d '\r' | tr '\n' ' ')"
+  [ "$code" = "200" ] || fail "$f not served"
+  cmp -s "$WORK/last.body" "$EXE" || fail "$f differs from the release"
+  grep -qi '^content-type: application/octet-stream' "$WORK/exe.headers" || fail "$f content type"
+  grep -qi '^content-disposition: attachment' "$WORK/exe.headers" || fail "$f is not a download"
+done
+code="$(sub_code app/windows/KirovVPN-Setup-1.0.10.exe -D "$WORK/gone.headers")"
+echo "https://$SUB_DOMAIN/app/windows/KirovVPN-Setup-1.0.10.exe (deleted) -> $code $(grep -i '^location:' "$WORK/gone.headers" | tr -d '\r')"
+[ "$code" = "302" ] && grep -qi '^location: /app/windows/KirovVPN-Setup.exe' "$WORK/gone.headers" ||
+  fail "no redirect from the deleted installer"
+kp publish-windows | tee "$WORK/publish-win-2.log"
+grep -q "уже опубликована" "$WORK/publish-win-2.log" || fail "the same installer downloaded again"
+# A friend's browser on Windows: the page offers the download once the
+# panel has published it.
+sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' > "$WORK/b-win.html"
+grep -qF 'fetch("/app/windows/version.json"' "$WORK/b-win.html" && grep -qF 'href="/app/windows/KirovVPN-Setup.exe"' "$WORK/b-win.html" ||
+  fail "no Windows download on the page"
+pass "a missing Windows release is quiet for the timer, a manifest that does not match is refused; KirovVPN-Setup.exe and KirovVPN-Setup-$EXE_VERSION.exe served as downloads, version.json (versionCode 42); the replaced installer kept, one replaced 14 h ago gone with a redirect to the current one; the page offers the download"
+
 step "update-page: the friends' page from the repository's main branch, with this panel's settings"
 grep -qx "PAGE_BRANCH=main" "$CONF" || fail "PAGE_BRANCH=main not saved"
 if grep -q "$PAGE_MARK" "$WORK/opt/page/index.html"; then fail "test setup: the page of the folder has the mark of main"; fi
@@ -674,9 +733,14 @@ cmp -s "$WORK/opt/page/index.html" "$WORK/page-before.html" || fail "a refused p
 pass "a page without its settings block and a cut one refused, the served one kept; a branch without the page quiet for the timer; nothing with PAGE_BRANCH empty"
 
 step "(c) the device is recorded without the friend's IP (the limit itself is off); no history, no page log"
+# The Windows app sends the same headers: a PC is one more device.
+sub_get 'KlausVPN/1.0.42 (Windows)' "$SUB" -H "X-Hwid: $HWID_PC" -H 'X-Device-Os: Windows' -H 'X-Ver-Os: 10.0.26100' \
+  -H 'X-Device-Model: Microsoft Corporation Virtual Machine' | base64 -d > "$WORK/c.pc.links" || fail "no list for the Windows app"
+grep -q "@127.0.0.1:$VPN_PORT" "$WORK/c.pc.links" || fail "no server for the Windows app"
 USER_ID="$(api "/api/users/by-username/friend_1" | jq -r '.response.id')"
 api "/api/hwid/devices/$USER_ID" | jq -c '.response.devices[] | {hwid, platform, osVersion, deviceModel, userAgent, requestIp}' | tee "$WORK/c.devices"
 grep -q "\"hwid\":\"$HWID\"" "$WORK/c.devices" || fail "device not recorded"
+jq -se --arg h "$HWID_PC" 'any(.hwid == $h and .platform == "Windows")' "$WORK/c.devices" >/dev/null || fail "the PC not recorded as Windows"
 # Caddy gives the page 127.0.0.1 instead of the friend's address.
 jq -se 'all(.requestIp == "127.0.0.1")' "$WORK/c.devices" >/dev/null || fail "the panel got the friend's IP"
 api /api/subscription-settings | jq -c '.response.hwidSettings'
@@ -686,7 +750,7 @@ srh="$(docker exec remnawave-db psql -qAt -U "$(sed -n 's/^POSTGRES_USER=//p' "$
 [ "$srh" = "0" ] || fail "the panel keeps a history of subscription downloads ($srh)"
 [ "$(docker inspect -f '{{.HostConfig.LogConfig.Type}}' remnawave-subscription-page)" = "none" ] ||
   fail "the subscription page keeps a log"
-pass "device recorded with 127.0.0.1 instead of the friend's IP; no history of subscription downloads; no log of the page"
+pass "phone and PC recorded with 127.0.0.1 instead of the friend's IP; no history of subscription downloads; no log of the page"
 
 step "(d) libxray parses the subscription and fetches a page through the node"
 retry 5 "$WORK/e2e" check -sub "$SUB" -resolve "$SUB_DOMAIN:127.0.0.1" -cacert "$WORK/caddy-root.crt" \
@@ -921,6 +985,10 @@ code="$(sub_code app/version.json)"
 { [ "$code" = "200" ] && jq -e '.versionCode == 99' "$WORK/last.body" >/dev/null; } || fail "published app not restored"
 sub_code app/KirovVPN.apk >/dev/null
 cmp -s "$WORK/last.body" "$APK" || fail "restored APK differs"
+code="$(sub_code app/windows/version.json)"
+{ [ "$code" = "200" ] && jq -e '.versionCode == 42' "$WORK/last.body" >/dev/null; } || fail "published Windows installer not restored"
+sub_code app/windows/KirovVPN-Setup.exe >/dev/null
+cmp -s "$WORK/last.body" "$EXE" || fail "restored installer differs"
 grep -qx "TELEGRAM_NOTIFY_NODES=$TG_CHAT" "$WORK/opt2/.env" || fail "Telegram settings not restored"
 monitor_up() { [ "$(sub_code klaus/health)" = "200" ]; }
 retry 20 monitor_up || fail "monitor not running after restore"
@@ -928,7 +996,7 @@ retry 20 monitor_up || fail "monitor not running after restore"
 code="$(report "$SHORT2" wifi)"
 echo "report after restore -> $code"
 [ "$code" = "200" ] || fail "restored monitor refuses a known friend"
-pass "restored panel: same link, node reconnected by itself, traffic flows; app, Telegram and monitor back"
+pass "restored panel: same link, node reconnected by itself, traffic flows; app (Android and Windows), Telegram and monitor back"
 
 step "RESTORE over the working panel is refused"
 if install_panel "$WORK/opt2" "$WORK/admin2.txt" RESTORE="$BACKUP" > "$WORK/install-restore-3.log" 2>&1; then
