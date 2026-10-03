@@ -184,7 +184,7 @@ func doFetch(ctx context.Context, tr http.RoundTripper, url, userAgent string, e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("HTTP %s", resp.Status)
+		return nil, httpError(resp.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBytes+1))
 	if err != nil {
@@ -306,7 +306,7 @@ func DownloadFile(url string, dst string, userAgent string, timeoutMs int32, pro
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("HTTP %s", resp.Status)
+		return httpError(resp.StatusCode)
 	}
 
 	tmp := dst + ".part"
@@ -351,4 +351,10 @@ func get(ctx context.Context, client *http.Client, rawURL string, userAgent stri
 		return nil, err
 	}
 	return resp, nil
+}
+
+// httpError names an HTTP status by its code and Go's text for it, never
+// the server's own reason phrase, which may be megabytes long.
+func httpError(code int) error {
+	return fmt.Errorf("HTTP %s", strings.TrimSpace(fmt.Sprintf("%d %s", code, http.StatusText(code))))
 }

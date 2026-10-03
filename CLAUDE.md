@@ -55,13 +55,17 @@ and give step-by-step instructions for anything he must do himself.
     `tunaddr_windows.go` finds or frees an adapter holding the tunnel's
     address.
   - `cmd/kirovvpn`: the tray icon and window (Wails v3, `internal/ui`; the
-    page is `internal/ui/frontend`, `origin.go` refuses calls from any
-    other page). It holds no keys.
+    page is `internal/ui/frontend`, ES modules with one per part and round
+    flags in `flags/`; `origin.go` refuses calls from any other page;
+    `deeplink.go` keeps a `klausvpn://` link until the user answers). It
+    holds no keys.
   - `installer/KirovVPN.iss` (Inno Setup), `test/smoke.ps1` (CI only),
     `cmd/kirovctl` (the smoke test's pipe client, never shipped), `tools/`
     (icons, exe resources, a test server, `othervpn` for CI).
 - `libxray/client/`: the Android logic ported to Go with its tests (model,
-  store, key import, log, tunnel rules), used by Windows and later iOS.
+  store, key import, links in text and `klausvpn://` links, subscriptions
+  with the device headers, log, tunnel rules), used by Windows and later
+  iOS.
   `libxray/internal/privileged` is the allowlist of what the Windows
   service's core may run, and `internal/redact` takes addresses and host
   names out of the logs (the core's `xray.log` too, on every platform).
@@ -74,13 +78,14 @@ and give step-by-step instructions for anything he must do himself.
   - `install-relay.sh`: a Russian relay for mobile "whitelist" mode.
   - `remnawave/`: the panel for friends. `install-panel.sh` and
     `install-node.sh` install it; `klaus-panel` is the owner's CLI (friends,
-    nodes, publish-apk, telegram-setup; publish-apk needs `GITHUB_TOKEN`
-    only for a private repository); `klaus-monitor.py` turns block
+    nodes, publish-apk and publish-windows, telegram-setup; publishing
+    needs `GITHUB_TOKEN` only for a private repository); `klaus-monitor.py` turns block
     reports from the app into Telegram alerts; `klaus-page.html` is the
     light iOS-style page a friend's browser gets for the link (Caddy serves
     it for `Accept: text/html`, apps still get their list from Remnawave;
-    tabs Android, iPhone and Windows, the last two «Скоро», the device's
-    own opens). `klaus-panel write-page` puts it in place with the APK and
+    tabs Android, iPhone and Windows, the device's own opens; iPhone says
+    «Скоро», Windows too until `publish-windows` has put the installer on
+    `/app/windows/`). `klaus-panel write-page` puts it in place with the APK and
     support links, and a timer runs `klaus-panel update-page` every 15
     minutes: the page in `main` (`PAGE_BRANCH`) reaches friends with
     nobody on the server, so a page change is live once it is in `main`.
@@ -231,6 +236,29 @@ and give step-by-step instructions for anything he must do himself.
     app could have broken his PC's network settings (internet trouble that
     day): it changes nothing that outlives the tunnel; he was given steps
     to tell the app from his ISP.
+  - On 3 Oct the owner asked for a desktop look like Happ's: the window
+    was a phone-sized column. Built with phase 2a of the plan:
+    - the window: a rail (Серверы, Добавить, Настройки, Журнал, О
+      программе), the servers in groups with round flags, search, usage
+      and the panel's notices, and the connection on the right (the orb,
+      the mode, the current server); checked in a browser with a fake
+      service at 1080×700 and 900×600;
+    - subscriptions as Android's (`libxray/client/subscription`, the
+      device id from the MachineGuid with Android's recipe), refreshed 30 s
+      after the service starts, every hour and when a window opens,
+      directly and then through the tunnel; bounded for the shared
+      service (20 subscriptions, links of 1000 characters, the panel's
+      texts of 500);
+    - `klausvpn://` registered by the installer; the window names the
+      subscription's host and asks before adding;
+    - the smoke test adds and refreshes a subscription served over HTTPS
+      and checks the device headers and the link registration;
+    - an independent review found, and the fixes cover: a `klausvpn://`
+      link inside another got past the dialog; a refresh cancelled
+      halfway, or one past 16 servers that need a pinned certificate,
+      dropped servers; a far-off `expire` from a panel stopped every
+      window; a panel's error texts were unbounded; queued refreshes
+      outlived their window; the dialog could answer for a newer link.
 - **iPhone:** phases 1–2 of `docs/ios/PLAN.md` are done. The Go core builds
   for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
   passes its checks (geo files in the extension, no bitcode). The app is
@@ -268,8 +296,12 @@ and give step-by-step instructions for anything he must do himself.
    each ending in a CI-built installer the owner tries. Phase 1, the tunnel
    on the owner's PC, is built with what the owner asked for after his
    first try (servers with checks, settings, journal, the restart hold);
-   the owner tries it (the checks are in the plan's section 10). Next:
-   phase 2, subscriptions and the Android logic. In brief:
+   the owner tries it (the checks are in the plan's section 10). Phase 2a
+   (subscriptions, `klausvpn://`, the desktop window) is built, with the
+   panel's `publish-windows` and the page's Windows tab; next: the owner
+   tries the new build, then a `windows-stable` build for friends (only
+   when he says so: Actions → Windows → Run workflow with «stable»), then
+   phase 2b, the failover logic. In brief:
    - Go only. An elevated service (LocalSystem) holds libxray and the
      Android logic, ported to `libxray/client/` with its JVM tests. A
      per-user tray icon and window (Wails v3, a pinned beta, on WebView2)
@@ -309,16 +341,18 @@ and give step-by-step instructions for anything he must do himself.
      stops the Xray of `install.sh`.
    - `klaus-panel telegram-setup`, a backup, and deleting the test user
      `test` (its link was posted in a chat).
-   - The panel publishes only `KirovVPN-*.apk` from the `stable` release,
-     so it needs a stable build first (no token while the repository is
-     public). The owner updates the panel with `cd ~/vpn && git pull &&
+   - The panel publishes only `KirovVPN-*.apk` from the `stable` release
+     and the Windows installer from `windows-stable`, so each needs a
+     stable build first (no token while the repository is public). The owner updates the panel with `cd ~/vpn && git pull &&
      sudo bash server/remnawave/install-panel.sh`.
    - On 3 Oct the owner was asked to run once on the panel server
      `cd ~/vpn && git checkout main && git pull && sudo bash
      server/remnawave/install-panel.sh`: it moves the checkout to `main`
      and adds the page timer, the tokenless `publish-apk` and the Windows
      tab. From then on a page change merged into `main` reaches friends by
-     itself. He has not confirmed running it yet.
+     itself. He ran it the same day («готово, панель работает»). Changes
+     to the panel itself, such as `publish-windows`, still need that
+     command once.
    - The Beget VPS is not needed: a Russian exit bypasses nothing, and a
      panel there would put friends' data under Russian requests and its
      links to the nodes behind TSPU. Later it might be a whitelist relay.

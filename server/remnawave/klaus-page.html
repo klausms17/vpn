@@ -466,13 +466,13 @@
         <div class="body">
           <h2>Добавьте ссылку в приложение</h2>
           <p>Нажмите кнопку: откроется Kirov VPN и предложит добавить подписку.</p>
-          <a class="btn primary" id="add" href="#">
+          <a class="btn primary" data-add href="#">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
             Добавить в Kirov VPN
           </a>
           <div class="linkrow">
-            <code id="link"></code>
-            <button type="button" class="btn small" id="copy">
+            <code data-link></code>
+            <button type="button" class="btn small" data-copy>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="3"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
               Скопировать
             </button>
@@ -500,14 +500,64 @@
     <p class="note">Пока его нет, спросите у того, кто дал вам ссылку, как подключиться.</p>
   </section>
 
-  <section class="sheet soon" id="panel-windows" role="tabpanel" aria-labelledby="tab-windows" hidden>
-    <span class="soon-icon" aria-hidden="true">
-      <svg viewBox="0 0 24 24" fill="none" stroke="#0A74FF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="11.5" rx="2"/><path d="M2 19.5h20"/></svg>
-    </span>
-    <span class="badge">Скоро</span>
-    <h2>Kirov VPN для Windows</h2>
-    <p>Программа для компьютера уже проверяется. Когда она выйдет, здесь появится кнопка «Скачать», а ваша ссылка останется той же.</p>
-    <p class="note">Пока её нет, спросите у того, кто дал вам ссылку, как подключиться.</p>
+  <section class="sheet" id="panel-windows" role="tabpanel" aria-labelledby="tab-windows" hidden>
+    <div class="soon" id="win-soon">
+      <span class="soon-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#0A74FF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="11.5" rx="2"/><path d="M2 19.5h20"/></svg>
+      </span>
+      <span class="badge">Скоро</span>
+      <h2>Kirov VPN для Windows</h2>
+      <p>Программа для компьютера уже проверяется. Когда она выйдет, здесь появится кнопка «Скачать», а ваша ссылка останется той же.</p>
+      <p class="note">Пока её нет, спросите у того, кто дал вам ссылку, как подключиться.</p>
+    </div>
+    <!-- Shown once the panel has published the program on /app/windows/. -->
+    <ol class="steps" id="win-steps" hidden>
+      <li class="step">
+        <span class="num">1</span>
+        <div class="body">
+          <h2>Установите Kirov VPN</h2>
+          <p>Скачайте программу и запустите файл. Нужна Windows 10 или 11.</p>
+          <a class="btn tint" href="/app/windows/KirovVPN-Setup.exe">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7 10l5 5 5-5"/><path d="M5 20h14"/></svg>
+            Скачать для Windows
+          </a>
+          <details class="tip">
+            <summary>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+              Windows не даёт установить?
+            </summary>
+            <p>Программа пока без цифровой подписи, поэтому Windows переспрашивает. Браузер: «Сохранить» → «Всё равно сохранить». «Система Windows защитила ваш компьютер»: «Подробнее» → «Выполнить в любом случае». «Разрешить этому приложению вносить изменения?»: «Да».</p>
+            <p>Если Windows 11 пишет, что файл заблокирован интеллектуальным управлением приложениями, напишите тому, кто дал вам ссылку.</p>
+          </details>
+        </div>
+      </li>
+      <li class="step">
+        <span class="num">2</span>
+        <div class="body">
+          <h2>Добавьте ссылку в программу</h2>
+          <p>Нажмите кнопку и разрешите браузеру открыть Kirov VPN: программа предложит добавить подписку.</p>
+          <a class="btn primary" data-add href="#">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+            Добавить в Kirov VPN
+          </a>
+          <div class="linkrow">
+            <code data-link></code>
+            <button type="button" class="btn small" data-copy>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="3"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+              Скопировать
+            </button>
+          </div>
+          <p class="note">Ничего не открылось? Скопируйте ссылку, откройте Kirov VPN и нажмите Ctrl+V.</p>
+        </div>
+      </li>
+      <li class="step">
+        <span class="num">3</span>
+        <div class="body">
+          <h2>Нажмите большую кнопку</h2>
+          <p>VPN включится. Список серверов программа обновляет сама.</p>
+        </div>
+      </li>
+    </ol>
   </section>
 
   <footer class="foot">
@@ -537,9 +587,11 @@
       toastTimer = setTimeout(function () { toastEl.hidden = true; }, 2600);
     }
 
-    var linkEl = document.getElementById("link");
-    linkEl.textContent = link.replace(/^https:\/\//, "");
-    document.getElementById("add").href = "klausvpn://add/" + link;
+    var i;
+    var linkEls = document.querySelectorAll("[data-link]");
+    for (i = 0; i < linkEls.length; i++) linkEls[i].textContent = link.replace(/^https:\/\//, "");
+    var adds = document.querySelectorAll("[data-add]");
+    for (i = 0; i < adds.length; i++) adds[i].href = "klausvpn://add/" + link;
 
     // The app: a link of the owner (APK_URL), or the build the panel
     // publishes on /app/ once there is one.
@@ -557,6 +609,16 @@
         .then(function (r) { if (r.ok) offerDownload("/app/KirovVPN.apk"); })
         .catch(function () {});
     }
+    // The Windows program, once the panel has published one.
+    if (window.fetch) {
+      fetch("/app/windows/version.json", { cache: "no-store" })
+        .then(function (r) {
+          if (!r.ok) return;
+          document.getElementById("win-soon").hidden = true;
+          document.getElementById("win-steps").hidden = false;
+        })
+        .catch(function () {});
+    }
 
     if (/^https?:\/\//.test(cfg.supportUrl || "")) {
       document.getElementById("support-link").href = cfg.supportUrl;
@@ -564,16 +626,17 @@
       document.getElementById("ask-support").hidden = true;
     }
 
-    function selectLink() {
+    function selectLink(el) {
       var range = document.createRange();
-      range.selectNodeContents(linkEl);
+      range.selectNodeContents(el);
       var sel = window.getSelection();
       sel.removeAllRanges();
       sel.addRange(range);
     }
-    document.getElementById("copy").addEventListener("click", function () {
+    function copyLink(e) {
+      var shown = e.currentTarget.parentNode.querySelector("[data-link]");
       var done = function () { toast("Ссылка скопирована"); };
-      var fallback = function () { selectLink(); toast("Ссылка выделена: скопируйте её"); };
+      var fallback = function () { selectLink(shown); toast("Ссылка выделена: скопируйте её"); };
       try {
         if (navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(link).then(done, fallback);
@@ -583,7 +646,9 @@
       } catch (err) {
         fallback();
       }
-    });
+    }
+    var copies = document.querySelectorAll("[data-copy]");
+    for (i = 0; i < copies.length; i++) copies[i].addEventListener("click", copyLink);
 
     var seg = document.getElementById("seg");
     var order = ["android", "iphone", "windows"];

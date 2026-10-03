@@ -97,6 +97,7 @@ jobs:
           out=../bin/licenses
           mkdir -p "$out"
           cp "$(go env GOROOT)/LICENSE" "$out/go.txt"
+          cp internal/ui/frontend/flags/LICENSE.txt "$out/circle-flags.txt"
           GOOS=windows go list -deps -f '{{with .Module}}{{.Path}}{{"\t"}}{{.Dir}}{{end}}' ./cmd/kirovvpn ./cmd/kirovvpn-service |
             sort -u | while IFS=$'\t' read -r module dir; do
               [ -n "$dir" ] || continue
@@ -192,9 +193,16 @@ jobs:
           & $iscc /Qp "/DAppVersion=$env:VERSION" "/DStage=$PWD\windows\installer\stage" windows\installer\KirovVPN.iss
           if ($LASTEXITCODE -ne 0) { throw "iscc failed ($LASTEXITCODE)" }
 
-      - name: Checksums
+      - name: Checksums and the manifest
         working-directory: windows/installer/output
-        run: sha256sum KirovVPN-Setup-*.exe > SHA256SUMS.txt && cat SHA256SUMS.txt
+        run: |
+          file="KirovVPN-Setup-$VERSION.exe"
+          sha256sum "$file" > SHA256SUMS.txt && cat SHA256SUMS.txt
+          # What the panel publishes (klaus-panel publish-windows) and, from
+          # phase 5, the app's update check reads: docs/windows/PLAN.md, 7.2.
+          printf '{"versionCode": %d, "versionName": "%s", "file": "%s", "size": %d, "sha256": "%s", "minBuild": 17763}\n' \
+            "${VERSION##*.}" "$VERSION" "$file" "$(stat -c %s "$file")" "$(cut -d' ' -f1 SHA256SUMS.txt)" > version.json
+          cat version.json
 
       - uses: actions/upload-artifact@v7
         with:

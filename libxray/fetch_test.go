@@ -1,7 +1,10 @@
 package libxray
 
 import (
+	"bufio"
 	"encoding/base64"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -228,5 +231,30 @@ func TestFetchErrorsAndLimit(t *testing.T) {
 	}
 	if maxFetchBytes != 8<<20 {
 		t.Errorf("subscription limit is %d bytes, want 8 MB", maxFetchBytes)
+	}
+}
+
+// A server's reason phrase never reaches the error: it may be megabytes.
+func TestFetchErrorsNameTheStatusByItsCode(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for _, code := range []int{503, 599} {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = bufio.NewReader(c).ReadString('\n')
+			fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", code, strings.Repeat("x", 200_000))
+			c.Close()
+		}
+	}()
+	for _, want := range []string{"HTTP 503 Service Unavailable", "HTTP 599"} {
+		if _, err := Fetch("http://"+l.Addr().String()+"/", "", 5000, ""); err == nil || err.Error() != want {
+			t.Errorf("got %.80v, want %s", err, want)
+		}
 	}
 }

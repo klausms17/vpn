@@ -31,9 +31,10 @@ var trayIcons = map[string][]byte{
 }
 
 // Run shows the tray icon, and the window unless args has "--tray" (the
-// start at logon), and returns when the user quits. With "--selftest" it
-// only loads the page in a hidden window and exits, 0 once the page has
-// loaded, for CI.
+// start at logon), and returns when the user quits. An "Add to Kirov VPN"
+// link in args (the browser starts the app with it) waits for the user's
+// answer in the window. With "--selftest" it only loads the page in a
+// hidden window and exits, 0 once the page has loaded, for CI.
 func Run(version string, args []string) error {
 	local, err := windows.KnownFolderPath(windows.FOLDERID_LocalAppData, windows.KF_FLAG_DEFAULT)
 	if err != nil {
@@ -60,6 +61,11 @@ func Run(version string, args []string) error {
 		tray.SetTooltip(look.tooltip)
 	})
 	bridge := &Bridge{link: link, version: version, uiLog: filepath.Join(dir, "ui.log")}
+	for _, a := range args {
+		if _, ok := bridge.links.offer(a); ok {
+			log.Info("started with an add link")
+		}
+	}
 	if selftest {
 		bridge.loaded = func() {
 			log.Info("self-test: the page loaded")
@@ -118,8 +124,17 @@ func Run(version string, args []string) error {
 		Logger:      slog.New(slog.NewTextHandler(log, &slog.HandlerOptions{Level: slog.LevelWarn})),
 		SingleInstance: &application.SingleInstanceOptions{
 			UniqueID: "com.klausms.vpn.windows",
-			// Started again (a shortcut, the Start menu): show the window.
-			OnSecondInstanceLaunch: func(application.SecondInstanceData) { show(win) },
+			// Started again (a shortcut, the Start menu, an add link in the
+			// browser): show the window, asking about the link.
+			OnSecondInstanceLaunch: func(data application.SecondInstanceData) {
+				for _, a := range data.Args {
+					if prompt, ok := bridge.links.offer(a); ok {
+						log.Info("an add link came")
+						app.Event.Emit("link", prompt)
+					}
+				}
+				show(win)
+			},
 		},
 		Windows: application.WindowsOptions{
 			WndProcInterceptor:            menu.intercept,
@@ -144,13 +159,13 @@ func Run(version string, args []string) error {
 	win = app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:             "main",
 		Title:            "Kirov VPN",
-		Width:            420,
-		Height:           720,
-		MinWidth:         360,
-		MinHeight:        620,
+		Width:            1080,
+		Height:           700,
+		MinWidth:         900,
+		MinHeight:        600,
 		Hidden:           hidden,
 		URL:              "/",
-		BackgroundColour: application.NewRGB(0xEE, 0xF3, 0xF9),
+		BackgroundColour: application.NewRGB(0xF5, 0xF7, 0xFB),
 	})
 	// Closing the window leaves the app in the tray; «Выход» there quits.
 	win.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {

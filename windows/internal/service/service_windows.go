@@ -15,6 +15,7 @@ import (
 	"github.com/klausms17/vpn/libxray/client/importer"
 	"github.com/klausms17/vpn/libxray/client/model"
 	"github.com/klausms17/vpn/libxray/client/store"
+	"github.com/klausms17/vpn/libxray/client/subscription"
 	"github.com/klausms17/vpn/libxray/client/tunnel"
 	"github.com/klausms17/vpn/windows/internal/engine"
 	"github.com/klausms17/vpn/windows/internal/ipc"
@@ -43,6 +44,14 @@ const (
 	// The server checks of the window, as Android's.
 	pingURL       = "https://www.gstatic.com/generate_204"
 	pingTimeoutMs = 10_000
+	// A subscription is downloaded directly, and through the tunnel when
+	// that fails while it runs (the panel may be blocked).
+	directFetchMs = 20_000
+	tunnelFetchMs = 15_000
+	// Subscriptions due are refreshed this soon after the service starts,
+	// and then every refreshEvery (also whenever a window opens).
+	refreshFirst = 30 * time.Second
+	refreshEvery = time.Hour
 )
 
 // pbtAPMResumeAutomatic is the power event of a wake from sleep.
@@ -164,6 +173,17 @@ func start(version string) (*app, error) {
 		Explain:  explainer{holder: addressHolder, ipv6Off: ipv6Off}.explain,
 		Log:      log.Info,
 	})
+	hwid, err := deviceID(winsys.MachineGUID(), filepath.Join(dataDir, "hwid"))
+	if err != nil {
+		log.Warn("device id not saved: " + err.Error())
+	}
+	maker, product := winsys.Hardware()
+	headers := subscription.Device{
+		HWID: hwid, OS: "Windows", OSVersion: subscription.Printable(winsys.Version(), 32), Model: subscription.Model(maker, product),
+	}.Headers()
+	// The panel knows the app by "KlausVPN/" (its former name, on purpose).
+	userAgent := fmt.Sprintf("KlausVPN/%s (Windows)", version)
+	direct := subscription.Direct(userAgent, headers, directFetchMs)
 	h := &handler{
 		tunnel:   eng,
 		profiles: profiles,
@@ -184,14 +204,23 @@ func start(version string) (*app, error) {
 		log:       log.Info,
 		now:       time.Now,
 	}
+	var ctx context.Context
+	ctx, a.cancel = context.WithCancel(context.Background())
+	h.subs = newSubscriptions(h, func(fctx context.Context, url string) (*libxray.FetchResult, error) {
+		r, err := direct(fctx, url)
+		if err == nil || eng.Status().State != ipc.Connected {
+			return r, err
+		}
+		return core.c.FetchThroughTunnel(url, userAgent, headers, tunnelFetchMs)
+	}, func() int64 { return time.Now().UnixMilli() })
+	h.opened = func() { h.subs.kick(ctx) }
 	server = ipc.NewServer(h.handle, h.greet, log.Warn)
 	a.engine = eng
 	a.listener, err = ipc.Listen()
 	if err != nil {
+		a.cancel()
 		return a, fmt.Errorf("pipe: %w", err)
 	}
-	var ctx context.Context
-	ctx, a.cancel = context.WithCancel(context.Background())
 	go func() {
 		eng.Run(ctx)
 		close(a.stopped)
@@ -210,6 +239,19 @@ func start(version string) (*app, error) {
 				return
 			case <-t.C:
 				tunnel.TrimLog(xrayLog, tunnel.LogMaxBytes, tunnel.LogKeepBytes)
+			}
+		}
+	}()
+	go func() {
+		t := time.NewTimer(refreshFirst)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				h.subs.kick(ctx)
+				t.Reset(refreshEvery)
 			}
 		}
 	}()

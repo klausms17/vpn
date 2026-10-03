@@ -5,7 +5,8 @@
 //	kirovctl wait-service    wait until the service answers
 //	kirovctl pipe-sddl       print the pipe's owner, permissions and label
 //	kirovctl status          print the status
-//	kirovctl import          add the keys read from standard input
+//	kirovctl import          add the keys or subscription read from standard input
+//	kirovctl refresh         download the subscriptions again
 //	kirovctl connect         connect and wait until connected
 //	kirovctl wait-connected  wait until the tunnel is up
 //	kirovctl disconnect      disconnect and wait until disconnected
@@ -32,7 +33,7 @@ const timeout = 90 * time.Second
 
 func main() {
 	if len(os.Args) != 2 {
-		fail(errors.New("usage: kirovctl wait-service | pipe-sddl | status | import | connect | wait-connected | disconnect | ping | set-settings | logs"))
+		fail(errors.New("usage: kirovctl wait-service | pipe-sddl | status | import | refresh | connect | wait-connected | disconnect | ping | set-settings | logs"))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -91,6 +92,12 @@ func main() {
 		if r.Added == 0 {
 			os.Exit(1)
 		}
+	case "refresh":
+		var r ipc.ImportResult
+		if err := c.Call(ctx, ipc.OpRefresh, ipc.IDArgs{}, &r); err != nil {
+			fail(err)
+		}
+		fmt.Println(r.Message)
 	case "connect":
 		if w.status().State != ipc.Connected {
 			seen := w.statuses()

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/klausms17/vpn/libxray"
 	"github.com/klausms17/vpn/libxray/client/model"
 )
 
@@ -130,6 +131,33 @@ func TestSummary(t *testing.T) {
 	} {
 		if got := Summary(c.added, c.ready, c.skipped); got != c.want {
 			t.Errorf("%+v: %q", c, got)
+		}
+	}
+}
+
+// A refresh the user asked for fetches the pins again: past maxPins the
+// saved servers keep theirs instead of leaving the subscription.
+func TestPastMaxPinsSavedServersKeepTheirPins(t *testing.T) {
+	out, err := libxray.ParseSubscription([]byte(insecureKeys(maxPins + 4)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res libxray.SubscriptionResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatal(err)
+	}
+	var parsed []libxray.Profile
+	for _, p := range res.Profiles {
+		parsed = append(parsed, *p)
+	}
+	saved := json.RawMessage(`[{"protocol":"vless","tag":"proxy","pinned":true}]`)
+	keys, failed := Ready(context.Background(), parsed, nil, nil, func(libxray.Profile) json.RawMessage { return saved })
+	if len(keys) != maxPins+4 || len(failed) != 0 {
+		t.Fatalf("%d kept, failed %q", len(keys), failed)
+	}
+	for _, k := range keys {
+		if string(k.Outbounds) != string(saved) {
+			t.Errorf("%s: %s", k.Name, k.Outbounds)
 		}
 	}
 }

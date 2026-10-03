@@ -2,7 +2,8 @@
 # refuse a folder outside Program Files, install, connect through a local
 # REALITY server, check that DNS cannot leave outside the tunnel and that
 # IPv6 fails at once, check the server, read the journal, send a site and
-# a program directly, restart the tunnel 50 times, kill the service and
+# a program directly, add and refresh a subscription served over HTTPS,
+# restart the tunnel 50 times, kill the service and
 # see it come back, start with another adapter holding the tunnel's
 # address, install over itself, uninstall. Run by windows.yml; it changes
 # the PC's network and installs a service, so never run it on a real PC.
@@ -104,7 +105,7 @@ function OtherVpn([string[]] $more) {
   return $o
 }
 
-$server = $null
+$server, $subCert = $null, $null
 try {
   Write-Host '::group::Only into Program Files'
   $p = Start-Process $Installer -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$work\elsewhere", "/LOG=$work\elsewhere.log" -Wait -PassThru
@@ -119,6 +120,8 @@ try {
   Check ($svc.StartName -eq 'LocalSystem') 'the service runs as LocalSystem'
   $run = Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Kirov VPN'
   Check ($run.'Kirov VPN' -like '*KirovVPN.exe" --tray') 'the tray icon starts at logon'
+  $open = (Get-ItemProperty 'HKLM:\Software\Classes\klausvpn\shell\open\command').'(default)'
+  Check ($open -eq "`"$app\KirovVPN.exe`" `"%1`"") "klausvpn:// links open the window ($open)"
   $acl = (Get-Acl $data).Access | ForEach-Object { $_.IdentityReference.Value }
   Check (-not ($acl | Where-Object { $_ -notmatch 'SYSTEM|Administrators|Администраторы' })) "only SYSTEM and administrators may open the data folder ($($acl -join ', '))"
   $sddl = "$(Ctl pipe-sddl)"
@@ -132,7 +135,8 @@ try {
 
   Write-Host '::group::Connect through a local REALITY server'
   Check (DirectDns) 'without the tunnel, 8.8.8.8 answers DNS directly'
-  $server = Start-Process (Join-Path $Tools 'testserver.exe') -ArgumentList '-link', "$work\link.txt", '-log', "$work\server.log" -PassThru -RedirectStandardError "$work\server.err"
+  New-Item -ItemType Directory -Force "$work\sub" | Out-Null
+  $server = Start-Process (Join-Path $Tools 'testserver.exe') -ArgumentList '-link', "$work\link.txt", '-log', "$work\server.log", '-sub', "$work\sub" -PassThru -RedirectStandardError "$work\server.err"
   for ($i = 0; $i -lt 60 -and -not (Test-Path "$work\link.txt"); $i++) { Start-Sleep -Milliseconds 500 }
   Get-Content "$work\link.txt" | & (Join-Path $Tools 'kirovctl.exe') import
   Check ($LASTEXITCODE -eq 0) 'the key was added'
@@ -196,6 +200,20 @@ try {
   Check (Select-String -Path "$data\logs\service.log" -Pattern 'holding traffic while the tunnel restarts' -SimpleMatch -Quiet) 'the service held traffic during the restart'
   Check (Http204) 'and let it through again'
   Settings '{"mode":"ru_direct","torrentsDirect":true,"autoConnect":true}'
+  Write-Host '::endgroup::'
+
+  Write-Host '::group::A subscription'
+  # The test server's certificate, trusted for the test only.
+  $subCert = Import-Certificate -FilePath "$work\sub\sub.cer" -CertStoreLocation Cert:\LocalMachine\Root
+  $url = (Get-Content "$work\sub\sub.url" -TotalCount 1).Trim()
+  $out = $url | & (Join-Path $Tools 'kirovctl.exe') import
+  Check ($LASTEXITCODE -eq 0 -and "$out" -match 'Подписка «Smoke subscription»: серверов 1') "the subscription was added ($out)"
+  $seen = @(Get-Content "$work\sub\sub.log")
+  Check ($seen.Count -eq 1 -and $seen[0] -match '^ua=KlausVPN/\S+ \(Windows\) hwid=32 os=Windows ver=\S+ model=\S') "the panel was told the app and the device as Android tells it ($seen)"
+  $out = Ctl refresh
+  Check ("$out" -match 'Подписка обновлена: серверов 1' -and @(Get-Content "$work\sub\sub.log").Count -eq 2) "the subscription was downloaded again ($out)"
+  $journal = (& (Join-Path $Tools 'kirovctl.exe') logs) -join "`n"
+  Check ($journal -match 'subscription added' -and $journal -notmatch '127\.0\.0\.1' -and $journal -notmatch 'sub/smoke') 'the journal tells of it without its address'
   Write-Host '::endgroup::'
 
   Write-Host '::group::50 restarts of the tunnel'
@@ -276,6 +294,7 @@ try {
   Check ($null -eq (Get-NetAdapter -Name 'Kirov VPN' -ErrorAction SilentlyContinue)) 'the adapter is gone'
   Check (-not (Test-Path $data)) 'the keys and logs are gone'
   Check (-not (Test-Path (Join-Path $app 'KirovVPNService.exe'))) 'the programs are gone'
+  Check (-not (Test-Path 'HKLM:\Software\Classes\klausvpn')) 'klausvpn:// links are no longer taken'
   Write-Host '::endgroup::'
   Write-Host 'SMOKE TEST PASSED'
 } catch {
@@ -292,5 +311,6 @@ try {
   # The tunnel first: without its server it would cut the runner off.
   Stop-Service -Name KirovVPN -ErrorAction SilentlyContinue
   if ($server) { Stop-Process -Id $server.Id -ErrorAction SilentlyContinue }
+  if ($subCert) { Remove-Item -Path "Cert:\LocalMachine\Root\$($subCert.Thumbprint)" -ErrorAction SilentlyContinue }
   Get-Process othervpn -ErrorAction SilentlyContinue | Stop-Process -ErrorAction SilentlyContinue
 }

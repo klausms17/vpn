@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/klausms17/vpn/libxray/client/importer"
+	"github.com/klausms17/vpn/libxray/client/linktext"
 	"github.com/klausms17/vpn/libxray/client/model"
 	"github.com/klausms17/vpn/libxray/client/store"
 	"github.com/klausms17/vpn/windows/internal/ipc"
@@ -34,9 +35,13 @@ type handler struct {
 	profiles *store.Store[model.ProfilesState]
 	settings *store.Store[ipc.Settings]
 	pinger   *pinger
+	subs     *subscriptions
 	// keys reads the keys in pasted text (importer.Keys, with the service's
 	// check).
 	keys func(ctx context.Context, text string) ([]model.Key, []string, error)
+	// opened refreshes, in the background, the subscriptions that are due
+	// when a window opens.
+	opened func()
 	// site checks a site the user typed (libxray's UserRuleEntry).
 	site func(string) string
 	// logs reads the logs for the window's journal.
@@ -65,6 +70,7 @@ var (
 	errBadRequest = errors.New("неверный запрос: обновите Kirov VPN")
 	errImporting  = errors.New("Ключи ещё добавляются, подождите")
 	errNoServer   = errors.New("Этого сервера уже нет в списке")
+	errNoLink     = errors.New("В ссылке нет ни ключа, ни подписки")
 )
 
 func (h *handler) handle(ctx context.Context, op string, args json.RawMessage) (any, error) {
@@ -117,23 +123,45 @@ func (h *handler) handle(ctx context.Context, op string, args json.RawMessage) (
 		return nil, h.setSettings(s)
 	case ipc.OpLogs:
 		return h.readLogs(), nil
+	case ipc.OpRefresh:
+		var a ipc.IDArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, errBadRequest
+		}
+		message, err := h.subs.refresh(ctx, a.ID)
+		return ipc.ImportResult{Message: message}, err
+	case ipc.OpDeleteSubscription:
+		var a ipc.IDArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, errBadRequest
+		}
+		return nil, h.deleteSubscription(a.ID)
 	}
 	return nil, ipc.ErrUnknownOp
 }
 
+// importText adds the keys in text, or the subscription it links to; an
+// "Add to Kirov VPN" link is read first.
 func (h *handler) importText(ctx context.Context, text string) (ipc.ImportResult, error) {
 	text = strings.TrimSpace(text)
-	switch {
-	case text == "":
-		return ipc.ImportResult{}, errors.New("Вставьте ключ сервера")
-	case len(text) > ipc.MaxImport:
+	if len(text) > ipc.MaxImport {
 		return ipc.ImportResult{}, errors.New("Слишком длинный текст: вставьте только ключи")
-	case importer.SubscriptionURL(text) != "":
-		return ipc.ImportResult{}, errors.New("Подписки появятся в следующей версии. Пока вставьте ключ сервера (vless://, trojan://, ss://…)")
-	case !h.importing.TryLock():
+	}
+	if strings.HasPrefix(strings.ToLower(text), "klausvpn:") {
+		if text = linktext.DeepLink(text); text == "" {
+			return ipc.ImportResult{}, errNoLink
+		}
+	}
+	if text == "" {
+		return ipc.ImportResult{}, errors.New("Вставьте ключ сервера или ссылку на подписку")
+	}
+	if !h.importing.TryLock() {
 		return ipc.ImportResult{}, errImporting
 	}
 	defer h.importing.Unlock()
+	if link := linktext.SubscriptionURL(text); link != "" {
+		return h.subs.add(ctx, link)
+	}
 	keys, skipped, err := h.keys(ctx, text)
 	if err != nil {
 		return ipc.ImportResult{}, err
@@ -227,6 +255,43 @@ func (h *handler) delete(id string) error {
 	return nil
 }
 
+// deleteSubscription removes subscription id with its servers. If the
+// selected server was one of them, the tunnel moves to the next server, or
+// stops when none is left.
+func (h *handler) deleteSubscription(id string) error {
+	var found, moved bool
+	var left map[string]bool
+	if err := h.changeProfiles(func(s model.ProfilesState) model.ProfilesState {
+		found = slices.ContainsFunc(s.Subscriptions, func(sub model.Subscription) bool { return sub.ID == id })
+		next := s.WithoutSubscription(id)
+		moved = next.SelectedID != s.SelectedID
+		left = ids(next.Profiles)
+		return next
+	}); err != nil {
+		return err
+	}
+	if !found {
+		return errNoSubscription
+	}
+	h.log("subscription deleted by a window")
+	h.pinger.keep(left)
+	switch {
+	case moved && len(left) == 0:
+		h.tunnel.Disconnect()
+	case moved:
+		h.tunnel.Reconnect()
+	}
+	return nil
+}
+
+// publishProfiles tells the windows how the servers look now, in order with
+// the changes saved.
+func (h *handler) publishProfiles() {
+	h.profilesMu.Lock()
+	defer h.profilesMu.Unlock()
+	h.broadcast(ipc.NewEvent(ipc.EventProfiles, h.profilesData()))
+}
+
 // changeProfiles saves change of the servers and tells the windows, in the
 // order the changes are made. The windows hear of it only if it changed
 // something.
@@ -293,8 +358,9 @@ func (h *handler) readLogs() ipc.Logs {
 }
 
 // greet is what a new window gets first: the status, the servers, their
-// checks and the settings.
+// checks and the settings. It cannot tell the windows anything itself.
 func (h *handler) greet() []ipc.Event {
+	h.opened()
 	return []ipc.Event{
 		ipc.NewEvent(ipc.EventStatus, h.tunnel.Status()),
 		ipc.NewEvent(ipc.EventProfiles, h.profilesData()),
@@ -305,9 +371,14 @@ func (h *handler) greet() []ipc.Event {
 
 func (h *handler) profilesData() ipc.Profiles {
 	s := h.profiles.Read()
-	out := ipc.Profiles{Profiles: []ipc.Profile{}, SelectedID: s.SelectedID}
+	out := ipc.Profiles{Profiles: []ipc.Profile{}, Subscriptions: []ipc.Subscription{}, SelectedID: s.SelectedID}
 	for _, p := range s.Profiles {
-		out.Profiles = append(out.Profiles, ipc.Profile{ID: p.ID, Name: p.Name, Protocol: p.Protocol, Security: p.Security})
+		out.Profiles = append(out.Profiles, ipc.Profile{
+			ID: p.ID, Name: p.Name, Protocol: p.Protocol, Network: p.Network, Security: p.Security, SubscriptionID: p.SubscriptionID,
+		})
+	}
+	for _, sub := range s.Subscriptions {
+		out.Subscriptions = append(out.Subscriptions, h.subs.shown(sub))
 	}
 	return out
 }

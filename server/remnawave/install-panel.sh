@@ -590,7 +590,8 @@ tls_line=""
 # other name (IP scanners) are refused during the TLS handshake. The bare
 # subscription address is where the page's support button leads when there
 # is no SUPPORT_URL (the page itself only drops such requests). /app/ is the
-# app published by "klaus-panel publish-apk", /klaus/ the block reports.
+# app published by "klaus-panel publish-apk" and /app/windows/ the Windows
+# installer of "klaus-panel publish-windows"; /klaus/ the block reports.
 # A browser opening a friend's link gets Kirov VPN's own page (/srv/page,
 # from klaus-page.html); the apps get their subscription from Remnawave.
 # No access log, and the error log (a request that failed, e.g. while the
@@ -645,8 +646,16 @@ $tls_line
 			not file
 		}
 		redir @gone /app/KirovVPN.apk 302
+		@gone_exe {
+			path /windows/KirovVPN-Setup-*.exe
+			not file
+		}
+		redir @gone_exe /app/windows/KirovVPN-Setup.exe 302
 		@apk path *.apk
 		header @apk Content-Type "application/vnd.android.package-archive"
+		@exe path *.exe
+		header @exe Content-Type "application/octet-stream"
+		header @exe Content-Disposition "attachment"
 		file_server
 	}
 	handle {
@@ -962,6 +971,31 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+  put_unit klaus-panel-windows.service <<EOF
+# Written by Kirov VPN install-panel.sh
+[Unit]
+Description=Kirov VPN: publish a new Windows build on https://$SUB_DOMAIN/app/windows/
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=KLAUS_PANEL_CONF=$CONF
+ExecStart=/usr/local/bin/klaus-panel publish-windows --quiet
+EOF
+  put_unit klaus-panel-windows.timer <<'EOF'
+# Written by Kirov VPN install-panel.sh
+[Unit]
+Description=Kirov VPN: look for a new Windows build every hour
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
   # The page for friends' browsers from PAGE_BRANCH (nothing to do while
   # that is empty).
   put_unit klaus-panel-page.service <<EOF
@@ -1020,6 +1054,7 @@ WantedBy=timers.target
 EOF
   if [ "$units_changed" = "1" ]; then systemctl daemon-reload; fi
   systemctl enable --now klaus-panel-apk.timer >/dev/null 2>&1 || warn "не удалось включить таймер klaus-panel-apk.timer"
+  systemctl enable --now klaus-panel-windows.timer >/dev/null 2>&1 || warn "не удалось включить таймер klaus-panel-windows.timer"
   systemctl enable --now klaus-panel-users.timer >/dev/null 2>&1 || warn "не удалось включить таймер klaus-panel-users.timer"
   systemctl enable --now klaus-panel-page.timer >/dev/null 2>&1 || warn "не удалось включить таймер klaus-panel-page.timer"
   if command -v ufw >/dev/null && grep -q "Status: active" <<<"$(ufw status)"; then
@@ -1061,6 +1096,7 @@ else
   echo "  3. Оповещения в Telegram включены (проверка: klaus-panel telegram-test)"
 fi
 echo "  4. Новые сборки приложения из релиза $RELEASE_TAG публикуются сами; сейчас:  klaus-panel publish-apk"
+echo "     Программа для Windows (релиз windows-stable) тоже; сейчас:  klaus-panel publish-windows"
 if [ -n "$PAGE_BRANCH" ]; then
   echo "     Страница для знакомых обновляется сама из ветки $PAGE_BRANCH; сейчас:  klaus-panel update-page"
 fi
