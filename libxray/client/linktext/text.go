@@ -1,6 +1,7 @@
-// Package importer reads pasted or shared text as the Android app's
-// ImportText does, and turns the keys in it into servers ready to save.
-package importer
+// Package linktext finds keys and links in pasted or shared text and in
+// "Add to Kirov VPN" links, as the Android app's ImportText and DeepLink
+// do. It is plain text work, so the window can use it without the core.
+package linktext
 
 import (
 	"regexp"

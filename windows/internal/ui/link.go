@@ -48,7 +48,10 @@ type link struct {
 }
 
 func newLink(onChange func(Snapshot)) *link {
-	return &link{onChange: onChange, snap: Snapshot{Profiles: ipc.Profiles{Profiles: []ipc.Profile{}}, Pings: ipc.Pings{}}}
+	return &link{onChange: onChange, snap: Snapshot{
+		Profiles: ipc.Profiles{Profiles: []ipc.Profile{}, Subscriptions: []ipc.Subscription{}},
+		Pings:    ipc.Pings{},
+	}}
 }
 
 // Dialer opens a connection to the service.
@@ -147,6 +150,9 @@ func (l *link) onEvent(ev ipc.Event) {
 		if json.Unmarshal(ev.Data, &p) == nil {
 			if p.Profiles == nil {
 				p.Profiles = []ipc.Profile{}
+			}
+			if p.Subscriptions == nil {
+				p.Subscriptions = []ipc.Subscription{}
 			}
 			l.update(func(s *Snapshot) { s.Profiles = p })
 		}

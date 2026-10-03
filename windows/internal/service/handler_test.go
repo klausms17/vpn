@@ -1,6 +1,7 @@
 package service
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klausms17/vpn/libxray"
 	"github.com/klausms17/vpn/libxray/client/model"
 	"github.com/klausms17/vpn/libxray/client/store"
 	"github.com/klausms17/vpn/windows/internal/ipc"
@@ -21,6 +23,8 @@ import (
 type fakeTunnel struct {
 	mu    sync.Mutex
 	calls []string
+	// running is the server the tunnel runs; "a" unless set.
+	running string
 }
 
 func (f *fakeTunnel) record(c string) {
@@ -33,7 +37,9 @@ func (f *fakeTunnel) Connect()    { f.record("connect") }
 func (f *fakeTunnel) Disconnect() { f.record("disconnect") }
 func (f *fakeTunnel) Reconnect()  { f.record("reconnect") }
 func (f *fakeTunnel) Status() ipc.Status {
-	return ipc.Status{State: ipc.Connected, ProfileID: "a", ProfileName: "A"}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return ipc.Status{State: ipc.Connected, ProfileID: cmp.Or(f.running, "a"), ProfileName: "A"}
 }
 
 func (f *fakeTunnel) took() string {
@@ -59,6 +65,9 @@ type testEnv struct {
 	// the servers of each batch.
 	measured map[string]int64
 	batches  []int
+	// panel answers subscription downloads; opened counts windows opened.
+	panel  func(url string) (*libxray.FetchResult, error)
+	opened int
 }
 
 func newEnv(t *testing.T) *testEnv {
@@ -121,6 +130,17 @@ func newEnv(t *testing.T) *testEnv {
 		},
 		now: func() time.Time { return time.UnixMilli(1234) },
 	}
+	env.h.opened = func() {
+		env.mu.Lock()
+		defer env.mu.Unlock()
+		env.opened++
+	}
+	env.h.subs = newSubscriptions(env.h, func(_ context.Context, url string) (*libxray.FetchResult, error) {
+		if env.panel == nil {
+			return nil, errors.New("HTTP 404 Not Found")
+		}
+		return env.panel(url)
+	}, func() int64 { return 1234 })
 	return env
 }
 
@@ -189,7 +209,7 @@ func TestImportRefusals(t *testing.T) {
 	for _, c := range []struct{ text, want string }{
 		{"   ", "Вставьте ключ сервера"},
 		{strings.Repeat("a", ipc.MaxImport+1), "Слишком длинный текст: вставьте только ключи"},
-		{"https://panel.example/sub/abc", "Подписки появятся"},
+		{"klausvpn://settings/x", "В ссылке нет ни ключа, ни подписки"},
 		{"плохо", "Не найдено ни одного ключа"},
 	} {
 		if _, err := env.call(ipc.OpImport, ipc.ImportArgs{Text: c.text}); err == nil || !strings.HasPrefix(err.Error(), c.want) {

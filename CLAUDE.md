@@ -55,13 +55,17 @@ and give step-by-step instructions for anything he must do himself.
     `tunaddr_windows.go` finds or frees an adapter holding the tunnel's
     address.
   - `cmd/kirovvpn`: the tray icon and window (Wails v3, `internal/ui`; the
-    page is `internal/ui/frontend`, `origin.go` refuses calls from any
-    other page). It holds no keys.
+    page is `internal/ui/frontend`, ES modules with one per part and round
+    flags in `flags/`; `origin.go` refuses calls from any other page;
+    `deeplink.go` keeps a `klausvpn://` link until the user answers). It
+    holds no keys.
   - `installer/KirovVPN.iss` (Inno Setup), `test/smoke.ps1` (CI only),
     `cmd/kirovctl` (the smoke test's pipe client, never shipped), `tools/`
     (icons, exe resources, a test server, `othervpn` for CI).
 - `libxray/client/`: the Android logic ported to Go with its tests (model,
-  store, key import, log, tunnel rules), used by Windows and later iOS.
+  store, key import, links in text and `klausvpn://` links, subscriptions
+  with the device headers, log, tunnel rules), used by Windows and later
+  iOS.
   `libxray/internal/privileged` is the allowlist of what the Windows
   service's core may run, and `internal/redact` takes addresses and host
   names out of the logs (the core's `xray.log` too, on every platform).
@@ -231,6 +235,23 @@ and give step-by-step instructions for anything he must do himself.
     app could have broken his PC's network settings (internet trouble that
     day): it changes nothing that outlives the tunnel; he was given steps
     to tell the app from his ISP.
+  - On 3 Oct the owner asked for a desktop look like Happ's: the window
+    was a phone-sized column. Built with phase 2a of the plan:
+    - the window: a rail (Серверы, Добавить, Настройки, Журнал, О
+      программе), the servers in groups with round flags, search, usage
+      and the panel's notices, and the connection on the right (the orb,
+      the mode, the current server); checked in a browser with a fake
+      service at 1080×700 and 900×600;
+    - subscriptions as Android's (`libxray/client/subscription`, the
+      device id from the MachineGuid with Android's recipe), refreshed 30 s
+      after the service starts, every hour and when a window opens,
+      directly and then through the tunnel; bounded for the shared
+      service (20 subscriptions, links of 1000 characters, the panel's
+      texts of 500);
+    - `klausvpn://` registered by the installer; the window names the
+      subscription's host and asks before adding;
+    - the smoke test adds and refreshes a subscription served over HTTPS
+      and checks the device headers and the link registration.
 - **iPhone:** phases 1–2 of `docs/ios/PLAN.md` are done. The Go core builds
   for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
   passes its checks (geo files in the extension, no bitcode). The app is
@@ -268,8 +289,10 @@ and give step-by-step instructions for anything he must do himself.
    each ending in a CI-built installer the owner tries. Phase 1, the tunnel
    on the owner's PC, is built with what the owner asked for after his
    first try (servers with checks, settings, journal, the restart hold);
-   the owner tries it (the checks are in the plan's section 10). Next:
-   phase 2, subscriptions and the Android logic. In brief:
+   the owner tries it (the checks are in the plan's section 10). Phase 2a
+   (subscriptions, `klausvpn://`, the desktop window) is built; next: the
+   panel's `publish-windows` with a download on the page's Windows tab
+   (step 5), then phase 2b, the failover logic. In brief:
    - Go only. An elevated service (LocalSystem) holds libxray and the
      Android logic, ported to `libxray/client/` with its JVM tests. A
      per-user tray icon and window (Wails v3, a pinned beta, on WebView2)

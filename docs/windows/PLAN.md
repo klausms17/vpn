@@ -220,12 +220,12 @@ Android's UI process does imports, pings, subscription adds and update checks it
 |---|---|---|
 | Home: big button, status line with colours, session timer, notices in priority order, auto-ping of the shown server | The same in the window, the orb of `klaus-page.html` as the button; tray icon in four states with the status as its tooltip | 1 (minimal), 3 |
 | Europe map with a pin on the server's country | The same map, redrawn in the light style, if it fits; otherwise a flag and country name | 3 |
-| Flags from the emoji in server names | A bundled SVG flag set (for example Twemoji, CC-BY 4.0, credited on «Лицензии»), because Windows draws flag emoji as two letters | 3 |
-| Server list: «Мои ключи» and one group per subscription with usage, notice, announce, refresh, «Проверить все серверы», ping grades, rename, copy key, delete | The same; a «⋯» menu per server instead of long-press; copied keys excluded from clipboard history. Built: «Серверы» with select, check, «Проверить все», grades, rename, delete | 1 (keys), 2, 3 |
-| Add: paste, QR camera, manual entry, several keys, 256 KB cap, subscription link | Paste (also Ctrl+V anywhere in the window), manual entry, QR from an image file, a clipboard image or a screenshot (pure-Go decoder), drag and drop of text or an image | 2, 3 |
-| `klausvpn://add/…`, `import/…`, `install-config?url=` and the share intent, with the confirmation dialog | The same parser behind a registered protocol; the second launch hands the link to the running window, which asks «Добавить ключи или подписку?» | 2 |
+| Flags from the emoji in server names | A bundled SVG flag set, because Windows draws flag emoji as two letters. Built: circle-flags (MIT), round, its licence in `licenses\` | 3 |
+| Server list: «Мои ключи» and one group per subscription with usage, notice, announce, refresh, «Проверить все серверы», ping grades, rename, copy key, delete | The same; a «⋯» menu per server instead of long-press; copied keys excluded from clipboard history. Built: groups that fold, with usage, expiry, notice, announce and the last error, search, select, check, «Проверить все», grades, rename, delete, refresh and delete of a subscription | 1 (keys), 2, 3 |
+| Add: paste, QR camera, manual entry, several keys, 256 KB cap, subscription link | Paste (also Ctrl+V anywhere in the window), manual entry, QR from an image file, a clipboard image or a screenshot (pure-Go decoder), drag and drop of text or an image. Built: paste, Ctrl+V, keys and subscription links | 2, 3 |
+| `klausvpn://add/…`, `import/…`, `install-config?url=` and the share intent, with the confirmation dialog | The same parser behind a registered protocol; the second launch hands the link to the running window, which asks «Добавить ключи или подписку?» (built) | 2 |
 | Subscription requests with User-Agent and device headers; the response headers it reads; the merge rules; certificate pins | The same, in Go (section 5.2) | 2 |
-| Refresh on app open (stale after 1 h, retry after 2 min) and during failover | The same, plus at service start and every 12 hours while connected, because the window can stay closed for weeks | 2 |
+| Refresh on app open (stale after 1 h, retry after 2 min) and during failover | The same, plus 30 s after the service starts and every hour, because the window can stay closed for weeks (built; during failover with the failover logic) | 2 |
 | Health checks, stall check, failover search, server switching, way back home, budgets, block reports, subscription refresh owed through the tunnel | The same rules and constants in Go; triggers per section 2.5 | 2 (logic), 4 (signals) |
 | Notifications (status, errors) | Tray tooltip and icon; toasts for errors and notices (toasts need a Start-menu shortcut with an AppUserModelID, made by the installer) | 3 |
 | Quick Settings tile, widget with ping | Tray menu: «Подключить» / «Отключить», server, «Проверить отклик», «Открыть», «Выход» | 3 |
@@ -297,7 +297,7 @@ Ported one to one, with the JVM tests (234 today) as Go tests and the same fakes
 | `client/model`, `client/store` | `Models.kt`, `JsonFileStore`, `ProfilesOps`, `AppSettings` | `JsonFileStoreTest`, `ProfilesOpsTest`, `AppSettingsTest` |
 | `client/applog` | `AppLog` (the 128 KB log with one old file) | its own |
 | `client/subscription` | `SubscriptionUpdater`, `DeviceHeaders` (recipe, sanitising), `Pinned`, `ProfileImport` | `SubscriptionUpdaterTest`, `DeviceHeadersTest` (vector `0123456789abcdef` → `1012707cdd34d59dbc64b03534a44dc9`), `PinnedTest` |
-| `client/importer` | `ImportText`, `DeepLink`, the key part of `MainViewModel.addLinks` (parse, pin four at a time, the result message) | `DeepLinkTest` and the import cases |
+| `client/importer`, `client/linktext` | `ImportText`, `DeepLink`, the key part of `MainViewModel.addLinks` (parse, pin four at a time, the result message) | `DeepLinkTest` and the import cases |
 | `client/tunnel` | `StartFailurePolicy`, `ResetScheduler`, `Epoch`, `HealthMonitor`, `TrafficCheck`, `FailoverSearch`, `Failover`, `FailureMemory`, `WhitelistLookup`, `ServerSwitcher`, `SubscriptionRefresher`, `NoticeBoard`, `VpnStatus`, `RuntimeState` rules, `RestartGuard` rules, `XrayLog` | every service test of section 10 of the Android report |
 | `client/report` | `BlockReport`, `BlockReporter` rules, `ReportThrottle` | `BlockReportTest` |
 | `client/appupdate` | `AppUpdate` (Android shape) plus the Windows manifest | `AppUpdateTest` plus manifest and signature tests |
@@ -525,6 +525,13 @@ Each phase ends in an installer built by CI that the owner installs and tries.
    - Work: section 5.2 with its tests; the service runs it; servers and subscriptions in the window (add by link, refresh, select, ping, delete); `klausvpn://` registered.
    - CI proves: Go tests green on Linux; the smoke test adds a subscription from a local server.
    - The owner checks: the friend page button adds the subscription; switching servers; failover when the selected server stops answering (a stopped test server or a dead key). Windows Firewall cannot simulate that: Xray's filters give the service a hard permit.
+   - Built on 3 Oct 2026, the first half (2a), with the window of phase 3 ahead of time because the owner asked for a desktop look like Happ's:
+     - `client/subscription` (Android's `SubscriptionUpdater`, `DeviceHeaders` and `Pinned` with their tests) and `client/linktext` (links in text, `DeepLink`); the device id is the MachineGuid hashed with Android's recipe;
+     - the service adds a subscription by its link, refreshes it 30 s after it starts, every hour and when a window opens (directly, then through the tunnel), keeps the servers on a failed or empty answer, restarts a tunnel whose server changed, and is bounded: 20 subscriptions, links of 1000 characters, the panel's texts of 500;
+     - `klausvpn://` opens the window, which names the subscription's host and asks before adding;
+     - the window is a desktop one: a rail (Серверы, Добавить, Настройки, Журнал, О программе), the servers in groups with round flags, search, usage and the panel's notices, and the connection on the right with the orb, the mode and the current server;
+     - the smoke test adds and refreshes a subscription served over HTTPS by the test server, checks the device headers, and checks that `klausvpn://` is registered and removed.
+   - Left for 2b: the failover logic of `client/tunnel` (health checks, stall check, failover search, server switching, way back home) and the refresh owed through the tunnel.
 3. **The window and the tray.**
    - Work: every screen of section 3 in the light look; tray states and menu; toasts; QR from an image, the clipboard or a screenshot; «Журнал»; «Лицензии»; settings; screenshots in CI.
    - CI proves: build, smoke test, and screenshots of every state on `ui-screenshots-windows`.

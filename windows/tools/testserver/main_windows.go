@@ -1,6 +1,8 @@
 // Command testserver is a VLESS+REALITY server on 127.0.0.1 for CI's smoke
 // test of the Windows app; it is never shipped. It writes its share link
 // to -link and its access log to -log, and serves until it is stopped.
+// With -sub it also serves a subscription to that server, as a panel
+// would (see serveSubscription).
 //
 // It runs on the PC whose traffic the tunnel captures, so its own
 // connections are bound to the physical network the way the service's
@@ -14,6 +16,8 @@ package main
 
 import (
 	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -28,6 +32,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/klausms17/vpn/windows/internal/netbind"
@@ -38,9 +45,10 @@ import (
 func main() {
 	linkFile := flag.String("link", "", "where to write the share link")
 	logFile := flag.String("log", "", "where Xray writes its access log")
+	subDir := flag.String("sub", "", "where to write the subscription's address, certificate and requests")
 	flag.Parse()
 	if *linkFile == "" || *logFile == "" {
-		log.Fatal("usage: testserver -link FILE -log FILE")
+		log.Fatal("usage: testserver -link FILE -log FILE [-sub DIR]")
 	}
 
 	binder, err := netbind.New("Kirov VPN", func(m string) { log.Print(m) }, nil)
@@ -83,6 +91,10 @@ func main() {
 
 	link := fmt.Sprintf("vless://%s@127.0.0.1:%d?type=tcp&security=reality&pbk=%s&fp=chrome&sni=example.com&sid=ab12&flow=xtls-rprx-vision#Smoke",
 		id, port, b64(priv.PublicKey().Bytes()))
+	if *subDir != "" {
+		serveSubscription(*subDir, strings.TrimSuffix(link, "#Smoke")+"#Smoke-sub")
+	}
+	// Written last: the smoke test starts once it is there.
 	if err := os.WriteFile(*linkFile, []byte(link+"\n"), 0o600); err != nil {
 		log.Fatal(err)
 	}
@@ -90,6 +102,63 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
 	<-stop
+}
+
+// serveSubscription serves a subscription with link on 127.0.0.1 over
+// HTTPS, with the headers Remnawave sends. Into dir it writes sub.url, its
+// address, sub.cer, the certificate the test makes Windows trust, and
+// sub.log, a line per download with what the app said of itself.
+func serveSubscription(dir, link string) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		log.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "Kirov VPN smoke test"},
+		// Windows checks the name of an address among the DNS names.
+		DNSNames:    []string{"127.0.0.1"},
+		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
+		NotBefore:   time.Now().Add(-time.Hour),
+		NotAfter:    time.Now().Add(48 * time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		log.Fatal(err)
+	}
+	l, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	var mu sync.Mutex
+	body := base64.StdEncoding.EncodeToString([]byte(link + "\n"))
+	title := base64.StdEncoding.EncodeToString([]byte("Smoke subscription"))
+	go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := r.Header
+		mu.Lock()
+		f, err := os.OpenFile(filepath.Join(dir, "sub.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err == nil {
+			fmt.Fprintf(f, "ua=%s hwid=%d os=%s ver=%s model=%s\n", r.UserAgent(), len(h.Get("X-Hwid")),
+				h.Get("X-Device-Os"), h.Get("X-Ver-Os"), h.Get("X-Device-Model"))
+			f.Close()
+		}
+		mu.Unlock()
+		w.Header().Set("Profile-Title", "base64:"+title)
+		w.Header().Set("Subscription-Userinfo", fmt.Sprintf("upload=0; download=1048576; total=1073741824; expire=%d", time.Now().Add(30*24*time.Hour).Unix()))
+		w.Header().Set("Profile-Update-Interval", "1")
+		fmt.Fprint(w, body)
+	}))
+	write := func(name string, data []byte) {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+			log.Fatal(err)
+		}
+	}
+	write("sub.cer", der)
+	write("sub.url", []byte(fmt.Sprintf("https://%s/sub/smoke\n", l.Addr())))
 }
 
 // tlsTarget serves TLS 1.3 on 127.0.0.1 and returns its address.

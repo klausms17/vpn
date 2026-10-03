@@ -97,6 +97,7 @@ jobs:
           out=../bin/licenses
           mkdir -p "$out"
           cp "$(go env GOROOT)/LICENSE" "$out/go.txt"
+          cp internal/ui/frontend/flags/LICENSE.txt "$out/circle-flags.txt"
           GOOS=windows go list -deps -f '{{with .Module}}{{.Path}}{{"\t"}}{{.Dir}}{{end}}' ./cmd/kirovvpn ./cmd/kirovvpn-service |
             sort -u | while IFS=$'\t' read -r module dir; do
               [ -n "$dir" ] || continue

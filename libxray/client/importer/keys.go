@@ -1,3 +1,5 @@
+// Package importer turns keys and subscription bodies into servers ready
+// to save, as the Android app's addLinks and pinWhereNeeded do.
 package importer
 
 import (
@@ -7,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/klausms17/vpn/libxray"
+	"github.com/klausms17/vpn/libxray/client/linktext"
 	"github.com/klausms17/vpn/libxray/client/model"
 	"github.com/klausms17/vpn/libxray/internal/privileged"
 )
@@ -29,14 +32,12 @@ func ForService(outbounds []json.RawMessage) error { return privileged.Check(out
 
 // Keys turns text into servers ready to save, as the Android app's
 // addLinks does: each link is parsed or, when there are none, the text is
-// read as a pasted subscription body. A key check refuses is skipped
-// (check may be nil). Links that ask to skip certificate checks get the
-// server's certificate pinned, four servers at a time, at most maxPins,
-// and none once ctx ends. skipped has a line in Russian for each key that
-// cannot be used; err means the text holds no keys at all.
+// read as a pasted subscription body, and the result goes through Ready.
+// skipped has a line in Russian for each key that cannot be used; err
+// means the text holds no keys at all.
 func Keys(ctx context.Context, text string, check Check) (keys []model.Key, skipped []string, err error) {
 	var parsed []libxray.Profile
-	if links := Links(text); len(links) > 0 {
+	if links := linktext.Links(text); len(links) > 0 {
 		for _, link := range links {
 			out, err := libxray.ParseLink(link)
 			if err != nil {
@@ -63,7 +64,22 @@ func Keys(ctx context.Context, text string, check Check) (keys []model.Key, skip
 		}
 		skipped = append(skipped, res.Errors...)
 	}
+	keys, failed := Ready(ctx, parsed, check, nil, nil)
+	return keys, append(skipped, failed...), nil
+}
 
+// Saved gives the outbounds a server was saved with, or nil.
+type Saved func(libxray.Profile) json.RawMessage
+
+// Ready makes servers ready to save of parsed profiles. A profile check
+// refuses is left out (check may be nil). Those that ask to skip
+// certificate checks get the server's certificate pinned, four at a time,
+// at most maxPins, none once ctx ends; reuse may give the outbounds pinned
+// for the very same link before, so an unchanged server is not contacted
+// again, and when a certificate cannot be fetched, fallback may keep the
+// server as it was saved (either may be nil). failed has a line in
+// Russian for each profile that cannot be used.
+func Ready(ctx context.Context, parsed []libxray.Profile, check Check, reuse, fallback Saved) (keys []model.Key, failed []string) {
 	results := make([]struct {
 		key  model.Key
 		fail string
@@ -78,11 +94,15 @@ func Keys(ctx context.Context, text string, check Check) (keys []model.Key, skip
 				continue
 			}
 		}
-		switch {
-		case !p.NeedsCertPin:
-			results[i].key, results[i].fail = ready(p)
+		if !p.NeedsCertPin {
+			results[i].key, results[i].fail = keyOf(p, nil)
 			continue
-		case pins == maxPins:
+		}
+		if saved := call(reuse, p); saved != nil {
+			results[i].key, results[i].fail = keyOf(p, saved)
+			continue
+		}
+		if pins == maxPins {
 			results[i].fail = label(p) + ": слишком много ключей без проверки сертификата за раз, добавьте его отдельно"
 			continue
 		}
@@ -94,33 +114,44 @@ func Keys(ctx context.Context, text string, check Check) (keys []model.Key, skip
 				results[i].fail = label(p) + ": добавление прервано"
 				return
 			}
-			results[i].key, results[i].fail = ready(p)
+			pinned, err := pin(p)
+			switch {
+			case err == nil:
+				results[i].key, results[i].fail = keyOf(pinned, nil)
+			case call(fallback, p) != nil:
+				// The server may just be unreachable right now: kept as saved.
+				results[i].key, results[i].fail = keyOf(p, call(fallback, p))
+			default:
+				results[i].fail = fmt.Sprintf("%s: не удалось получить сертификат сервера (%s)", label(p), err)
+			}
 		})
 	}
 	wg.Wait()
 	for _, r := range results {
 		if r.fail != "" {
-			skipped = append(skipped, r.fail)
+			failed = append(failed, r.fail)
 		} else {
 			keys = append(keys, r.key)
 		}
 	}
-	return keys, skipped, nil
+	return keys, failed
 }
 
-// ready pins the certificate of p if it needs one; fail says why p cannot
-// be used.
-func ready(p libxray.Profile) (k model.Key, fail string) {
-	if p.NeedsCertPin {
-		pinned, err := pin(p)
-		if err != nil {
-			return k, fmt.Sprintf("%s: не удалось получить сертификат сервера (%s)", label(p), err)
-		}
-		p = pinned
+func call(saved Saved, p libxray.Profile) json.RawMessage {
+	if saved == nil {
+		return nil
 	}
-	outbounds, err := json.Marshal(p.Outbounds)
-	if err != nil {
-		return k, fmt.Sprintf("%s: %s", label(p), err)
+	return saved(p)
+}
+
+// keyOf makes a server of p, with outbounds instead of its own when given;
+// fail says why it cannot be used.
+func keyOf(p libxray.Profile, outbounds json.RawMessage) (k model.Key, fail string) {
+	if outbounds == nil {
+		var err error
+		if outbounds, err = json.Marshal(p.Outbounds); err != nil {
+			return k, fmt.Sprintf("%s: %s", label(p), err)
+		}
 	}
 	return model.Key{
 		Name: p.Name, Protocol: p.Protocol, Address: p.Address, Port: p.Port,

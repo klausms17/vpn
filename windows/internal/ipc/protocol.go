@@ -7,7 +7,7 @@ import "encoding/json"
 
 // Version changes whenever a message changes shape. A window of another
 // version asks to be restarted (after an update the old window still runs).
-const Version = 2
+const Version = 3
 
 // Operations the service answers. Nothing takes a file path, a URL to
 // run or raw Xray JSON (docs/windows/PLAN.md, section 2.3).
@@ -22,6 +22,10 @@ const (
 	OpPing        = "ping"
 	OpSetSettings = "setSettings"
 	OpLogs        = "logs"
+	// OpRefresh downloads subscriptions again: the one named, or all.
+	OpRefresh = "refresh"
+	// OpDeleteSubscription removes a subscription with its servers.
+	OpDeleteSubscription = "deleteSubscription"
 )
 
 // Events the service pushes. A new connection first gets EventHello, then
@@ -85,17 +89,42 @@ type Profile struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Protocol string `json:"protocol"`
+	Network  string `json:"network,omitempty"`
 	Security string `json:"security,omitempty"`
+	// SubscriptionID names the subscription it came from; empty for an own
+	// key.
+	SubscriptionID string `json:"subscriptionId,omitempty"`
+}
+
+// Subscription is a subscription as the window shows it: no link.
+type Subscription struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// UpdatedAt and LastAttemptAt are in Unix milliseconds; 0 is never.
+	UpdatedAt     int64  `json:"updatedAt,omitempty"`
+	LastAttemptAt int64  `json:"lastAttemptAt,omitempty"`
+	LastError     string `json:"lastError,omitempty"`
+	// Notice is what the panel said instead of, or besides, servers;
+	// Announce is its owner's message.
+	Notice   string `json:"notice,omitempty"`
+	Announce string `json:"announce,omitempty"`
+	// Used and Total are bytes, Expire is in Unix seconds; 0 is unknown.
+	Used   int64 `json:"used,omitempty"`
+	Total  int64 `json:"total,omitempty"`
+	Expire int64 `json:"expire,omitempty"`
+	// Updating is true while it is being downloaded.
+	Updating bool `json:"updating,omitempty"`
 }
 
 // Profiles is the data of EventProfiles.
 type Profiles struct {
-	Profiles   []Profile `json:"profiles"`
-	SelectedID string    `json:"selectedId,omitempty"`
+	Profiles      []Profile      `json:"profiles"`
+	Subscriptions []Subscription `json:"subscriptions"`
+	SelectedID    string         `json:"selectedId,omitempty"`
 }
 
-// ImportArgs carries pasted text: keys, one per line, or a message
-// holding them.
+// ImportArgs carries pasted text: keys, one per line, a message holding
+// them, a subscription link or an "Add to Kirov VPN" link.
 type ImportArgs struct {
 	Text string `json:"text"`
 }
@@ -109,7 +138,8 @@ type ImportResult struct {
 // MaxImport is the most text an import takes, Android's limit.
 const MaxImport = 256 << 10
 
-// IDArgs names a server, for OpSelect and OpDelete.
+// IDArgs names a server, for OpSelect and OpDelete, or a subscription,
+// for OpRefresh (empty: all) and OpDeleteSubscription.
 type IDArgs struct {
 	ID string `json:"id"`
 }

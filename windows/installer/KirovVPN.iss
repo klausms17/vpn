@@ -60,6 +60,12 @@ Name: "{autoprograms}\Kirov VPN"; Filename: "{app}\KirovVPN.exe"
 [Registry]
 ; The tray icon starts for every user at logon, without its window.
 Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Kirov VPN"; ValueData: """{app}\KirovVPN.exe"" --tray"; Flags: uninsdeletevalue
+; klausvpn:// links, such as «Добавить в Kirov VPN» on the friends' page,
+; open the window, which asks before it adds anything.
+Root: HKLM; Subkey: "Software\Classes\klausvpn"; ValueType: string; ValueName: ""; ValueData: "URL:Kirov VPN"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Classes\klausvpn"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKLM; Subkey: "Software\Classes\klausvpn\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\KirovVPN.exe"",0"
+Root: HKLM; Subkey: "Software\Classes\klausvpn\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\KirovVPN.exe"" ""%1"""
 
 [Run]
 Filename: "{tmp}\MicrosoftEdgeWebview2Setup.exe"; Parameters: "/silent /install"; StatusMsg: "Установка WebView2…"; Flags: waituntilterminated; Check: NeedsWebView2

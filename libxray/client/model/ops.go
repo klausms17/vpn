@@ -56,6 +56,10 @@ func FreshKeys(ready []Key, saved map[string]bool) []Key {
 // one message to the window.
 const MaxProfiles = 1000
 
+// MaxSubscriptions bounds the saved subscriptions, for the same reason and
+// because each is downloaded every hour.
+const MaxSubscriptions = 20
+
 // WithNewKeys appends the keys of ready that are not saved yet as own
 // keys, as many as fit under MaxProfiles; it returns the new state, the
 // servers actually added and how many new keys did not fit. newID and now

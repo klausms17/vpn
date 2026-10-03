@@ -14,6 +14,7 @@ import (
 // the service; the answers come back as snapshot events.
 type Bridge struct {
 	link    *link
+	links   pendingLink
 	version string
 	// uiLog is the window's own log, the journal's last section.
 	uiLog string
@@ -52,6 +53,46 @@ func (b *Bridge) Import(text string) (string, error) {
 	}
 	return r.Message, nil
 }
+
+// Refresh downloads subscription id again, or each one when id is empty,
+// and returns what it did, for the user.
+func (b *Bridge) Refresh(id string) (string, error) {
+	var r ipc.ImportResult
+	// Each subscription may take its time, directly and then through the
+	// tunnel.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if err := b.link.call(ctx, ipc.OpRefresh, ipc.IDArgs{ID: id}, &r); err != nil {
+		return "", err
+	}
+	return r.Message, nil
+}
+
+// DeleteSubscription removes subscription id with its servers.
+func (b *Bridge) DeleteSubscription(id string) error {
+	return b.request(ipc.OpDeleteSubscription, ipc.IDArgs{ID: id}, nil)
+}
+
+// PendingLink is the "Add to Kirov VPN" link waiting for the user's
+// answer, for a page that just loaded.
+func (b *Bridge) PendingLink() LinkPrompt { return b.links.prompt() }
+
+// AddPendingLink adds what the waiting link carries and returns what it
+// did. The link waits on if that fails, so the user can try again.
+func (b *Bridge) AddPendingLink() (string, error) {
+	text := b.links.peek()
+	if text == "" {
+		return "", errors.New("Эта ссылка уже добавлена или отменена")
+	}
+	message, err := b.Import(text)
+	if err == nil {
+		b.links.drop(text)
+	}
+	return message, err
+}
+
+// DropPendingLink forgets the waiting link: the user said no.
+func (b *Bridge) DropPendingLink() { b.links.drop(b.links.peek()) }
 
 // Select makes server id the one to connect to.
 func (b *Bridge) Select(id string) error { return b.request(ipc.OpSelect, ipc.IDArgs{ID: id}, nil) }

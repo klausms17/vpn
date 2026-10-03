@@ -1,4 +1,4 @@
-package importer
+package linktext
 
 import (
 	"reflect"
