@@ -74,12 +74,14 @@ and give step-by-step instructions for anything he must do himself.
   - `install-relay.sh`: a Russian relay for mobile "whitelist" mode.
   - `remnawave/`: the panel for friends. `install-panel.sh` and
     `install-node.sh` install it; `klaus-panel` is the owner's CLI (friends,
-    nodes, publish-apk, telegram-setup); `klaus-monitor.py` turns block
+    nodes, publish-apk, telegram-setup; publish-apk needs `GITHUB_TOKEN`
+    only for a private repository); `klaus-monitor.py` turns block
     reports from the app into Telegram alerts; `klaus-page.html` is the
     light iOS-style page a friend's browser gets for the link (Caddy serves
     it for `Accept: text/html`, apps still get their list from Remnawave;
-    install-panel.sh fills in the APK and support links); `test/` holds
-    the Docker end-to-end test and the monitor unit tests.
+    install-panel.sh fills in the APK and support links; tabs Android,
+    iPhone and Windows, the last two «Скоро», the device's own opens);
+    `test/` holds the Docker end-to-end test and the monitor unit tests.
   - The owner may add friends in the panel's web form instead of the CLI.
     That form starts with no squad and an end date of tomorrow, so a
     systemd timer runs `klaus-panel tidy-users` every 20 seconds: users
@@ -243,8 +245,10 @@ and give step-by-step instructions for anything he must do himself.
 ## Next steps
 
 1. The owner creates the permanent Android signing key on Windows
-   (`docs/README.ru.md`, section 9: `keytool` from Temurin JDK, secrets
-   `ANDROID_KEYSTORE_BASE64` and `ANDROID_KEYSTORE_PASSWORD`). Then:
+   (`docs/README.ru.md`, section 9, with PowerShell commands: `keytool`
+   from Temurin JDK, secrets `ANDROID_KEYSTORE_BASE64` and
+   `ANDROID_KEYSTORE_PASSWORD`; he got the steps on 3 Oct, when he asked
+   for the friend page's Android download). Then:
    - check for "Release key configured" in the CI log;
    - make the first stable build;
    - register `com.klausms.vpn` for Google developer verification with that
@@ -298,7 +302,9 @@ and give step-by-step instructions for anything he must do himself.
    - `klaus-panel telegram-setup`, a backup, and deleting the test user
      `test` (its link was posted in a chat).
    - The panel publishes only `KirovVPN-*.apk` from the `stable` release,
-     so it needs a stable build first.
+     so it needs a stable build first (no token while the repository is
+     public). The owner updates the panel with `cd ~/vpn && git pull &&
+     sudo bash server/remnawave/install-panel.sh`.
    - The Beget VPS is not needed: a Russian exit bypasses nothing, and a
      panel there would put friends' data under Russian requests and its
      links to the nodes behind TSPU. Later it might be a whitelist relay.
