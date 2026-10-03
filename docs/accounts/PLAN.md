@@ -266,12 +266,12 @@ No IP, no log of requests. The service's own log says what happened
 
 ### 6.4 iPhone and Mac
 
-- Both use `libxray/client/account` through a gomobile facade
+- iPhone: `libxray/client/account` through a gomobile facade
   (`libxray/mobile`; the root package cannot import `client/*`), with the
-  token in the Keychain.
-- iPhone: in phases 5–6 of `docs/ios/PLAN.md`.
-- Mac: a new app, planned after the accounts (`docs/mac/PLAN.md`), with
-  the account from its first version.
+  token in the Keychain, in phases 5–6 of `docs/ios/PLAN.md`.
+- Mac: the desktop service shared with Windows (`docs/mac/PLAN.md`), so the
+  account comes with it as built for Windows, its session in the
+  root-only data folder.
 
 ## 7. Owner steps (when phase A is merged)
 
