@@ -201,7 +201,14 @@ function groupMenu(anchor, g) {
   const items = [{ label: "Проверить серверы", action: () => pingGroup(g) }];
   if (g.sub) {
     items.unshift({ label: "Обновить подписку", action: () => refreshSubscription(g.id) });
-    items.push({
+    // The account's servers go with the account.
+    items.push(g.sub.account ? {
+      label: "Выйти из аккаунта",
+      danger: true,
+      action: () => confirmDelete("Выйти из аккаунта?",
+        `Серверы аккаунта (${g.servers.length}) будут убраны с этого компьютера. Чтобы вернуть их, войдите снова.`,
+        () => call("AccountLogout").catch(fail), "Выйти"),
+    } : {
       label: "Удалить подписку",
       danger: true,
       action: () => confirmDelete("Удалить подписку?",

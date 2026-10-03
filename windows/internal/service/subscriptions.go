@@ -224,7 +224,7 @@ func (s *subscriptions) shown(sub model.Subscription) ipc.Subscription {
 	return ipc.Subscription{
 		ID: sub.ID, Name: sub.Name, UpdatedAt: sub.UpdatedAt, LastAttemptAt: sub.LastAttemptAt,
 		LastError: sub.LastError, Notice: sub.Notice, Announce: sub.Announce,
-		Used: u.Used, Total: u.Total, Expire: u.Expire, Updating: updating,
+		Used: u.Used, Total: u.Total, Expire: u.Expire, Updating: updating, Account: sub.Account,
 	}
 }
 

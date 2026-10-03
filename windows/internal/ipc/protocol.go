@@ -7,7 +7,7 @@ import "encoding/json"
 
 // Version changes whenever a message changes shape. A window of another
 // version asks to be restarted (after an update the old window still runs).
-const Version = 3
+const Version = 4
 
 // Operations the service answers. Nothing takes a file path, a URL to
 // run or raw Xray JSON (docs/windows/PLAN.md, section 2.3).
@@ -26,16 +26,27 @@ const (
 	OpRefresh = "refresh"
 	// OpDeleteSubscription removes a subscription with its servers.
 	OpDeleteSubscription = "deleteSubscription"
+	// The account of this PC (docs/accounts/PLAN.md), held by the service:
+	// sign up, mail the confirmation again, sign in, mail a new password
+	// link, sign out, delete it, and ask the accounts service about it now.
+	OpAccountRegister = "accountRegister"
+	OpAccountResend   = "accountResend"
+	OpAccountLogin    = "accountLogin"
+	OpAccountForgot   = "accountForgot"
+	OpAccountLogout   = "accountLogout"
+	OpAccountDelete   = "accountDelete"
+	OpAccountCheck    = "accountCheck"
 )
 
 // Events the service pushes. A new connection first gets EventHello, then
-// the current status, servers, checks and settings.
+// the current status, servers, checks, settings and account.
 const (
 	EventHello    = "hello"
 	EventStatus   = "status"
 	EventProfiles = "profiles"
 	EventPings    = "pings"
 	EventSettings = "settings"
+	EventAccount  = "account"
 )
 
 // Request is one call from a window.
@@ -114,6 +125,8 @@ type Subscription struct {
 	Expire int64 `json:"expire,omitempty"`
 	// Updating is true while it is being downloaded.
 	Updating bool `json:"updating,omitempty"`
+	// Account marks the account's subscription: signing out removes it.
+	Account bool `json:"account,omitempty"`
 }
 
 // Profiles is the data of EventProfiles.
@@ -208,6 +221,40 @@ type LogSection struct {
 // addresses and host names taken out.
 type Logs struct {
 	Sections []LogSection `json:"sections"`
+}
+
+// AccountArgs is what the user typed in the account view. The password is
+// passed on to the accounts service and never kept.
+type AccountArgs struct {
+	Email    string `json:"email,omitempty"`
+	Password string `json:"password,omitempty"`
+}
+
+// The states of Account: signed out, the accounts service's states, and
+// "unconfirmed", which only the app knows (signed up, the email not
+// confirmed yet).
+const (
+	AccountSignedOut   = ""
+	AccountUnconfirmed = "unconfirmed"
+	AccountPending     = "pending"
+	AccountActive      = "active"
+	AccountRejected    = "rejected"
+)
+
+// Account is the data of EventAccount: never the session token or the
+// account's link.
+type Account struct {
+	// Available is false in a build without an accounts service.
+	Available bool   `json:"available"`
+	Email     string `json:"email,omitempty"`
+	Status    string `json:"status,omitempty"`
+	// Busy is true while a request to the accounts service runs.
+	Busy bool `json:"busy,omitempty"`
+}
+
+// AccountResult says what an account op did, in a message for the user.
+type AccountResult struct {
+	Message string `json:"message"`
 }
 
 // MaxMessage bounds one line on the pipe: an import plus its JSON escaping.

@@ -78,11 +78,15 @@ jobs:
 
       - name: Build
         working-directory: windows
+        env:
+          # The accounts service (docs/accounts/PLAN.md), a repository
+          # variable; without it the build has no accounts.
+          ACCOUNT_URL: ${{ vars.ACCOUNT_URL }}
         run: |
           go run ./tools/mkres "$VERSION"
           export GOOS=windows GOARCH=amd64 CGO_ENABLED=0
           flags=(-trimpath -buildvcs=false)
-          ld="-s -w -X main.version=$VERSION"
+          ld="-s -w -X main.version=$VERSION -X github.com/klausms17/vpn/windows/internal/service.accountURL=$ACCOUNT_URL"
           go build "${flags[@]}" -ldflags "$ld" -o ../bin/KirovVPNService.exe ./cmd/kirovvpn-service
           go build "${flags[@]}" -ldflags "$ld -H windowsgui" -o ../bin/KirovVPN.exe ./cmd/kirovvpn
           # For the smoke test only, never shipped.

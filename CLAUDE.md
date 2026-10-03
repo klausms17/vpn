@@ -51,9 +51,9 @@ and give step-by-step instructions for anything he must do himself.
     `C:\Program Files\Kirov VPN\Data`, DPAPI). In `internal/service`:
     `handler.go` answers the window, `settings.go` checks the settings
     and holds the torrent clients, `pinger.go` checks servers,
-    `explain.go` turns the core's start errors into advice and
+    `explain.go` turns the core's start errors into advice,
     `tunaddr_windows.go` finds or frees an adapter holding the tunnel's
-    address.
+    address and `account.go` holds the PC's account.
   - `cmd/kirovvpn`: the tray icon and window (Wails v3, `internal/ui`; the
     page is `internal/ui/frontend`, ES modules with one per part and round
     flags in `flags/`; `origin.go` refuses calls from any other page;
@@ -65,8 +65,9 @@ and give step-by-step instructions for anything he must do himself.
     (icons, exe resources, a test server, `othervpn` for CI).
 - `libxray/client/`: the Android logic ported to Go with its tests (model,
   store, key import, links in text and `klausvpn://` links, subscriptions
-  with the device headers, log, tunnel rules), used by Windows and later
-  iOS.
+  with the device headers, log, tunnel rules) and the accounts service's
+  client (`account`, its contract test runs the real server), used by
+  Windows and later iOS and the Mac.
   `libxray/internal/privileged` is the allowlist of what the Windows
   service's core may run, and `internal/redact` takes addresses and host
   names out of the logs (the core's `xray.log` too, on every platform).
@@ -79,9 +80,13 @@ and give step-by-step instructions for anything he must do himself.
   - `install-relay.sh`: a Russian relay for mobile "whitelist" mode.
   - `remnawave/`: the panel for friends. `install-panel.sh` and
     `install-node.sh` install it; `klaus-panel` is the owner's CLI (friends,
-    nodes, publish-apk and publish-windows, telegram-setup; publishing
-    needs `GITHUB_TOKEN` only for a private repository); `klaus-monitor.py` turns block
-    reports from the app into Telegram alerts; `klaus-page.html` is the
+    nodes, publish-apk and publish-windows, telegram-setup, mail-setup and
+    the account commands; publishing needs `GITHUB_TOKEN` only for a
+    private repository); `klaus-monitor.py` turns block reports from the
+    app into Telegram alerts; `klaus-accounts.py` is the accounts service
+    (sign-up, its letters, the owner's Telegram buttons, sign-in; see
+    `docs/accounts/PLAN.md`), in a container like the monitor's, on
+    `/account/`; `klaus-page.html` is the
     light iOS-style page a friend's browser gets for the link (Caddy serves
     it for `Accept: text/html`, apps still get their list from Remnawave;
     tabs Android, iPhone and Windows, the device's own opens; iPhone says
@@ -93,7 +98,8 @@ and give step-by-step instructions for anything he must do himself.
     A page that is not whole is refused, and `android.yml` checks that
     the page in a branch is one the panel takes. The page must work with
     the panel as installed: it only reads files on `/app/`.
-    `test/` holds the Docker end-to-end test and the monitor unit tests.
+    `test/` holds the Docker end-to-end test and the unit tests of the
+    monitor and the accounts.
   - The owner may add friends in the panel's web form instead of the CLI.
     That form starts with no squad and an end date of tomorrow, so a
     systemd timer runs `klaus-panel tidy-users` every 20 seconds: users
@@ -109,6 +115,8 @@ and give step-by-step instructions for anything he must do himself.
   `fetch-geo.sh`, `prepare-geo.sh`.
 - `docs/windows/PLAN.md`: the plan for the Windows app (section 1 lists
   what was checked and decided; section 10 the phases and what is built).
+- `docs/accounts/PLAN.md`: optional accounts in every app (the server, the
+  apps, security, phases).
 - `docs/README.ru.md`: the owner's full guide in Russian: install, servers,
   whitelist mode, reliability, signing, panel and distribution.
 - `tools/jvm-check/`: a local compile-and-test of the plain Kotlin code
@@ -152,8 +160,8 @@ and give step-by-step instructions for anything he must do himself.
   - Panel: start Docker (`dockerd &`; install `iproute2` if `ip` is
     missing), then `WORK=/tmp/rw bash server/remnawave/test/run-local.sh`.
     It takes about 25 minutes and must end with `ALL CHECKS PASSED`.
-    `python3 -B server/remnawave/test/monitor_test.py` runs the monitor
-    tests alone.
+    `python3 -B server/remnawave/test/monitor_test.py` and
+    `accounts_test.py` run the monitor's and the accounts' tests alone.
 - Keep `tools/jvm-check/stubs` in step with the AIDL files and the
   `libxray` API.
 
@@ -262,15 +270,42 @@ and give step-by-step instructions for anything he must do himself.
       outlived their window; the dialog could answer for a newer link;
     - merged into `main` the same day
       (https://github.com/klausms17/vpn/pull/3).
-  - The same day the owner found Claude Code failing on his PC under our
-    VPN with ECONNREFUSED while Happ worked. Our tunnel accepts every
-    connection (gVisor completes the handshake, IPv6 is denied, not
-    refused), so a refusal means a program set to a proxy on a local port
-    where nothing listens: Happ's, used by Claude Code. He got the manual
-    fix, and the window now finds such a proxy (Windows' own, or the
-    user's `HTTP(S)_PROXY`/`ALL_PROXY`) while connected, shows it and
-    removes it with «Убрать прокси» (variables for all users only named:
-    they need an administrator).
+  - The same day the owner found Claude Code failing on one of his
+    projects under our VPN with ECONNREFUSED while Happ worked. Our tunnel
+    cannot refuse a connection: gVisor answers every SYN itself, and its
+    only reset follows a 127-second handshake timeout no program waits
+    for. So the refusal came from a proxy where nothing listens. The
+    window now finds such a proxy (Windows' own, or the user's
+    `HTTP(S)_PROXY`/`ALL_PROXY`) while connected, shows it and removes it
+    with «Убрать прокси» (variables for all users only named: they need an
+    administrator). But his checks found none of these, so the cause is
+    still open: most likely a proxy in that project's own Claude Code
+    settings (`.claude/settings*.json`), or Claude Code running on a server
+    (his other chat mentioned xray on a Selectel server). He was given a
+    search command and put it off («позже к этому вернусь»). The core's
+    journal also showed bursts of `proxy/tun: operation timed out`
+    (handshakes the programs had abandoned), not explained yet.
+- **Accounts** (`docs/accounts/PLAN.md`): on 3 Oct the owner asked for
+  sign-up and sign-in in every app (Android, Windows, iPhone, the planned
+  Mac app), optional, so that a friend signs in on a new device and has
+  their servers; payment later, access granted by hand for now; password
+  recovery; the text after sign-up as he wrote it; a plain explanation of
+  what an account gives.
+  - Phase A, the server (`klaus-accounts.py`, Python's standard library
+    only, SQLite, scrypt, no IPs kept), is built: a letter confirms the
+    address, the owner grants access with a Telegram button or
+    `klaus-panel account-approve`, which makes a panel user like
+    `add-user`; its link becomes the account's subscription in the apps.
+    Mail goes through a Gmail app password set with
+    `klaus-panel mail-setup`. `accounts_test.py` (28 tests) and the Docker
+    e2e pass.
+  - Phase B, Windows, is built: `libxray.Request`, `libxray/client/account`,
+    the service's `account.go`, pipe protocol 4, an «Аккаунт» view in the
+    rail (only in a build with the repository variable `ACCOUNT_URL`), and
+    a smoke-test group against the test server.
+  - Next: phase C (Android), then D (iPhone, and the Mac app with accounts
+    from its first version). Not merged yet; the owner's steps are in the
+    plan's section 7.
 - **iPhone:** phases 1–2 of `docs/ios/PLAN.md` are done. The Go core builds
   for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
   passes its checks (geo files in the extension, no bitcode). The app is
@@ -371,7 +406,13 @@ and give step-by-step instructions for anything he must do himself.
 6. The owner once pasted a Telegram bot token into a chat. Make sure he
    revoked it (@BotFather → /revoke) and entered the new one only on the
    panel.
-7. Known limits, documented:
+7. Accounts (`docs/accounts/PLAN.md`): phases C (Android) and D (iPhone,
+   the Mac app). The owner's steps once phases A and B are merged (the
+   plan's section 7): a Gmail box with an app password and
+   `klaus-panel mail-setup` (the password asked hidden), a new Telegram
+   bot (step 6), the repository variable `ACCOUNT_URL` = the subscription
+   address, then the panel update command.
+8. Known limits, documented:
    - UDP flows outlive `Stop`, and a UDP socket is routed by its first
      packet (audit 41/42);
    - DNS for names never seen before still waits while the server is down

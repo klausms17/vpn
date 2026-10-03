@@ -3,7 +3,8 @@
 # REALITY server, check that DNS cannot leave outside the tunnel and that
 # IPv6 fails at once, check the server, read the journal, send a site and
 # a program directly, add and refresh a subscription served over HTTPS,
-# restart the tunnel 50 times, kill the service and
+# sign in to an account and out, restart the tunnel 50 times, kill the
+# service and
 # see it come back, start with another adapter holding the tunnel's
 # address, install over itself, uninstall. Run by windows.yml; it changes
 # the PC's network and installs a service, so never run it on a real PC.
@@ -216,6 +217,34 @@ try {
   Check ($journal -match 'subscription added' -and $journal -notmatch '127\.0\.0\.1' -and $journal -notmatch 'sub/smoke') 'the journal tells of it without its address'
   Write-Host '::endgroup::'
 
+  Write-Host '::group::An account'
+  # The test server answers as the accounts service; an administrator's
+  # AccountURL points the service at it instead of this build's.
+  $accountKey = New-Item -Path 'HKLM:\SOFTWARE\Kirov VPN' -Force
+  New-ItemProperty -Path $accountKey.PSPath -Name AccountURL -Value (Get-Content "$work\sub\account.url" -TotalCount 1).Trim() -Force | Out-Null
+  Restart-Service -Name KirovVPN
+  Ctl wait-service | Out-Null
+  Ctl connect | Out-Null
+  $out = Ctl account
+  Check ("$out" -eq '{"account":{"available":true},"subscriptions":[]}') "the window offers an account ($out)"
+  $out = '{"email":"smoke@kirov.test","password":"wrong pass"}' | & (Join-Path $Tools 'kirovctl.exe') account-login
+  Check ($LASTEXITCODE -ne 0 -and "$out" -match 'Неверная почта или пароль') "a wrong password is refused ($out)"
+  $out = '{"email":" Smoke@Kirov.test ","password":"smoke pass"}' | & (Join-Path $Tools 'kirovctl.exe') account-login
+  Check ($LASTEXITCODE -eq 0 -and "$out" -match 'Серверы аккаунта добавлены') "signed in ($out)"
+  $out = Ctl account
+  Check ("$out" -eq '{"account":{"available":true,"email":"smoke@kirov.test","status":"active"},"subscriptions":[{"name":"Smoke account","servers":1}]}') "the account's servers are there ($out)"
+  $calls = @(Get-Content "$work\sub\account.log")
+  Check (@($calls -match '^login device=Windows \d').Count -eq 2 -and @($calls -match '^ua=KlausVPN/').Count -ge 1) "the accounts service was told the device, the subscription downloaded ($calls)"
+  Check (-not (Select-String -Path "$data\account.json" -Pattern 'smoke-session-token', 'smoke@kirov' -SimpleMatch -Quiet)) 'the session is kept sealed'
+  $journal = (& (Join-Path $Tools 'kirovctl.exe') logs) -join "`n"
+  Check ($journal -match 'signed in to the account' -and $journal -notmatch 'smoke@kirov' -and $journal -notmatch 'sub/account') 'the journal tells of it without the email or the link'
+  Ctl account-logout | Out-Null
+  $out = Ctl account
+  Check ("$out" -eq '{"account":{"available":true},"subscriptions":[]}') "signing out removed the account's servers ($out)"
+  Check (@(Get-Content "$work\sub\account.log") -contains 'POST logout') 'and the accounts service heard of it'
+  Remove-Item -Path $accountKey.PSPath -Recurse
+  Write-Host '::endgroup::'
+
   Write-Host '::group::50 restarts of the tunnel'
   Ctl disconnect | Out-Null
   Ctl connect | Out-Null
@@ -312,5 +341,6 @@ try {
   Stop-Service -Name KirovVPN -ErrorAction SilentlyContinue
   if ($server) { Stop-Process -Id $server.Id -ErrorAction SilentlyContinue }
   if ($subCert) { Remove-Item -Path "Cert:\LocalMachine\Root\$($subCert.Thumbprint)" -ErrorAction SilentlyContinue }
+  Remove-Item -Path 'HKLM:\SOFTWARE\Kirov VPN' -Recurse -ErrorAction SilentlyContinue
   Get-Process othervpn -ErrorAction SilentlyContinue | Stop-Process -ErrorAction SilentlyContinue
 }

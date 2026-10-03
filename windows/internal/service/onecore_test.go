@@ -12,10 +12,10 @@ import (
 // TestTheServiceMakesNoCoreOfItsOwn: every Xray core takes over the
 // process's log, DNS and outbounds when it is made, and the tunnel runs in
 // this process. Only the tunnel's controller gives them back (its
-// ProbeOutbounds and FetchThroughTunnel), so these never run here (the
-// plan's row 18).
+// ProbeOutbounds, FetchThroughTunnel and RequestThroughTunnel), so these
+// never run here (the plan's row 18).
 func TestTheServiceMakesNoCoreOfItsOwn(t *testing.T) {
-	ownCore := []string{"MeasureOutboundDelay", "Fetch", "FetchWithHeaders", "ValidateConfig"}
+	ownCore := []string{"MeasureOutboundDelay", "Fetch", "FetchWithHeaders", "Request", "ValidateConfig"}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)

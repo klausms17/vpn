@@ -13,6 +13,9 @@
 //	kirovctl ping            check every server and print the results
 //	kirovctl set-settings    save the settings read from standard input
 //	kirovctl logs            print the journal
+//	kirovctl account         print the account and its subscriptions
+//	kirovctl account-login   sign in with the email and password read from standard input
+//	kirovctl account-logout  sign out
 package main
 
 import (
@@ -33,7 +36,7 @@ const timeout = 90 * time.Second
 
 func main() {
 	if len(os.Args) != 2 {
-		fail(errors.New("usage: kirovctl wait-service | pipe-sddl | status | import | refresh | connect | wait-connected | disconnect | ping | set-settings | logs"))
+		fail(errors.New("usage: kirovctl wait-service | pipe-sddl | status | import | refresh | connect | wait-connected | disconnect | ping | set-settings | logs | account | account-login | account-logout"))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -165,19 +168,44 @@ func main() {
 		for _, s := range l.Sections {
 			fmt.Printf("=== %s ===\n%s\n", s.Title, s.Text)
 		}
+	case "account":
+		if err := w.until(ctx, func(w *watch) bool { return w.acc != nil && w.profiles != nil }); err != nil {
+			fail(err)
+		}
+		print(w.account())
+	case "account-login":
+		var a ipc.AccountArgs
+		if err := json.NewDecoder(io.LimitReader(os.Stdin, 1<<20)).Decode(&a); err != nil {
+			fail(err)
+		}
+		var r ipc.AccountResult
+		if err := c.Call(ctx, ipc.OpAccountLogin, a, &r); err != nil {
+			// On standard output, where the smoke test reads the refusal.
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		fmt.Println(r.Message)
+	case "account-logout":
+		if err := c.Call(ctx, ipc.OpAccountLogout, nil, nil); err != nil {
+			fail(err)
+		}
+		fmt.Println("signed out")
 	default:
 		fail(fmt.Errorf("unknown command %q", os.Args[1]))
 	}
 }
 
-// watch keeps the latest status and server checks the service sent.
+// watch keeps the latest status, server checks, servers and account the
+// service sent.
 type watch struct {
-	mu      sync.Mutex
-	st      *ipc.Status
-	n       int
-	pings   ipc.Pings
-	np      int
-	changed chan struct{}
+	mu       sync.Mutex
+	st       *ipc.Status
+	n        int
+	pings    ipc.Pings
+	np       int
+	profiles *ipc.Profiles
+	acc      *ipc.Account
+	changed  chan struct{}
 }
 
 func (w *watch) onEvent(ev ipc.Event) {
@@ -192,6 +220,16 @@ func (w *watch) onEvent(ev ipc.Event) {
 		var p ipc.Pings
 		if json.Unmarshal(ev.Data, &p) == nil {
 			w.pings, w.np = p, w.np+1
+		}
+	case ipc.EventProfiles:
+		var p ipc.Profiles
+		if json.Unmarshal(ev.Data, &p) == nil {
+			w.profiles = &p
+		}
+	case ipc.EventAccount:
+		var a ipc.Account
+		if json.Unmarshal(ev.Data, &a) == nil {
+			w.acc = &a
 		}
 	}
 	w.mu.Unlock()
@@ -223,6 +261,36 @@ func (w *watch) lastPings() ipc.Pings {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.pings
+}
+
+// accountSubscription is one of the account's subscriptions, with the
+// number of its servers.
+type accountSubscription struct {
+	Name    string `json:"name"`
+	Servers int    `json:"servers"`
+}
+
+// account is the account as the window sees it, and its subscriptions.
+func (w *watch) account() any {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	subs := []accountSubscription{}
+	for _, s := range w.profiles.Subscriptions {
+		if !s.Account {
+			continue
+		}
+		n := 0
+		for _, p := range w.profiles.Profiles {
+			if p.SubscriptionID == s.ID {
+				n++
+			}
+		}
+		subs = append(subs, accountSubscription{Name: s.Name, Servers: n})
+	}
+	return struct {
+		Account       ipc.Account           `json:"account"`
+		Subscriptions []accountSubscription `json:"subscriptions"`
+	}{*w.acc, subs}
 }
 
 // until waits until ok holds, which it tests under the watch's lock.
