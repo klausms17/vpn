@@ -57,8 +57,9 @@ and give step-by-step instructions for anything he must do himself.
   - `cmd/kirovvpn`: the tray icon and window (Wails v3, `internal/ui`; the
     page is `internal/ui/frontend`, ES modules with one per part and round
     flags in `flags/`; `origin.go` refuses calls from any other page;
-    `deeplink.go` keeps a `klausvpn://` link until the user answers). It
-    holds no keys.
+    `deeplink.go` keeps a `klausvpn://` link until the user answers;
+    `proxy.go` finds a proxy another VPN program left on a local port
+    where nothing listens and offers to remove it). It holds no keys.
   - `installer/KirovVPN.iss` (Inno Setup), `test/smoke.ps1` (CI only),
     `cmd/kirovctl` (the smoke test's pipe client, never shipped), `tools/`
     (icons, exe resources, a test server, `othervpn` for CI).
@@ -258,7 +259,18 @@ and give step-by-step instructions for anything he must do himself.
       halfway, or one past 16 servers that need a pinned certificate,
       dropped servers; a far-off `expire` from a panel stopped every
       window; a panel's error texts were unbounded; queued refreshes
-      outlived their window; the dialog could answer for a newer link.
+      outlived their window; the dialog could answer for a newer link;
+    - merged into `main` the same day
+      (https://github.com/klausms17/vpn/pull/3).
+  - The same day the owner found Claude Code failing on his PC under our
+    VPN with ECONNREFUSED while Happ worked. Our tunnel accepts every
+    connection (gVisor completes the handshake, IPv6 is denied, not
+    refused), so a refusal means a program set to a proxy on a local port
+    where nothing listens: Happ's, used by Claude Code. He got the manual
+    fix, and the window now finds such a proxy (Windows' own, or the
+    user's `HTTP(S)_PROXY`/`ALL_PROXY`) while connected, shows it and
+    removes it with «Убрать прокси» (variables for all users only named:
+    they need an administrator).
 - **iPhone:** phases 1–2 of `docs/ios/PLAN.md` are done. The Go core builds
   for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
   passes its checks (geo files in the extension, no bitcode). The app is

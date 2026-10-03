@@ -1,6 +1,6 @@
 // The pop-up menu and the sheets over the window: adding servers, an
 // "Add to Kirov VPN" link to confirm, renaming, and confirmations.
-import { $, call, el, fail, toast } from "./util.js";
+import { $, busy, call, el, fail, toast } from "./util.js";
 
 // ---------------------------------------------------------------- menu
 
@@ -91,19 +91,6 @@ document.addEventListener("keydown", (e) => {
 });
 
 export const sheetOpen = () => shown !== null;
-
-// busy turns button into a waiting one while work runs.
-async function busy(button, label, work) {
-  const text = button.textContent;
-  button.disabled = true;
-  button.textContent = label;
-  try {
-    return await work();
-  } finally {
-    button.disabled = false;
-    button.textContent = text;
-  }
-}
 
 // ---------------------------------------------------------------- add
 

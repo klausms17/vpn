@@ -25,6 +25,8 @@ type Bridge struct {
 	// set once the app exists.
 	copyText    func(string) bool
 	pickProgram func() (string, error)
+	// proxy finds the user's proxy settings that lead nowhere.
+	proxy proxyCheck
 }
 
 // Snapshot returns what the window shows now, for a page that just loaded.

@@ -42,6 +42,16 @@
   </nav>
 
   <main class="content" id="content">
+    <!-- A proxy another VPN program left behind, leading nowhere. -->
+    <div class="banner" id="proxy" role="status" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4"/><path d="M12 17h.01"/></svg>
+      <div class="banner-text">
+        <strong>Прокси от другой VPN-программы</strong>
+        <span id="proxy-text"></span>
+      </div>
+      <button type="button" class="btn plain" id="proxy-fix">Убрать прокси</button>
+    </div>
+
     <!-- Servers: subscriptions and own keys, their checks. -->
     <section class="view" id="view-servers">
       <header class="view-head">
