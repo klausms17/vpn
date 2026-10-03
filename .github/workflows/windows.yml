@@ -83,6 +83,9 @@ jobs:
           # variable; without it the build has no accounts.
           ACCOUNT_URL: ${{ vars.ACCOUNT_URL }}
         run: |
+          # A value pasted into GitHub's form may end with a line break; a
+          # link has no spaces, so all of them go, as the Android build does.
+          ACCOUNT_URL="${ACCOUNT_URL//[[:space:]]/}"
           if [[ -n "$ACCOUNT_URL" && ! "$ACCOUNT_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]]; then
             echo "::error::ACCOUNT_URL must be like https://sub.example.com"
             exit 1
