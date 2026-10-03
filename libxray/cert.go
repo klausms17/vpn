@@ -48,7 +48,16 @@ func FetchCertSha256(host string, port int32, serverName string, useQuic bool, t
 		tlsConf.NextProtos = []string{"h3"}
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		conn, err := quic.DialAddr(ctx, addr, tlsConf, &quic.Config{
+		udpAddr, err := net.ResolveUDPAddr("udp", addr)
+		if err != nil {
+			return "", err
+		}
+		pconn, err := directListenConfig().ListenPacket(ctx, "udp", ":0")
+		if err != nil {
+			return "", err
+		}
+		defer pconn.Close()
+		conn, err := quic.Dial(ctx, pconn, udpAddr, tlsConf, &quic.Config{
 			HandshakeIdleTimeout: timeout,
 			MaxIdleTimeout:       timeout,
 		})
@@ -60,8 +69,7 @@ func FetchCertSha256(host string, port int32, serverName string, useQuic bool, t
 			certs = append(certs, c.Raw)
 		}
 	} else {
-		dialer := &net.Dialer{Timeout: timeout}
-		conn, err := tls.DialWithDialer(dialer, "tcp", addr, tlsConf)
+		conn, err := tls.DialWithDialer(directDialer(timeout), "tcp", addr, tlsConf)
 		if err != nil {
 			return "", err
 		}

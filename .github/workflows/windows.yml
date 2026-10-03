@@ -1,0 +1,272 @@
+name: Windows
+
+# Kirov VPN for Windows (docs/windows/PLAN.md, section 6). The programs are
+# built on Linux; the core's tests, the installer and a smoke test that
+# installs the app and connects through a local server run on Windows.
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+    paths:
+      - "windows/**"
+      - "libxray/**"
+      - "scripts/fetch-geo.sh"
+      - "scripts/prepare-geo.sh"
+      - ".github/workflows/windows.yml"
+  workflow_dispatch:
+    inputs:
+      stable:
+        description: "Стабильная сборка (windows-stable)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Test builds of a branch replace each other; stable builds wait for each
+# other instead, as they all replace one release.
+concurrency:
+  group: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.stable) && 'windows-stable' || format('windows-{0}', github.ref) }}
+  cancel-in-progress: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.stable) }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Its own sequence: Android's 1.0.N comes from android.yml's runs.
+  VERSION: 1.0.${{ github.run_number }}
+  # The pin of Xray's own CI.
+  WINTUN_VERSION: "0.14.1"
+  WINTUN_SHA256: 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
+
+jobs:
+  logic:
+    name: Build and unit tests (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: windows/go.mod
+          cache-dependency-path: |
+            windows/go.sum
+            libxray/go.sum
+
+      - name: Shared logic (libxray/client)
+        working-directory: libxray
+        run: |
+          go vet ./client/...
+          go test -race -count=1 ./client/...
+
+      - name: Windows module
+        working-directory: windows
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then echo "not gofmt-ed: $unformatted"; exit 1; fi
+          go vet ./...
+          GOOS=windows go vet ./...
+          go test -race -count=1 ./...
+
+      - name: The icons match their drawing
+        working-directory: windows
+        run: |
+          go run ./tools/mkicons
+          git diff --exit-code -- assets/
+
+      - name: Build
+        working-directory: windows
+        run: |
+          go run ./tools/mkres "$VERSION"
+          export GOOS=windows GOARCH=amd64 CGO_ENABLED=0
+          flags=(-trimpath -buildvcs=false)
+          ld="-s -w -X main.version=$VERSION"
+          go build "${flags[@]}" -ldflags "$ld" -o ../bin/KirovVPNService.exe ./cmd/kirovvpn-service
+          go build "${flags[@]}" -ldflags "$ld -H windowsgui" -o ../bin/KirovVPN.exe ./cmd/kirovvpn
+          # For the smoke test only, never shipped.
+          go build "${flags[@]}" -o ../bin/tools/kirovctl.exe ./cmd/kirovctl
+          go build "${flags[@]}" -o ../bin/tools/testserver.exe ./tools/testserver
+          go build "${flags[@]}" -o ../bin/tools/othervpn.exe ./tools/othervpn
+          ls -la ../bin ../bin/tools
+
+      - name: Licences of everything in the programs
+        working-directory: windows
+        run: |
+          out=../bin/licenses
+          mkdir -p "$out"
+          cp "$(go env GOROOT)/LICENSE" "$out/go.txt"
+          GOOS=windows go list -deps -f '{{with .Module}}{{.Path}}{{"\t"}}{{.Dir}}{{end}}' ./cmd/kirovvpn ./cmd/kirovvpn-service |
+            sort -u | while IFS=$'\t' read -r module dir; do
+              [ -n "$dir" ] || continue
+              for f in "$dir"/LICENSE* "$dir"/LICENCE* "$dir"/COPYING* "$dir"/NOTICE*; do
+                if [ -f "$f" ]; then
+                  cp "$f" "$out/$(echo "$module" | tr '/' '_')-$(basename "$f").txt"
+                fi
+              done
+            done
+          ls "$out" | wc -l
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bin
+          path: bin/
+
+  core-windows:
+    name: Core tests on Windows
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: libxray/go.mod
+          cache-dependency-path: libxray/go.sum
+
+      - name: Download Russian routing databases
+        run: scripts/fetch-geo.sh geo-upstream
+
+      - name: Unit and end-to-end tests (real Xray servers)
+        working-directory: libxray
+        env:
+          GEO_DIR: ${{ github.workspace }}/geo-upstream
+        run: go test -count=1 -timeout 25m ./...
+
+      # The tests force the phones' domain matcher; desktop Xray uses the
+      # other one.
+      - name: Again with the desktop domain matcher
+        working-directory: libxray
+        env:
+          GEO_DIR: ${{ github.workspace }}/geo-upstream
+          DESKTOP_MATCHER: "1"
+        run: go test -count=1 -timeout 25m ./...
+
+  package:
+    name: Installer
+    needs: logic
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: libxray/go.mod
+          cache-dependency-path: libxray/go.sum
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: bin
+          path: bin
+
+      - name: Stage the files
+        run: |
+          stage=windows/installer/stage
+          mkdir -p "$stage/geo"
+          cp bin/KirovVPN.exe bin/KirovVPNService.exe "$stage/"
+          cp -r bin/licenses "$stage/licenses"
+          curl --fail --location --silent --show-error --retry 5 --retry-all-errors -o wintun.zip "https://www.wintun.net/builds/wintun-$WINTUN_VERSION.zip"
+          echo "$WINTUN_SHA256  wintun.zip" | sha256sum -c -
+          unzip -q wintun.zip
+          cp wintun/bin/amd64/wintun.dll "$stage/"
+          cp wintun/LICENSE.txt "$stage/licenses/wintun-LICENSE.txt"
+          scripts/fetch-geo.sh geo-upstream
+          scripts/prepare-geo.sh geo-upstream "$stage/geo"
+          curl --fail --location --silent --show-error --retry 5 --retry-all-errors -o "$stage/MicrosoftEdgeWebview2Setup.exe" "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+          ls -la "$stage" "$stage/geo"
+
+      - name: Check the WebView2 bootstrapper's signature
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature windows\installer\stage\MicrosoftEdgeWebview2Setup.exe
+          if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+            throw "unexpected signature: $($sig.Status) $($sig.SignerCertificate.Subject)"
+          }
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          & $iscc /Qp "/DAppVersion=$env:VERSION" "/DStage=$PWD\windows\installer\stage" windows\installer\KirovVPN.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed ($LASTEXITCODE)" }
+
+      - name: Checksums
+        working-directory: windows/installer/output
+        run: sha256sum KirovVPN-Setup-*.exe > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installer
+          path: windows/installer/output/
+
+  smoke:
+    name: Smoke test (install, connect, uninstall)
+    needs: package
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: installer
+          path: installer
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: bin
+          path: bin
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $installer = (Get-ChildItem installer\KirovVPN-Setup-*.exe).FullName
+          & .\windows\test\smoke.ps1 -Installer $installer -Tools "$PWD\bin\tools"
+
+  release:
+    name: Publish
+    needs: [logic, core-windows, package, smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: installer
+          path: dist
+
+      # For the owner's own PC: every push replaces its branch's release.
+      - name: Publish test build
+        if: github.ref_type == 'branch' && !inputs.stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          tag="windows-build-$(echo "$BRANCH" | tr '/' '-')"
+          gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$tag" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Kirov VPN для Windows ${VERSION} (${BRANCH})" \
+            --notes "Сборка ${VERSION} из ветки ${BRANCH} (${GITHUB_SHA::7}).
+
+          Скачайте KirovVPN-Setup-${VERSION}.exe и запустите. Windows 10 (1809 и новее) или Windows 11, 64 бита.
+
+          Программа пока без цифровой подписи: Windows покажет «Система Windows защитила ваш компьютер» — нажмите «Подробнее», затем «Выполнить в любом случае»."
+
+      - name: Publish stable release
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.stable)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE: ${{ github.ref_name }}
+        run: |
+          gh release delete windows-stable --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+          gh release create windows-stable dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Kirov VPN для Windows ${VERSION} (stable)" \
+            --notes "Стабильная сборка ${VERSION} (${SOURCE}, ${GITHUB_SHA::7})."

@@ -4,7 +4,7 @@
 #
 # Run as root on a fresh Ubuntu 22.04+/Debian 12+ VPS abroad (2 CPU, 4 GB).
 # Both domains must already point at this server. Copy this file,
-# klaus-panel and klaus-monitor.py into one folder, then:
+# klaus-panel, klaus-monitor.py and klaus-page.html into one folder, then:
 #
 #   sudo PANEL_DOMAIN=panel.example.com SUB_DOMAIN=sub.example.com bash install-panel.sh
 #
@@ -14,12 +14,17 @@
 #   APK_URL        https link to the Kirov VPN APK (adds a download button;
 #                  without it the button appears once "klaus-panel
 #                  publish-apk" has put the app on https://SUB_DOMAIN/app/)
-#   GITHUB_TOKEN   read-only GitHub token for the app's releases: the panel
-#                  then publishes every new stable build by itself (hourly)
+#   GITHUB_TOKEN   read-only GitHub token, needed only while the repository
+#                  is private: the panel publishes every new stable build of
+#                  the app by itself (hourly)
 #   GITHUB_REPO    repository with the releases (default klausms17/vpn)
 #   RELEASE_TAG    release whose APK is published (default stable: the build
 #                  CI makes on purpose from a v* tag or a manual run; the
 #                  build-<branch> test builds come with every push)
+#   PAGE_BRANCH    branch of GITHUB_REPO whose klaus-page.html friends'
+#                  browsers get (default main): the panel takes a new one
+#                  from there by itself every 15 minutes; PAGE_BRANCH=
+#                  (empty) keeps the page from this folder
 #   REPORT_THRESHOLD, REPORT_WINDOW_MIN, REPORT_COOLDOWN_MIN
 #                  Telegram alert when this many different friends' apps
 #                  (default 2) reported the same server within this many
@@ -72,8 +77,8 @@ warn() { printf '\033[1;33mВнимание:\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31mОшибка:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "запустите от root (sudo … bash install-panel.sh)"
-for f in klaus-panel klaus-monitor.py; do
-  [ -f "$HERE/$f" ] || die "рядом со скриптом нет файла $f: скопируйте install-panel.sh, klaus-panel и klaus-monitor.py в одну папку"
+for f in klaus-panel klaus-monitor.py klaus-page.html; do
+  [ -f "$HERE/$f" ] || die "рядом со скриптом нет файла $f: скопируйте install-panel.sh, klaus-panel, klaus-monitor.py и klaus-page.html в одну папку"
 done
 
 # ---------------------------------------------------------------- restore
@@ -172,6 +177,10 @@ RELEASE_TAG="${RELEASE_TAG:-$(conf_get RELEASE_TAG)}"
 RELEASE_TAG="${RELEASE_TAG:-stable}"
 GITHUB_API="${GITHUB_API:-$(conf_get GITHUB_API)}"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
+# Saved empty, it stays empty: the page from this folder is kept.
+if [ -z "${PAGE_BRANCH+x}" ]; then
+  if [ -f "$CONF" ] && grep -q '^PAGE_BRANCH=' "$CONF"; then PAGE_BRANCH="$(conf_get PAGE_BRANCH)"; else PAGE_BRANCH=main; fi
+fi
 REPORT_THRESHOLD="${REPORT_THRESHOLD:-$(conf_get REPORT_THRESHOLD)}"
 REPORT_THRESHOLD="${REPORT_THRESHOLD:-2}"
 REPORT_WINDOW_MIN="${REPORT_WINDOW_MIN:-$(conf_get REPORT_WINDOW_MIN)}"
@@ -204,6 +213,7 @@ for v in REPORT_THRESHOLD REPORT_WINDOW_MIN REPORT_COOLDOWN_MIN; do
 done
 [[ "$GITHUB_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "GITHUB_REPO — в виде владелец/репозиторий, например klausms17/vpn"
 [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9._/-]+$ ]] || die "странный RELEASE_TAG: $RELEASE_TAG"
+[[ -z "$PAGE_BRANCH" || "$PAGE_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || die "странное имя ветки PAGE_BRANCH: $PAGE_BRANCH"
 [[ "$GITHUB_TOKEN" =~ ^[A-Za-z0-9_]*$ ]] || die "GITHUB_TOKEN: токен GitHub состоит из латинских букв, цифр и _"
 for u in "$GITHUB_API" "$TELEGRAM_API_BASE"; do
   [[ "$u" =~ ^https?://[A-Za-z0-9.:_-]+(/[A-Za-z0-9._/-]*)?$ ]] || die "странный адрес $u"
@@ -389,6 +399,12 @@ SUB_PUBLIC_DOMAIN=$SUB_DOMAIN
 METRICS_USER=admin
 METRICS_PASS=$METRICS_PASS
 WEBHOOK_ENABLED=false
+# Privacy: no history of subscription downloads (who, when, which app) and
+# no traffic of each friend by day; the totals and the last time online stay,
+# the panel works with them. No request log either.
+SERVICE_DISABLE_SRH_RECORDS=true
+SERVICE_DISABLE_USER_USAGE_RECORDS=true
+IS_HTTP_LOGGING_ENABLED=false
 SHORT_UUID_METHOD=nanoid
 SHORT_UUID_LENGTH=16
 POSTGRES_USER=$POSTGRES_USER
@@ -488,11 +504,15 @@ services:
       timeout: 3s
       retries: 3
 
+  # It logs each request with the friend's personal link and has no switch
+  # for that: no log at all.
   remnawave-subscription-page:
     image: remnawave/subscription-page:latest
     container_name: remnawave-subscription-page
     hostname: remnawave-subscription-page
-    <<: [*common, *logging]
+    <<: *common
+    logging:
+      driver: none
     env_file: subscription.env
     ports:
       - 127.0.0.1:3010:3010
@@ -535,6 +555,7 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./app:/srv/app:ro
+      - ./page:/srv/page:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on:
@@ -570,8 +591,13 @@ tls_line=""
 # subscription address is where the page's support button leads when there
 # is no SUPPORT_URL (the page itself only drops such requests). /app/ is the
 # app published by "klaus-panel publish-apk", /klaus/ the block reports.
+# A browser opening a friend's link gets Kirov VPN's own page (/srv/page,
+# from klaus-page.html); the apps get their subscription from Remnawave.
 # No access log, and the error log (a request that failed, e.g. while the
 # page restarts) keeps neither the address nor the link of the friend.
+# Nor does anything behind Caddy learn the address: the page, the panel it
+# asks (which would store it with the friend's phone) and the monitor all
+# get 127.0.0.1.
 put_file "$RW_DIR/Caddyfile" <<EOF
 # Written by Kirov VPN install-panel.sh; re-running the script rewrites it.
 {
@@ -598,12 +624,15 @@ $tls_line
 https://$SUB_DOMAIN {
 $tls_line
 	encode
+	@page header Accept *text/html*
 	handle / {
 		header Content-Type "text/plain; charset=utf-8"
 		respond "Kirov VPN: с вопросами обращайтесь к тому, кто дал вам ссылку на подписку." 200
 	}
 	handle /klaus/* {
-		reverse_proxy klaus-monitor:8080
+		reverse_proxy klaus-monitor:8080 {
+			header_up X-Forwarded-For 127.0.0.1
+		}
 	}
 	handle_path /app/* {
 		root * /srv/app
@@ -621,7 +650,17 @@ $tls_line
 		file_server
 	}
 	handle {
-		reverse_proxy remnawave-subscription-page:3010
+		handle @page {
+			root * /srv/page
+			rewrite * /index.html
+			header Cache-Control "no-cache"
+			file_server
+		}
+		handle {
+			reverse_proxy remnawave-subscription-page:3010 {
+				header_up X-Forwarded-For 127.0.0.1
+			}
+		}
 	}
 }
 
@@ -640,7 +679,11 @@ chmod 644 "$RW_DIR/Caddyfile"
 put_file "$RW_DIR/klaus-monitor.py" < "$HERE/klaus-monitor.py"
 # Read by the monitor's unprivileged user.
 chmod 644 "$RW_DIR/klaus-monitor.py"
-mkdir -p "$RW_DIR/app"
+# Kirov VPN's page for friends' browsers (klaus-panel writes it below) and
+# the app published by "klaus-panel publish-apk". Earlier runs kept copies
+# of the page next to it.
+mkdir -p "$RW_DIR/page" "$RW_DIR/app"
+rm -f "$RW_DIR/page/index.html.bak-"* "$RW_DIR/page/index.html.next"
 
 # Containers left from a setup made by hand (e.g. the Caddy example from the
 # Remnawave docs) would block ours by name.
@@ -836,6 +879,7 @@ GITHUB_TOKEN=$(q "$GITHUB_TOKEN")
 GITHUB_REPO=$(q "$GITHUB_REPO")
 RELEASE_TAG=$(q "$RELEASE_TAG")
 STABLE_DEFAULT=1
+PAGE_BRANCH=$(q "$PAGE_BRANCH")
 GITHUB_API=$(q "$GITHUB_API")
 EOF
 
@@ -847,6 +891,7 @@ fi
 
 say "Настраиваю профиль VLESS + REALITY, подписки и страницу подписки"
 KLAUS_PANEL_CONF="$CONF" bash "$KP" setup
+KLAUS_PANEL_CONF="$CONF" bash "$KP" write-page "$HERE/klaus-page.html"
 
 say "Открываю панель и страницу подписки в интернет (Caddy, HTTPS)"
 compose up -d --remove-orphans || die "контейнеры не запустились (подробности выше)"
@@ -865,7 +910,8 @@ if ! docker exec klaus-monitor cat /app/klaus-monitor.py 2>/dev/null | cmp -s - 
 fi
 for i in $(seq 1 60); do
   [ "$(docker inspect -f '{{.State.Health.Status}}' remnawave-subscription-page 2>/dev/null)" = "healthy" ] && break
-  [ "$i" -eq 60 ] && { docker compose logs --tail 40 remnawave-subscription-page >&2 || true; die "страница подписки не запустилась (журнал выше)"; }
+  # It keeps no log (friends' links): its errors show only when run by hand.
+  [ "$i" -eq 60 ] && die "страница подписки не запустилась. Её журнал не ведётся ради приватности знакомых; ошибки покажет запуск вручную: cd $RW_DIR && docker compose run --rm remnawave-subscription-page"
   sleep 3
 done
 # Friends' VPN does not depend on it: only a warning.
@@ -879,8 +925,8 @@ for i in $(seq 1 20); do
 done
 
 if [ "$SKIP_SYSTEM" != "1" ]; then
-  # New app builds reach the subscription address by themselves (quietly,
-  # and only while GITHUB_TOKEN is set).
+  # New app builds reach the subscription address by themselves (quietly;
+  # a private repository needs GITHUB_TOKEN).
   units_changed=0
   put_unit() { # NAME: stdin -> /etc/systemd/system/NAME when it differs
     local dst="/etc/systemd/system/$1" tmp
@@ -912,6 +958,33 @@ Description=Kirov VPN: look for a new app build every hour
 OnCalendar=hourly
 RandomizedDelaySec=10min
 Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  # The page for friends' browsers from PAGE_BRANCH (nothing to do while
+  # that is empty).
+  put_unit klaus-panel-page.service <<EOF
+# Written by Kirov VPN install-panel.sh
+[Unit]
+Description=Kirov VPN: take the page for friends' browsers from GitHub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=KLAUS_PANEL_CONF=$CONF
+ExecStart=/usr/local/bin/klaus-panel update-page --quiet
+EOF
+  put_unit klaus-panel-page.timer <<'EOF'
+# Written by Kirov VPN install-panel.sh
+[Unit]
+Description=Kirov VPN: look for a new page for friends every 15 minutes
+
+[Timer]
+OnActiveSec=1min
+OnUnitActiveSec=15min
+RandomizedDelaySec=1min
 
 [Install]
 WantedBy=timers.target
@@ -948,6 +1021,7 @@ EOF
   if [ "$units_changed" = "1" ]; then systemctl daemon-reload; fi
   systemctl enable --now klaus-panel-apk.timer >/dev/null 2>&1 || warn "не удалось включить таймер klaus-panel-apk.timer"
   systemctl enable --now klaus-panel-users.timer >/dev/null 2>&1 || warn "не удалось включить таймер klaus-panel-users.timer"
+  systemctl enable --now klaus-panel-page.timer >/dev/null 2>&1 || warn "не удалось включить таймер klaus-panel-page.timer"
   if command -v ufw >/dev/null && grep -q "Status: active" <<<"$(ufw status)"; then
     say "Открываю порты 80 и 443 в ufw"
     ufw allow 80/tcp >/dev/null
@@ -986,10 +1060,9 @@ if [ -z "$TELEGRAM_CHAT_ID" ]; then
 else
   echo "  3. Оповещения в Telegram включены (проверка: klaus-panel telegram-test)"
 fi
-if [ -z "$GITHUB_TOKEN" ]; then
-  echo "  4. Раздача приложения с этого сервера: запустите ещё раз с GITHUB_TOKEN=… (инструкция, раздел 12)"
-else
-  echo "  4. Новые сборки из релиза $RELEASE_TAG публикуются сами; сейчас:  klaus-panel publish-apk"
+echo "  4. Новые сборки приложения из релиза $RELEASE_TAG публикуются сами; сейчас:  klaus-panel publish-apk"
+if [ -n "$PAGE_BRANCH" ]; then
+  echo "     Страница для знакомых обновляется сама из ветки $PAGE_BRANCH; сейчас:  klaus-panel update-page"
 fi
 echo "  5. Резервная копия:  klaus-panel backup"
 echo

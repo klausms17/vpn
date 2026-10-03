@@ -17,8 +17,8 @@ import (
 // also removes the trimmed geo files of useTrimmedGeo afterwards.
 func TestMain(m *testing.M) {
 	if os.Getenv("DESKTOP_MATCHER") == "" {
-		f := &geodata.CompactDomainMatcherFactory{}
-		setField(f, "shared", utils.NewWeakCacheMap[string, strmatcher.LinearAnyMatcher]())
+		f := &geodata.CompactMphDomainMatcherFactory{}
+		setField(f, "shared", utils.NewWeakCacheMap[string, strmatcher.MphValueMatcher]())
 		setField(geodata.DomainReg, "factory", geodata.DomainMatcherFactory(f))
 	}
 	code := m.Run()

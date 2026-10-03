@@ -57,8 +57,11 @@ VPN-серверы:
                                откройте показанную ссылку и нажмите «Запустить»
   telegram-test                отправить проверочное сообщение
   publish-apk [--tag РЕЛИЗ]    выложить новую сборку приложения на адрес подписки (из
-                               RELEASE_TAG, по умолчанию стабильные — релиз stable; нужен
-                               GITHUB_TOKEN; раз в час это делается само)
+                               RELEASE_TAG, по умолчанию стабильные — релиз stable; для
+                               закрытого репозитория нужен GITHUB_TOKEN; раз в час это
+                               делается само)
+  update-page                  взять страницу для знакомых из GitHub (ветка PAGE_BRANCH,
+                               по умолчанию main; раз в 15 минут это делается само)
 
 Прочее:
   hwid-limit N [--yes]         включить лимит устройств (N на человека); off — выключить
@@ -231,7 +234,11 @@ profile_config() { # CURRENT_CONFIG_JSON PRIVATE_KEY SHORT_ID
     # would be cut and redone every 5 minutes, waking the phone. 30 minutes
     # outlasts them. The node keeps level 0 settings next to its own
     # statistics switches. A value set by hand in the panel stays.
-    | .policy.levels["0"].connIdle //= 1800' <<<"$1"
+    | .policy.levels["0"].connIdle //= 1800
+    # The servers keep no record of who connected from where and what they
+    # opened: no access log, and addresses in error messages are masked.
+    # Set on every run, also over a hand edit.
+    | .log = ((.log // {}) + {access: "none", dnsLog: false, maskAddress: "full"})' <<<"$1"
 }
 
 setup_profile() {
@@ -905,18 +912,18 @@ cmd_telegram_test() {
 }
 
 # ---------------------------------------------------------------- app
-# New builds of the app from the GitHub releases (private repository: a
-# read-only token) go to https://SUB_DOMAIN/app/: KirovVPN.apk,
+# New builds of the app from the GitHub releases (a private repository
+# needs a read-only token) go to https://SUB_DOMAIN/app/: KirovVPN.apk,
 # KirovVPN-<version>.apk and version.json, which the app checks for updates.
 # Only from RELEASE_TAG, "stable" by default: CI makes it on purpose, never
 # on every push like the build-<branch> test builds.
-gh_get() { # URL FILE [ACCEPT] [SECONDS]; sets GH_CODE. The token goes to curl
+gh_get() { # URL FILE [ACCEPT] [SECONDS]; sets GH_CODE. A token goes to curl
   # through a file; curl does not pass it on when GitHub redirects a
   # download to its file storage.
   local tmp
   tmp="$(mktemp -d)"
-  printf 'Authorization: Bearer %s\nAccept: %s\nX-GitHub-Api-Version: 2022-11-28\n' \
-    "$GITHUB_TOKEN" "${3:-application/vnd.github+json}" > "$tmp/h"
+  printf 'Accept: %s\nX-GitHub-Api-Version: 2022-11-28\n' "${3:-application/vnd.github+json}" > "$tmp/h"
+  if [ -n "${GITHUB_TOKEN:-}" ]; then printf 'Authorization: Bearer %s\n' "$GITHUB_TOKEN" >> "$tmp/h"; fi
   GH_CODE="$(curl -sS -L --max-time "${4:-60}" --max-filesize 314572800 -A klaus-panel \
     -H "@$tmp/h" -o "$2" -w '%{http_code}' "$1" 2>/dev/null)" || GH_CODE=000
   rm -rf "$tmp"
@@ -946,11 +953,6 @@ cmd_publish_apk() {
       *) die "непонятный параметр: $1" ;;
     esac
   done
-  if [ -z "${GITHUB_TOKEN:-}" ]; then
-    # The hourly timer: nothing to do until a token is given.
-    [ "$quiet" = "1" ] && return 0
-    die "нет GITHUB_TOKEN: создайте токен только для чтения (инструкция, раздел 12) и запустите sudo GITHUB_TOKEN=… bash install-panel.sh"
-  fi
   [[ "$tag" =~ ^[A-Za-z0-9._/-]+$ ]] || die "странное имя релиза: $tag"
   note() { if [ "$quiet" != "1" ]; then say "$@"; fi; }
   mkdir -p "$APP_DIR"
@@ -964,9 +966,14 @@ cmd_publish_apk() {
     200) ;;
     401) die "GitHub не принял GITHUB_TOKEN (истёк или отозван?)" ;;
     404)
-      # GitHub says the same about a repository the token cannot see; the
-      # repository itself tells the two apart.
+      # GitHub says the same about a repository the token cannot see, or,
+      # without a token, about a private one; the repository itself tells
+      # them apart. The timer waits quietly for a token.
       gh_get "$gh/repos/$repo" "$TMPD/repo.json"
+      if [ "$GH_CODE" != "200" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+        [ "$quiet" = "1" ] && return 0
+        die "репозиторий $repo закрытый или его нет: для закрытого нужен токен только для чтения (инструкция, раздел 12), затем sudo GITHUB_TOKEN=… bash install-panel.sh"
+      fi
       [ "$GH_CODE" = "200" ] ||
         die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)"
       # No stable build made yet, or CI is replacing it right now: the
@@ -976,7 +983,13 @@ cmd_publish_apk() {
         die "в $repo ещё нет релиза stable: стабильную сборку выпускает GitHub Actions по тегу v… или по кнопке Run workflow с галочкой stable (инструкция, раздел 12)"
       fi
       die "в $repo нет релиза $tag" ;;
-    403) die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)" ;;
+    403 | 429)
+      # Without a token GitHub allows 60 requests an hour per address.
+      if [ -z "${GITHUB_TOKEN:-}" ]; then
+        [ "$quiet" = "1" ] && return 0
+        die "GitHub пока не отвечает на запросы без токена (лимит в час): попробуйте позже"
+      fi
+      die "релиз $tag в $repo не найден или у токена нет доступа (нужно: Contents — Read-only для $repo)" ;;
     000) die "нет связи с $gh" ;;
     *) die "GitHub ответил $GH_CODE" ;;
   esac
@@ -1056,6 +1069,81 @@ cmd_publish_apk() {
   note "Опубликована версия $ver: https://$SUB_DOMAIN/app/KirovVPN.apk (приложения знакомых предложат обновиться)"
 }
 
+# ---------------------------------------------------------------- page
+# Kirov VPN's page for friends' browsers (klaus-page.html). install-panel.sh
+# writes the one next to it; "update-page" takes the one in PAGE_BRANCH of
+# GITHUB_REPO (a timer does it every 15 minutes), so a change merged there
+# reaches friends with nobody on the server. Its only settings, the app and
+# support links, go into its klaus-config block, a "<" escaped so no value
+# can close the script tag. Anything but a whole page is refused, and the
+# page served stays.
+PAGE_SOURCE="server/remnawave/klaus-page.html"
+PAGE_CONFIG='<script id="klaus-config" type="application/json">'
+
+write_page() { # FILE; fails, changing nothing, for anything but a whole page
+  local cfg
+  [ "$(wc -c < "$1")" -le 524288 ] && head -c 15 "$1" | grep -qix '<!doctype html>' &&
+    grep -q '</html>' "$1" && [ "$(grep -oF "$PAGE_CONFIG" "$1" | wc -l)" = "1" ] || return 1
+  cfg="$(jq -nc --arg apk "${APK_URL:-}" --arg support "${SUPPORT_URL:-}" '{apkUrl: $apk, supportUrl: $support}' | sed 's/</\\u003c/g')"
+  tmpdir
+  jq -Rsj --arg tag "$PAGE_CONFIG" --arg cfg "$cfg" \
+    'sub("<script id=\"klaus-config\" type=\"application/json\">[^<]*</script>"; $tag + $cfg + "</script>")' \
+    "$1" > "$TMPD/index.html"
+  grep -qF "$PAGE_CONFIG$cfg</script>" "$TMPD/index.html" || return 1
+  mkdir -p "$RW_DIR/page"
+  write_file "$RW_DIR/page/index.html" < "$TMPD/index.html"
+  chmod 644 "$RW_DIR/page/index.html"
+}
+
+cmd_write_page() { # FILE (install-panel.sh: the page next to it)
+  [ -f "${1:-}" ] || die "нет файла страницы: ${1:-}"
+  write_page "$1" || die "$1 — не целая страница Kirov VPN (или в ней нет блока klaus-config)"
+}
+
+cmd_update_page() {
+  local repo="${GITHUB_REPO:-klausms17/vpn}" branch="${PAGE_BRANCH-main}"
+  local gh="${GITHUB_API:-https://api.github.com}" quiet=0 before=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --quiet) quiet=1; shift ;;
+      *) die "непонятный параметр: $1" ;;
+    esac
+  done
+  if [ -z "$branch" ]; then
+    [ "$quiet" = "1" ] && return 0
+    die "страница не обновляется сама (PAGE_BRANCH пустой). Брать её из main: sudo PAGE_BRANCH=main bash install-panel.sh"
+  fi
+  [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] || die "странное имя ветки: $branch"
+  tmpdir
+  gh_get "$gh/repos/$repo/contents/$PAGE_SOURCE?ref=$branch" "$TMPD/page.html" application/vnd.github.raw+json
+  case "$GH_CODE" in
+    200) ;;
+    401) die "GitHub не принял GITHUB_TOKEN (истёк или отозван?)" ;;
+    404)
+      # No page in the branch yet, or a closed repository without a token:
+      # the timer looks again later.
+      [ "$quiet" = "1" ] && return 0
+      die "в ветке $branch репозитория $repo нет $PAGE_SOURCE (или репозиторий закрытый: тогда нужен токен, инструкция, раздел 12)" ;;
+    403 | 429)
+      # Without a token GitHub allows 60 requests an hour per address.
+      if [ -z "${GITHUB_TOKEN:-}" ]; then
+        [ "$quiet" = "1" ] && return 0
+        die "GitHub пока не отвечает на запросы без токена (лимит в час): попробуйте позже"
+      fi
+      die "GitHub не дал прочитать $repo (ответ $GH_CODE): у токена нет доступа?" ;;
+    000) die "нет связи с $gh" ;;
+    *) die "GitHub ответил $GH_CODE" ;;
+  esac
+  if [ -f "$RW_DIR/page/index.html" ]; then before="$(sha256sum < "$RW_DIR/page/index.html")"; fi
+  write_page "$TMPD/page.html" || die "страница из $repo (ветка $branch) не целая или без блока klaus-config: оставляю прежнюю"
+  if [ "$before" != "$(sha256sum < "$RW_DIR/page/index.html")" ]; then
+    # The timer's journal says when friends got a new page.
+    say "Страница для знакомых обновлена из $repo (ветка $branch)"
+  elif [ "$quiet" != "1" ]; then
+    say "Страница для знакомых уже последняя ($repo, ветка $branch)"
+  fi
+}
+
 # ---------------------------------------------------------------- main
 cmd="${1:-help}"
 [ $# -gt 0 ] && shift
@@ -1088,5 +1176,7 @@ case "$cmd" in
   telegram-setup) cmd_telegram_setup "$@" ;;
   telegram-test) cmd_telegram_test ;;
   publish-apk) cmd_publish_apk "$@" ;;
+  update-page) cmd_update_page "$@" ;;
+  write-page) cmd_write_page "$@" ;;
   *) usage >&2; exit 1 ;;
 esac

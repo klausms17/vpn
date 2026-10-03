@@ -2,7 +2,8 @@
 """Mock Telegram Bot API and GitHub REST API for run-local.sh.
 
   mock-apis.py --port 18090 --tg-token T --gh-token G --repo klausms17/vpn \
-      --tag TAG --bad-tag TAG2 --temp-tag TAG3 --apk KirovVPN-1.0.99.apk
+      --tag TAG --bad-tag TAG2 --temp-tag TAG3 --apk KirovVPN-1.0.99.apk \
+      --page main=page.html [--page BRANCH=FILE ...]
 
 Telegram (/bot<token>/<method>, GET or POST, JSON or form): getMe,
 getUpdates (serves the messages queued with POST /_mock/tg/say
@@ -10,18 +11,24 @@ getUpdates (serves the messages queued with POST /_mock/tg/say
 negative offset keeps only the last updates, as in Telegram) and
 sendMessage (kept; GET /_mock/tg/sent lists them).
 
-GitHub (needs "Bearer G"): GET /repos/<repo> answers for that one repository
-only (others are 404, as GitHub says for a repository the token cannot see);
+GitHub: GET /repos/<repo> answers for that one repository, a private one,
+only with "Bearer G" (others, and it without the token, are 404, as GitHub
+says for a repository one cannot see; a wrong token is 401), and for
+--public-repo also without a token;
 /repos/<repo>/releases/tags/<tag> lists the APK and SHA256SUMS.txt;
 /repos/<repo>/releases/assets/<id> with
 "Accept: application/octet-stream" redirects to http://127.0.0.2:<port>/dl/,
 which, like GitHub's file storage, refuses requests that still carry the
 Authorization header. The release <bad-tag> has a SHA256SUMS.txt that does
 not match its APK; <temp-tag> is named like a CI build signed with the
-temporary key.
+temporary key. /repos/<repo>/contents/server/remnawave/klaus-page.html?ref=B
+is the --page file given for branch B, raw for
+"Accept: application/vnd.github.raw+json" and, like GitHub, JSON with the
+file in base64 for any other.
 """
 
 import argparse
+import base64
 import hashlib
 import http.server
 import json
@@ -34,6 +41,7 @@ LOCK = threading.Lock()
 UPDATES = []
 SENT = []
 NEXT_ID = [1]
+PAGE_PATH = "server/remnawave/klaus-page.html"
 
 
 def main():
@@ -42,11 +50,19 @@ def main():
     ap.add_argument("--tg-token", required=True)
     ap.add_argument("--gh-token", required=True)
     ap.add_argument("--repo", default="klausms17/vpn")
+    ap.add_argument("--public-repo", default="klausms17/open")
     ap.add_argument("--tag", required=True)
     ap.add_argument("--bad-tag", required=True)
     ap.add_argument("--temp-tag", required=True)
     ap.add_argument("--apk", required=True)
+    ap.add_argument("--page", action="append", default=[], help="BRANCH=FILE: the page in that branch")
     args = ap.parse_args()
+
+    pages = {}
+    for spec in args.page:
+        branch, _, path = spec.partition("=")
+        with open(path, "rb") as f:
+            pages[branch] = f.read()
 
     with open(args.apk, "rb") as f:
         apk = f.read()
@@ -115,7 +131,7 @@ def main():
             if path.startswith("/bot"):
                 return self.telegram(path, p)
             if path.startswith("/repos/") or path.startswith("/dl/"):
-                return self.github(path)
+                return self.github(path, p)
             self.reply(404, {"message": "Not Found"})
 
         def telegram(self, path, p):
@@ -146,18 +162,31 @@ def main():
                 return self.reply(200, {"ok": True, "result": {"message_id": len(SENT)}})
             self.reply(404, {"ok": False, "error_code": 404, "description": "Not Found"})
 
-        def github(self, path):
+        def github(self, path, p):
             if path.startswith("/dl/"):
                 if self.headers.get("Authorization"):
                     return self.reply(400, b"Only one auth mechanism allowed", "text/plain")
                 aid = int(path[len("/dl/"):])
                 return self.reply(200, assets[aid][1], "application/octet-stream")
-            if self.headers.get("Authorization") != "Bearer " + args.gh_token:
+            auth = self.headers.get("Authorization")
+            if auth is not None and auth != "Bearer " + args.gh_token:
                 return self.reply(401, {"message": "Bad credentials"})
-            base = "http://127.0.0.1:%d/repos/%s" % (args.port, args.repo)
-            if path == "/repos/" + args.repo:
-                return self.reply(200, {"full_name": args.repo, "private": True})
-            prefix = "/repos/%s/releases/" % args.repo
+            repo = next((r for r in (args.repo, args.public_repo)
+                         if path == "/repos/" + r or path.startswith("/repos/%s/" % r)), None)
+            if repo is None or (repo == args.repo and auth is None):
+                return self.reply(404, {"message": "Not Found"})
+            base = "http://127.0.0.1:%d/repos/%s" % (args.port, repo)
+            if path == "/repos/" + repo:
+                return self.reply(200, {"full_name": repo, "private": repo == args.repo})
+            if path.startswith("/repos/%s/contents/" % repo):
+                page = pages.get(p.get("ref", ""))
+                if path != "/repos/%s/contents/%s" % (repo, PAGE_PATH) or page is None:
+                    return self.reply(404, {"message": "Not Found"})
+                if self.headers.get("Accept") != "application/vnd.github.raw+json":
+                    return self.reply(200, {"type": "file", "path": PAGE_PATH, "encoding": "base64",
+                                            "content": base64.b64encode(page).decode()})
+                return self.reply(200, page, "text/plain; charset=utf-8")
+            prefix = "/repos/%s/releases/" % repo
             if not path.startswith(prefix):
                 return self.reply(404, {"message": "Not Found"})
             rest = path[len(prefix):]

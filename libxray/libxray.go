@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/klausms17/vpn/libxray/internal/fsx"
 	applog "github.com/xtls/xray-core/app/log"
 	"github.com/xtls/xray-core/common/geodata"
 	commonlog "github.com/xtls/xray-core/common/log"
@@ -71,7 +72,7 @@ func SetCrashLog(path string) error {
 		return nil
 	}
 	if st, err := os.Stat(path); err == nil && st.Size() > 256<<10 {
-		_ = os.Rename(path, path+".1")
+		_ = fsx.Replace(path, path+".1")
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
@@ -406,9 +407,13 @@ func (c *Controller) newProbeInstance(groups [][]any) (*core.Instance, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Under the controller's lock: a tunnel that started in between would
+	// lose the globals to this instance for good.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	inst, err := newInstance(string(cfg))
 	// Even a failed core.New may have taken the globals over already.
-	c.restoreGlobals(inst)
+	c.restoreGlobalsLocked(inst)
 	return inst, err
 }
 
@@ -422,6 +427,10 @@ func (c *Controller) newProbeInstance(groups [][]any) (*core.Instance, error) {
 func (c *Controller) restoreGlobals(probe *core.Instance) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.restoreGlobalsLocked(probe)
+}
+
+func (c *Controller) restoreGlobalsLocked(probe *core.Instance) {
 	if c.cur == nil {
 		return
 	}

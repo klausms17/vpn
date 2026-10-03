@@ -6,9 +6,10 @@ on:
     # A v* tag makes the stable build friends get (see "Publish stable
     # release"); tags are built whatever files changed.
     tags: ["v*"]
-    # The iPhone app has its own workflows (ios.yml, ios-app.yml); docs/
-    # and tools/ (a local check, see tools/jvm-check) change no APK.
-    paths-ignore: ["**.md", "docs/**", "tools/**", "ios/**", ".github/workflows/ios*.yml"]
+    # The iPhone and Windows apps have their own workflows (ios.yml,
+    # ios-app.yml, windows.yml); docs/ and tools/ (a local check, see
+    # tools/jvm-check) change no APK.
+    paths-ignore: ["**.md", "docs/**", "tools/**", "ios/**", "windows/**", ".github/workflows/ios*.yml", ".github/workflows/windows.yml"]
   workflow_dispatch:
     inputs:
       stable:
@@ -59,6 +60,16 @@ jobs:
       # Standard library only, like klaus-monitor itself: nothing to install.
       - name: Block report monitor tests
         run: python3 -B server/remnawave/test/monitor_test.py
+
+      # The panel takes the friends' page from main by itself and keeps the
+      # one it has when a new one is not whole: such a page fails here,
+      # before it gets there.
+      - name: The friends' page is one the panel takes
+        run: |
+          d="$(mktemp -d)"
+          printf 'RW_DIR=%s\nAPI_URL=http://127.0.0.1:1\nAPI_TOKEN=-\n' "$d" > "$d/klaus-panel.env"
+          KLAUS_PANEL_CONF="$d/klaus-panel.env" bash server/remnawave/klaus-panel write-page server/remnawave/klaus-page.html
+          grep -qF '<script id="klaus-config" type="application/json">{"apkUrl":"","supportUrl":""}</script>' "$d/page/index.html"
 
       - name: Unit and end-to-end tests (real Xray servers)
         working-directory: libxray

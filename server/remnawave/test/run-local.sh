@@ -20,13 +20,21 @@
 #   publish-apk       against a mock GitHub API with a fake "stable"
 #                     release (the default; a panel that saved the old
 #                     default, the work branch's test builds, moves to it
-#                     once, a branch chosen on purpose stays)
+#                     once, a branch chosen on purpose stays); an open
+#                     repository needs no token, a closed one does
+#   update-page       the friends' page from the mock's "main" branch (the
+#                     default; PAGE_BRANCH= keeps the page of the folder),
+#                     a broken or cut one refused, a missing one quiet for
+#                     the timer
 #
 # and then
 #   (a) the app's User-Agent gets a base64 list with a vless REALITY link
 #       and the klaus-report-url / klaus-app-url headers,
-#   (b) a browser gets the page; its Kirov VPN button is klausvpn://add/…,
-#   (c) the device from X-Hwid is recorded in the panel,
+#   (b) a browser gets Kirov VPN's own page (klaus-page.html): the
+#       klausvpn://add/… button, its settings, nothing from other sites,
+#   (c) the device from X-Hwid is recorded in the panel without the
+#       friend's IP; no history of subscription downloads and no log of the
+#       subscription page,
 #   (d) the app's own Go core (libxray, via test/e2e) parses the
 #       subscription and fetches a page through the node,
 #   plus: a disabled friend is refused by the node, a friend made as the
@@ -35,7 +43,8 @@
 #   stay, a disabled node leaves the subscription, the device limit works, a domain change reaches Caddy,
 #   the support link follows SUPPORT_URL (never the panel's placeholder),
 #   the node keeps its custom port on a re-run, the node's Xray keeps idle
-#   connections 30 minutes (the profile's policy), the APK is published
+#   connections 30 minutes and no access log, with addresses masked in its
+#   error log (the profile's policy and log settings), the APK is published
 #   with a verified checksum (a wrong one is refused, a missing release is
 #   quiet for the timer) on https://SUB/app/ with version.json and the
 #   page's download button (and its Samsung and Huawei tip), the page
@@ -88,7 +97,7 @@ RELEASE_OLD=build-claude-compassionate-mayer-6jph8m # the default before "stable
 APK_VERSION=1.0.99
 SPOOFED_IP=203.0.113.77 # a client IP that must never reach the monitor's log
 # This machine's own tokens must never reach the panel under test.
-unset GITHUB_TOKEN GH_TOKEN TELEGRAM_API_BASE
+unset GITHUB_TOKEN GH_TOKEN TELEGRAM_API_BASE PAGE_BRANCH
 
 step() { printf '\n\033[1;36m### %s\033[0m\n' "$*"; }
 pass() { printf '\033[1;32mPASS\033[0m %s\n' "$*"; }
@@ -201,6 +210,10 @@ support_links() { # -> {header, page}: the support link in subscriptions and on 
   jq -nc --slurpfile s "$WORK/settings.json" --slurpfile p "$WORK/page-config.json" \
     '{header: $s[0].response.customResponseHeaders["support-url"], page: $p[0].response.config.brandingSettings.supportUrl}'
 }
+page_config() { # NAME -> the settings install-panel.sh wrote into Kirov VPN's page on https://NAME/
+  curl -fsS --noproxy '*' --resolve "$1:443:127.0.0.1" --cacert "$WORK/caddy-root.crt" -H 'Accept: text/html' \
+    "https://$1/page-check" | sed -n 's#.*<script id="klaus-config" type="application/json">\(.*\)</script>.*#\1#p'
+}
 db_volume() { docker volume inspect remnawave-db-data >/dev/null 2>&1; }
 install_panel() { # RW_DIR ADMIN_FILE [VAR=value...]
   local dir="$1" admin="$2"
@@ -231,8 +244,17 @@ pass "test page answers"
 step "Mock Telegram and GitHub APIs on :$MOCK_PORT (a fake release with KirovVPN-$APK_VERSION.apk)"
 APK="$WORK/KirovVPN-$APK_VERSION.apk"
 head -c 3000000 /dev/urandom > "$APK"
+# The friends' page as the repository's branches have it: main with a mark
+# of its own, one without its settings block and one cut off.
+PAGE_MARK="klaus-e2e-page-from-main"
+sed "s#<title>Kirov VPN</title>#<title>Kirov VPN</title><!-- $PAGE_MARK -->#" "$RWS/klaus-page.html" > "$WORK/page-main.html"
+grep -q "$PAGE_MARK" "$WORK/page-main.html" || fail "test setup: the page in main"
+grep -v 'id="klaus-config"' "$RWS/klaus-page.html" > "$WORK/page-broken.html"
+head -c 6000 "$RWS/klaus-page.html" > "$WORK/page-cut.html"
 python3 "$HERE/mock-apis.py" --port "$MOCK_PORT" --tg-token "$TG_BOT_TOKEN" --gh-token "$GH_TEST_TOKEN" \
-  --tag "$RELEASE" --bad-tag klaus-bad-sum --temp-tag klaus-temp-key --apk "$APK" > "$WORK/mock.log" 2>&1 &
+  --tag "$RELEASE" --bad-tag klaus-bad-sum --temp-tag klaus-temp-key --apk "$APK" \
+  --page main="$WORK/page-main.html" --page broken="$WORK/page-broken.html" --page cut="$WORK/page-cut.html" \
+  > "$WORK/mock.log" 2>&1 &
 MOCK_PID=$!
 retry 10 mock /_mock/tg/sent -o /dev/null || fail "mock APIs did not start"
 pass "mock APIs answer"
@@ -246,7 +268,8 @@ grep -q "Готово! Панель работает" "$WORK/install-1.log" || f
 [ "$(stat -c %a "$WORK/admin.txt")" = "600" ] || fail "admin credentials are not 600"
 grep -Eq '^Пароль: [A-Za-z0-9]{24,}$' "$WORK/admin.txt" || fail "admin password"
 grep -qx "RELEASE_TAG=$RELEASE" "$CONF" && grep -qx "STABLE_DEFAULT=1" "$CONF" || fail "new panel does not take the stable release"
-pass "panel installed, admin saved to admin.txt (600), app builds from the $RELEASE release"
+grep -qx "PAGE_BRANCH=main" "$CONF" || fail "new panel does not take the friends' page from main"
+pass "panel installed, admin saved to admin.txt (600), app builds from the $RELEASE release, the friends' page from main"
 
 step "klaus-panel telegram-setup: waits for the one-time code, takes its chat, sends a test message"
 # The panel's containers reach the mock on the host through the bridge.
@@ -348,11 +371,12 @@ jq -e --arg p "https://$SUB_DOMAIN/" '.header == null and .page == $p' "$WORK/su
 https_get "$SUB_DOMAIN" -D "$WORK/root.headers" | tee "$WORK/root.txt"; echo
 grep -qi '^content-type: text/plain; charset=utf-8' "$WORK/root.headers" || fail "note is not utf-8 text"
 grep -q "кто дал вам ссылку" "$WORK/root.txt" || fail "no note at https://$SUB_DOMAIN/"
-pass "no support-url header, the page's support button opens the note on https://$SUB_DOMAIN/"
+jq -e '.supportUrl == ""' <<<"$(page_config "$SUB_DOMAIN")" >/dev/null || fail "a support link on Kirov VPN's page without SUPPORT_URL"
+pass "no support-url header, the page's support button opens the note on https://$SUB_DOMAIN/; none on Kirov VPN's page"
 
 step "install-panel.sh with a new SUB_DOMAIN and SUPPORT_URL (and a branch's builds chosen): Caddy serves the new name"
 install_panel "$WORK/opt" "$WORK/admin.txt" SUB_DOMAIN="$SUB_DOMAIN2" SUPPORT_URL="$SUPPORT" RELEASE_TAG="$RELEASE_OLD" \
-  2>&1 | tee "$WORK/install-3.log"
+  PAGE_BRANCH= 2>&1 | tee "$WORK/install-3.log"
 grep -q "Готово! Панель работает" "$WORK/install-3.log" || fail "re-run with a new SUB_DOMAIN failed"
 grep -q "адрес подписок меняется: $SUB_DOMAIN → $SUB_DOMAIN2" "$WORK/install-3.log" || fail "no warning about the old links"
 https_get "$SUB_DOMAIN2" -o /dev/null || fail "Caddy does not serve the new $SUB_DOMAIN2"
@@ -360,7 +384,9 @@ if https_get "$SUB_DOMAIN" -o /dev/null 2>/dev/null; then fail "Caddy still serv
 grep -qx "SUB_PUBLIC_DOMAIN=$SUB_DOMAIN2" "$WORK/opt/.env" || fail "panel .env not updated"
 support_links | tee "$WORK/support-1.json"
 jq -e --arg s "$SUPPORT" '.header == $s and .page == $s' "$WORK/support-1.json" >/dev/null || fail "SUPPORT_URL not applied"
-pass "https://$SUB_DOMAIN2 served with a certificate, the old name is not; SUPPORT_URL in the header and on the page"
+jq -e --arg s "$SUPPORT" '.supportUrl == $s' <<<"$(page_config "$SUB_DOMAIN2")" >/dev/null || fail "SUPPORT_URL not on Kirov VPN's page"
+grep -qx "PAGE_BRANCH=''" "$CONF" || fail "PAGE_BRANCH= did not switch the page updates off"
+pass "https://$SUB_DOMAIN2 served with a certificate, the old name is not; SUPPORT_URL in the header and on the page; page updates off"
 
 step "install-panel.sh back to $SUB_DOMAIN with SUPPORT_URL removed (settings converge)"
 install_panel "$WORK/opt" "$WORK/admin.txt" SUB_DOMAIN="$SUB_DOMAIN" SUPPORT_URL= 2>&1 | tee "$WORK/install-4.log"
@@ -369,9 +395,11 @@ https_get "$SUB_DOMAIN" -o /dev/null || fail "Caddy does not serve $SUB_DOMAIN a
 if https_get "$SUB_DOMAIN2" -o /dev/null 2>/dev/null; then fail "Caddy still serves $SUB_DOMAIN2"; fi
 support_links | tee "$WORK/support-2.json"
 cmp -s "$WORK/support-0.json" "$WORK/support-2.json" || fail "support link did not return to the state without SUPPORT_URL"
+jq -e '.supportUrl == ""' <<<"$(page_config "$SUB_DOMAIN")" >/dev/null || fail "SUPPORT_URL left on Kirov VPN's page"
 grep -qx "RELEASE_TAG=$RELEASE_OLD" "$CONF" || fail "a release chosen on purpose was not kept"
 if grep -q "стабильные" "$WORK/install-4.log"; then fail "a release chosen on purpose was moved to stable"; fi
-pass "back on $SUB_DOMAIN; support link as without SUPPORT_URL again; the chosen $RELEASE_OLD stays"
+grep -qx "PAGE_BRANCH=''" "$CONF" || fail "page updates switched off on purpose came back"
+pass "back on $SUB_DOMAIN; support link as without SUPPORT_URL again; the chosen $RELEASE_OLD and the page updates switched off stay"
 
 step "klaus-panel add-node + install-node.sh"
 kp add-node test-node "$GW" DE --title "Германия" --host 127.0.0.1 --node-port "$NODE_PORT" > "$WORK/add-node.log"
@@ -386,12 +414,14 @@ retry 45 node_up || { kp list-nodes; fail "node did not connect"; }
 kp list-nodes
 pass "node connected"
 
-step "idle connections: the node's Xray keeps them 30 minutes (policy of the profile)"
+step "the node's Xray: idle connections kept 30 minutes, no access log, masked addresses (from the profile)"
 PROFILE_UUID="$(api /api/config-profiles | jq -r 'first(.response.configProfiles[] | select(.name == "KlausVPN")) | .uuid')"
-api "/api/config-profiles/$PROFILE_UUID" | jq -c '.response.config.policy' | tee "$WORK/profile-policy.json"
-jq -e '.levels["0"].connIdle == 1800' "$WORK/profile-policy.json" >/dev/null || fail "no idle policy in the profile"
+api "/api/config-profiles/$PROFILE_UUID" | jq -c '.response.config | {policy, log}' | tee "$WORK/profile-policy.json"
+jq -e '.policy.levels["0"].connIdle == 1800' "$WORK/profile-policy.json" >/dev/null || fail "no idle policy in the profile"
+jq -e '.log.access == "none" and .log.maskAddress == "full"' "$WORK/profile-policy.json" >/dev/null ||
+  fail "the profile lets the servers log who connected"
 # What the node's Xray really runs, read the way Xray itself reads it. Only
-# the policy is printed: the config holds the keys.
+# the policy and the log settings are printed: the config holds the keys.
 node_policy() {
   docker exec remnanode node -e '
     const fs = require("fs"), http = require("http");
@@ -400,13 +430,17 @@ node_policy() {
               path: "/internal/get-config?token=" + env("INTERNAL_REST_TOKEN")}, (r) => {
       let b = "";
       r.on("data", (d) => (b += d));
-      r.on("end", () => console.log(JSON.stringify(JSON.parse(b).policy || null)));
+      r.on("end", () => {
+        const c = JSON.parse(b);
+        console.log(JSON.stringify({policy: c.policy || null, log: c.log || null}));
+      });
     }).on("error", (e) => { console.error(e.message); process.exit(1); });' > "$WORK/node-policy.json" 2>&1 &&
-    jq -e '.levels["0"].connIdle == 1800' "$WORK/node-policy.json" >/dev/null
+    jq -e '.policy.levels["0"].connIdle == 1800 and .log.access == "none" and .log.maskAddress == "full"' \
+      "$WORK/node-policy.json" >/dev/null
 }
-retry 10 node_policy || { cat "$WORK/node-policy.json"; fail "the node's Xray closes idle connections sooner"; }
+retry 10 node_policy || { cat "$WORK/node-policy.json"; fail "the node's Xray closes idle connections sooner or logs who connected"; }
 cat "$WORK/node-policy.json"
-pass "connIdle 1800 in the profile and in the node's running Xray (next to its own statistics settings)"
+pass "connIdle 1800 (next to the node's own statistics settings), no access log and masked addresses in the profile and in the node's running Xray"
 
 step "the panel's own Telegram messages about servers reach the chat"
 panel_msgs() { mock /_mock/tg/sent | jq --arg c "$TG_CHAT" '[.[] | select(.chat_id == $c and (.text | test("#node")))]'; }
@@ -450,24 +484,18 @@ grep -Eq "^vless://[0-9a-f-]+@127\.0\.0\.1:$VPN_PORT\?.*security=reality.*pbk=.*
   fail "no vless reality link named Германия"
 pass "base64 list with a vless REALITY link; report and app URLs in the headers"
 
-step "(b) a browser gets the page with the Kirov VPN button"
-sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' -c "$WORK/cookies" > "$WORK/b.html"
+step "(b) a browser gets Kirov VPN's own page"
+sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' > "$WORK/b.html"
 grep -q "^HTTP/[0-9.]* 200" "$WORK/last.headers" || fail "no HTML page"
 grep -qi '^content-type: text/html' "$WORK/last.headers" || fail "no HTML page"
 grep -o '<title>[^<]*</title>' "$WORK/b.html"
-# The page loads its app list with the session cookie it just set.
-sub_get "$UA_BROWSER" "https://$SUB_DOMAIN/assets/.app-config-v2.json" -b "$WORK/cookies" > "$WORK/b.config.json"
-jq -r '.platforms.android.apps[0] | "first Android app: \(.name) (featured: \(.featured))",
-  (.blocks[].buttons[] | "  \(.type): \(.link)  «\(.text.ru)»")' "$WORK/b.config.json"
-jq -e '.platforms.android.apps[0].name == "Kirov VPN" and
-  ([.platforms.android.apps[0].blocks[].buttons[] | select(.type == "subscriptionLink" and .link == "klausvpn://add/{{SUBSCRIPTION_LINK}}")] | length == 1) and
-  ([.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external" and .link == "https://example.com/KirovVPN.apk")] | length == 1) and
-  ([.platforms.android.apps[].name] | index("Happ") != null)' "$WORK/b.config.json" >/dev/null || fail "Kirov VPN button"
-jq -r '"support button: \(.brandingSettings.supportUrl)"' "$WORK/b.config.json"
-jq -e --arg p "https://$SUB_DOMAIN/" '.brandingSettings.supportUrl == $p' "$WORK/b.config.json" >/dev/null || fail "page support link"
-if grep -q 'dummy\.docs\.rw' "$WORK/b.html" "$WORK/b.config.json"; then fail "placeholder support link on the page"; fi
+# The page makes its button from its own address: klausvpn://add/ + the link.
+grep -q 'klausvpn://add/' "$WORK/b.html" || fail "no Kirov VPN button on the page"
+page_config "$SUB_DOMAIN" | tee "$WORK/b.config.json"
+jq -e '.apkUrl == "https://example.com/KirovVPN.apk" and .supportUrl == ""' "$WORK/b.config.json" >/dev/null || fail "page settings"
+if grep -Eq '(src|href)="https?://' "$WORK/b.html"; then fail "the page loads something from another site"; fi
 echo "the page turns the button into: klausvpn://add/$SUB"
-pass "HTML page; Kirov VPN first with klausvpn://add/{{SUBSCRIPTION_LINK}} and the APK button, default apps kept"
+pass "Kirov VPN's page with the klausvpn://add/ button, APK_URL and no SUPPORT_URL in its settings, nothing from other sites"
 
 step "publish-apk: from the GitHub release to https://$SUB_DOMAIN/app/ (checksum verified)"
 page_apk_buttons() { # -> the Kirov VPN block's download buttons in the panel's page settings
@@ -476,15 +504,12 @@ page_apk_buttons() { # -> the Kirov VPN block's download buttons in the panel's 
   api "/api/subscription-page-configs/$u" > "$WORK/page-config.json"
   jq -c '[.response.config.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external") | {link, text: .text.ru}]' "$WORK/page-config.json"
 }
-if kp publish-apk > "$WORK/publish-0.log" 2>&1; then fail "publish-apk without GITHUB_TOKEN went through"; fi
-tail -n 1 "$WORK/publish-0.log"
-grep -q "нет GITHUB_TOKEN" "$WORK/publish-0.log" || fail "wrong refusal without a token"
 # The owner adds the token later (and drops APK_URL: the app comes from here
 # now) with the new install-panel.sh, on a panel whose settings were saved by
 # an older one: its release is the old default, the work branch's test builds.
 sed -i '/^STABLE_DEFAULT=/d' "$CONF"
 grep -qx "RELEASE_TAG=$RELEASE_OLD" "$CONF" || fail "test setup: the old default is not saved"
-install_panel "$WORK/opt" "$WORK/admin.txt" GITHUB_TOKEN="$GH_TEST_TOKEN" GITHUB_API="http://127.0.0.1:$MOCK_PORT" APK_URL= \
+install_panel "$WORK/opt" "$WORK/admin.txt" GITHUB_TOKEN="$GH_TEST_TOKEN" GITHUB_API="http://127.0.0.1:$MOCK_PORT" APK_URL= PAGE_BRANCH=main \
   2>&1 | tee "$WORK/install-5.log"
 grep -q "Готово! Панель работает" "$WORK/install-5.log" || fail "re-run with GITHUB_TOKEN failed"
 grep -q "только стабильные" "$WORK/install-5.log" || fail "no note about the move to stable"
@@ -501,6 +526,22 @@ if KLAUS_PANEL_CONF="$WORK/other-repo.env" no_proxy='*' NO_PROXY='*' bash "$RWS/
 cat "$WORK/publish-norepo.log"
 grep -q "нет доступа" "$WORK/publish-norepo.log" || fail "wrong message for a repository without access"
 rm -f "$WORK/other-repo.env"
+# Without a token an open repository is read as it is (its temporary-key
+# build refused as any); a closed one asks for the token, quietly for the
+# timer.
+sed -e '/^GITHUB_TOKEN=/d' -e 's#^GITHUB_REPO=.*#GITHUB_REPO=klausms17/open#' "$CONF" > "$WORK/open-repo.env"
+if KLAUS_PANEL_CONF="$WORK/open-repo.env" no_proxy='*' NO_PROXY='*' bash "$RWS/klaus-panel" publish-apk --tag klaus-temp-key \
+  > "$WORK/publish-open.log" 2>&1; then fail "a temporary-key build of an open repository went through"; fi
+cat "$WORK/publish-open.log"
+grep -q "временным ключом" "$WORK/publish-open.log" || fail "an open repository was not read without a token"
+sed -e '/^GITHUB_TOKEN=/d' "$CONF" > "$WORK/closed-repo.env"
+KLAUS_PANEL_CONF="$WORK/closed-repo.env" no_proxy='*' NO_PROXY='*' bash "$RWS/klaus-panel" publish-apk --quiet ||
+  fail "the timer's run without a token failed on a closed repository"
+if KLAUS_PANEL_CONF="$WORK/closed-repo.env" no_proxy='*' NO_PROXY='*' bash "$RWS/klaus-panel" publish-apk \
+  > "$WORK/publish-closed.log" 2>&1; then fail "a closed repository was read without a token"; fi
+cat "$WORK/publish-closed.log"
+grep -q "закрытый" "$WORK/publish-closed.log" || fail "wrong message for a closed repository without a token"
+rm -f "$WORK/open-repo.env" "$WORK/closed-repo.env"
 if compgen -G "$WORK/opt/app/*" >/dev/null; then fail "something was published from a missing release"; fi
 echo "download buttons without APK_URL, nothing published: $(page_apk_buttons)"
 [ "$(page_apk_buttons)" = "[]" ] || fail "download button without an APK"
@@ -577,8 +618,8 @@ for f in KirovVPN.apk "KirovVPN-$APK_VERSION.apk"; do
   cmp -s "$WORK/last.body" "$APK" || fail "$f differs from the release"
   grep -qi '^content-type: application/vnd.android.package-archive' "$WORK/apk.headers" || fail "$f content type"
 done
-# The page restarts with its download button.
-page_up() { sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' -f -o /dev/null 2>/dev/null; }
+# The subscription page restarts with its new settings.
+page_up() { sub_get "$UA_APP" "$SUB" -f -o /dev/null 2>/dev/null; }
 retry 30 page_up || fail "subscription page did not come back"
 kp publish-apk | tee "$WORK/publish-2.log"
 grep -q "уже опубликована" "$WORK/publish-2.log" || fail "the same build downloaded again"
@@ -586,21 +627,66 @@ echo "download buttons now: $(page_apk_buttons)"
 [ "$(page_apk_buttons)" = "[{\"link\":\"https://$SUB_DOMAIN/app/KirovVPN.apk\",\"text\":\"Скачать приложение\"}]" ] ||
   fail "no download button for the published APK"
 install_tip || fail "no install tip for Samsung and Huawei next to the download button"
-# What a friend's browser gets.
-sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' -c "$WORK/cookies2" -o /dev/null
-sub_get "$UA_BROWSER" "https://$SUB_DOMAIN/assets/.app-config-v2.json" -b "$WORK/cookies2" > "$WORK/b2.config.json"
-jq -e --arg a "https://$SUB_DOMAIN/app/KirovVPN.apk" \
-  '[.platforms.android.apps[0].blocks[].buttons[] | select(.type == "external" and .link == $a)] | length == 1' \
-  "$WORK/b2.config.json" >/dev/null || fail "the page does not show the download button"
-pass "old default moved to the $RELEASE release; a missing release is quiet for the timer, an unseen repository is not; wrong checksum and temporary key refused; the page entry, remark and build of the former name taken over; replaced builds kept 13 h, then a redirect to the current one (also from the former name); KirovVPN.apk, KirovVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»; the Samsung and Huawei install tip with and without it"
+# What a friend's browser gets: without APK_URL, Kirov VPN's page offers the
+# build it finds on /app/.
+jq -e '.apkUrl == ""' <<<"$(page_config "$SUB_DOMAIN")" >/dev/null || fail "APK_URL left on Kirov VPN's page"
+[ "$(sub_code app/version.json)" = "200" ] || fail "the page finds no published app"
+pass "old default moved to the $RELEASE release; a missing release is quiet for the timer, an unseen repository is not; an open repository read without a token, a closed one asks for it; wrong checksum and temporary key refused; the page entry, remark and build of the former name taken over; replaced builds kept 13 h, then a redirect to the current one (also from the former name); KirovVPN.apk, KirovVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»; the Samsung and Huawei install tip with and without it"
 
-step "(c) the device is recorded (the limit itself is off)"
+step "update-page: the friends' page from the repository's main branch, with this panel's settings"
+grep -qx "PAGE_BRANCH=main" "$CONF" || fail "PAGE_BRANCH=main not saved"
+if grep -q "$PAGE_MARK" "$WORK/opt/page/index.html"; then fail "test setup: the page of the folder has the mark of main"; fi
+kp update-page | tee "$WORK/page-1.log"
+grep -q "обновлена" "$WORK/page-1.log" || fail "the page in main was not taken"
+sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' > "$WORK/page-served.html"
+grep -q "$PAGE_MARK" "$WORK/page-served.html" || fail "a browser does not get the page from main"
+jq -e '.apkUrl == "" and .supportUrl == ""' <<<"$(page_config "$SUB_DOMAIN")" >/dev/null || fail "the page from main lost the panel's settings"
+[ "$(stat -c %a "$WORK/opt/page/index.html")" = "644" ] || fail "the page is not readable by Caddy"
+kp update-page | tee "$WORK/page-2.log"
+grep -q "уже последняя" "$WORK/page-2.log" || fail "the same page written again"
+kp update-page --quiet > "$WORK/page-quiet.log" || fail "the timer's run failed"
+[ ! -s "$WORK/page-quiet.log" ] || fail "the timer's run says something with nothing new"
+pass "the page in main served with this panel's settings (644); taken once; the timer quiet with nothing new"
+
+step "update-page: a broken or cut page refused, a missing one quiet for the timer, off when PAGE_BRANCH is empty"
+page_kp() { # BRANCH ARGS...: update-page with PAGE_BRANCH=BRANCH ('' for none)
+  local b="$1"
+  shift
+  sed "s#^PAGE_BRANCH=.*#PAGE_BRANCH='$b'#" "$CONF" > "$WORK/page-branch.env"
+  KLAUS_PANEL_CONF="$WORK/page-branch.env" no_proxy='*' NO_PROXY='*' bash "$RWS/klaus-panel" update-page "$@"
+}
+cp "$WORK/opt/page/index.html" "$WORK/page-before.html"
+for b in broken cut; do
+  if page_kp "$b" --quiet > "$WORK/page-$b.log" 2>&1; then fail "a $b page was taken"; fi
+  cat "$WORK/page-$b.log"
+  grep -q "не целая" "$WORK/page-$b.log" || fail "wrong refusal of a $b page"
+done
+page_kp no-such-branch --quiet || fail "the timer's run failed on a branch without the page"
+if page_kp no-such-branch > "$WORK/page-none.log" 2>&1; then fail "a branch without the page went through"; fi
+cat "$WORK/page-none.log"
+grep -q "нет server/remnawave/klaus-page.html" "$WORK/page-none.log" || fail "wrong message for a branch without the page"
+page_kp '' --quiet || fail "the timer's run failed with the updates off"
+if page_kp '' > "$WORK/page-off.log" 2>&1; then fail "update-page ran with the updates off"; fi
+cat "$WORK/page-off.log"
+grep -q "не обновляется сама" "$WORK/page-off.log" || fail "wrong message with the updates off"
+rm -f "$WORK/page-branch.env"
+cmp -s "$WORK/opt/page/index.html" "$WORK/page-before.html" || fail "a refused page changed the one served"
+pass "a page without its settings block and a cut one refused, the served one kept; a branch without the page quiet for the timer; nothing with PAGE_BRANCH empty"
+
+step "(c) the device is recorded without the friend's IP (the limit itself is off); no history, no page log"
 USER_ID="$(api "/api/users/by-username/friend_1" | jq -r '.response.id')"
-api "/api/hwid/devices/$USER_ID" | jq -c '.response.devices[] | {hwid, platform, osVersion, deviceModel, userAgent}' | tee "$WORK/c.devices"
+api "/api/hwid/devices/$USER_ID" | jq -c '.response.devices[] | {hwid, platform, osVersion, deviceModel, userAgent, requestIp}' | tee "$WORK/c.devices"
 grep -q "\"hwid\":\"$HWID\"" "$WORK/c.devices" || fail "device not recorded"
+# Caddy gives the page 127.0.0.1 instead of the friend's address.
+jq -se 'all(.requestIp == "127.0.0.1")' "$WORK/c.devices" >/dev/null || fail "the panel got the friend's IP"
 api /api/subscription-settings | jq -c '.response.hwidSettings'
 kp list-users
-pass "device recorded"
+srh="$(docker exec remnawave-db psql -qAt -U "$(sed -n 's/^POSTGRES_USER=//p' "$WORK/opt/.env")" \
+  -d "$(sed -n 's/^POSTGRES_DB=//p' "$WORK/opt/.env")" -c 'select count(*) from user_subscription_request_history')"
+[ "$srh" = "0" ] || fail "the panel keeps a history of subscription downloads ($srh)"
+[ "$(docker inspect -f '{{.HostConfig.LogConfig.Type}}' remnawave-subscription-page)" = "none" ] ||
+  fail "the subscription page keeps a log"
+pass "device recorded with 127.0.0.1 instead of the friend's IP; no history of subscription downloads; no log of the page"
 
 step "(d) libxray parses the subscription and fetches a page through the node"
 retry 5 "$WORK/e2e" check -sub "$SUB" -resolve "$SUB_DOMAIN:127.0.0.1" -cacert "$WORK/caddy-root.crt" \

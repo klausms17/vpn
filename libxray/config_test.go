@@ -3,7 +3,9 @@ package libxray
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/netip"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -38,9 +40,11 @@ func TestBuildConfigAllModesValidate(t *testing.T) {
 		for _, ipv6 := range []bool{false, true} {
 			cfg := buildOpts(t, BuildOptions{
 				Outbounds: p.Outbounds, Mode: mode, IPv6: ipv6, Tun: true,
-				DirectRules: []string{"example.org", "10.1.0.0/16", "*.corp.example", "https://intranet.example.com/x", "bad domain!", "regexp:^ya\\.", "keyword:bank"},
-				ProxyRules:  []string{"full:api.example.net", "2001:db8::/32"},
-				BlockRules:  []string{"ads.example.com"},
+				DirectRules:    []string{"example.org", "10.1.0.0/16", "*.corp.example", "https://intranet.example.com/x", "bad domain!", "regexp:^ya\\.", "keyword:bank"},
+				ProxyRules:     []string{"full:api.example.net", "2001:db8::/32"},
+				BlockRules:     []string{"ads.example.com"},
+				DirectPrograms: []string{"qbittorrent.exe", "Steam"},
+				ProxyPrograms:  []string{"Telegram.exe"},
 			})
 			if err := ValidateConfig(cfg); err != nil {
 				t.Fatalf("%s ipv6=%v: %v\n%s", mode, ipv6, err, cfg)
@@ -411,9 +415,97 @@ func TestPolicyLevels(t *testing.T) {
 
 func TestDNSServesStaleNames(t *testing.T) {
 	for _, mode := range []string{ModeRuDirect, ModeBlockedOnly, ModeGlobal} {
-		d := buildDNS(&BuildOptions{Mode: mode})
+		d := buildDNS(&BuildOptions{Mode: mode}, nil)
 		if d["serveStale"] != true || d["serveExpiredTTL"] != 3600 {
 			t.Errorf("%s: stale answers off: %v", mode, d)
 		}
+	}
+}
+
+func TestUserRuleEntry(t *testing.T) {
+	for in, want := range map[string]string{
+		"  Example.COM ":                             "example.com",
+		"*.corp.example":                             "corp.example",
+		"https://www.youtube.com/watch?v=abc":        "www.youtube.com",
+		"domain:Example.org":                         "domain:example.org",
+		"full:api.example.net":                       "full:api.example.net",
+		"keyword:bank":                               "keyword:bank",
+		"regexp:^ya\\.":                              "regexp:^ya\\.",
+		"REGEXP:^Ya\\D":                              "regexp:^Ya\\D",
+		"Keyword:Bank":                               "keyword:bank",
+		"keyword:a b":                                "",
+		"regexp:a{1000}a{1000}":                      "",
+		"keyword:" + strings.Repeat("a", 254):        "",
+		"regexp:" + strings.Repeat("a", 254):         "",
+		strings.Repeat("a", 250) + ".com":            "",
+		"https://ya.ru/" + strings.Repeat("x", 1000): "ya.ru",
+		"10.1.2.3":                                   "10.1.2.3",
+		"10.1.0.0/16":                                "10.1.0.0/16",
+		"10.1.2.3/16":                                "10.1.0.0/16",
+		"сайт.рф":                                    "сайт.рф",
+		"bad domain!":                                "",
+		"regexp:(":                                   "",
+		"fe80::1%eth0":                               "",
+		"":                                           "",
+		"# a comment":                                "",
+	} {
+		if got := UserRuleEntry(in); got != want {
+			t.Errorf("%q -> %q, want %q", in, got, want)
+		}
+	}
+	// What is saved builds the same rule again.
+	for _, in := range []string{"*.corp.example", "https://www.youtube.com/x", "10.1.2.3/16", "keyword:bank", "REGEXP:^Ya\\D"} {
+		d1, ip1 := userRule(in)
+		d2, ip2 := userRule(UserRuleEntry(in))
+		if d1 != d2 || ip1 != ip2 {
+			t.Errorf("%q: %q %q, saved %q %q", in, d1, ip1, d2, ip2)
+		}
+	}
+}
+
+func TestProgramName(t *testing.T) {
+	for in, want := range map[string]string{
+		"Telegram.exe": "Telegram",
+		" curl.exe ":   "curl",
+		"GAME.EXE":     "GAME.EXE",
+		"uTorrent":     "uTorrent",
+		"..exe":        "",
+		"a\x01b.exe":   "",
+		`C:\x.exe`:     "",
+		"self/":        "",
+		"":             "",
+	} {
+		if got := ProgramName(in); got != want {
+			t.Errorf("%q -> %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestProgramRulesComeAfterBlockedSitesAndBeforeSites(t *testing.T) {
+	cfg, err := buildConfig(&BuildOptions{
+		Outbounds:      realityProfile(t).Outbounds,
+		Tun:            true,
+		BlockRules:     []string{"ads.example.com"},
+		DirectPrograms: []string{"qbittorrent.exe", "uTorrent", "qbittorrent", "C:\\Tools\\evil.exe", "self/", "..", ""},
+		ProxyPrograms:  []string{"Telegram.EXE"},
+		DirectRules:    []string{"example.org"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, r := range cfg["routing"].(map[string]any)["rules"].([]rule) {
+		switch {
+		case r["port"] != nil:
+			// Vision's QUIC block before each proxy rule.
+		case r["process"] != nil:
+			order = append(order, fmt.Sprintf("%v>%v", r["process"], r["outboundTag"]))
+		case r["domain"] != nil && len(r["domain"].([]string)) == 1:
+			order = append(order, fmt.Sprintf("%v>%v", r["domain"], r["outboundTag"]))
+		}
+	}
+	want := []string{"[domain:ads.example.com]>block", "[qbittorrent uTorrent]>direct", "[Telegram.EXE]>proxy", "[domain:example.org]>direct", "[geosite:ru-blocked]>proxy"}
+	if !reflect.DeepEqual(order, want) {
+		t.Errorf("rules %v, want %v", order, want)
 	}
 }

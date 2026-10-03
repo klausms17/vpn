@@ -15,6 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/klausms17/vpn/libxray/internal/fsx"
 	core "github.com/xtls/xray-core/core"
 )
 
@@ -169,7 +170,7 @@ func FetchWithHeaders(url, userAgent, headersJSON string, timeoutMs int32, proxy
 		}
 		tr = proxyTransport(inst)
 	} else {
-		tr = http.DefaultTransport.(*http.Transport).Clone()
+		tr = directTransport()
 	}
 	defer tr.CloseIdleConnections()
 	return doFetch(context.Background(), tr, url, userAgent, extra, timeoutDuration(timeoutMs))
@@ -294,7 +295,7 @@ func DownloadFile(url string, dst string, userAgent string, timeoutMs int32, pro
 		}
 		tr = proxyTransport(inst)
 	} else {
-		tr = http.DefaultTransport.(*http.Transport).Clone()
+		tr = directTransport()
 	}
 	defer tr.CloseIdleConnections()
 
@@ -324,7 +325,7 @@ func DownloadFile(url string, dst string, userAgent string, timeoutMs int32, pro
 		os.Remove(tmp)
 		return fmt.Errorf("incomplete download: %d of %d bytes", written, resp.ContentLength)
 	}
-	return os.Rename(tmp, dst)
+	return fsx.Replace(tmp, dst)
 }
 
 // get performs a GET whose errors never contain the URL: subscription links
