@@ -118,6 +118,8 @@ and give step-by-step instructions for anything he must do himself.
   what was checked and decided; section 10 the phases and what is built).
 - `docs/accounts/PLAN.md`: optional accounts in every app (the server, the
   apps, security, phases).
+- `docs/mac/PLAN.md`: the planned Mac app (macOS 13+, the Windows design
+  with a root LaunchDaemon, phases M0–M4).
 - `docs/README.ru.md`: the owner's full guide in Russian: install, servers,
   whitelist mode, reliability, signing, panel and distribution.
 - `tools/jvm-check/`: a local compile-and-test of the plain Kotlin code
@@ -310,6 +312,17 @@ and give step-by-step instructions for anything he must do himself.
     subscription signing out instead of being deleted.
   - Next: D (iPhone, and the Mac app with accounts from its first
     version). The owner's steps are in the plan's section 7.
+- **Mac** (`docs/mac/PLAN.md`, 3 Oct 2026): planned, not built.
+  - The owner wants it "from old MacBooks to the newest". The floor is
+    macOS 13 Ventura: Xray needs Go 1.27, whose binaries need 13. That
+    reaches MacBook, MacBook Pro and iMac from 2017, and MacBook Air and
+    Mac mini from 2018; Macs stuck on Monterey cannot be served.
+  - Design: the Windows app ported. A root LaunchDaemon runs Xray's utun,
+    with the dynamic-store DNS and a PF anchor. A Wails window shares
+    Windows' page over a Unix socket.
+  - It ships unsigned until the Apple Developer Program, and CI tests it
+    on macOS runners. A Network Extension, which needs the paid program to
+    run at all, stays the fallback.
 - **iPhone:** phases 1–2 of `docs/ios/PLAN.md` are done. The Go core builds
   for iOS, and `ios-app.yml` builds the unsigned app and packet tunnel and
   passes its checks (geo files in the extension, no bitcode). The app is
@@ -410,13 +423,24 @@ and give step-by-step instructions for anything he must do himself.
 6. The owner once pasted a Telegram bot token into a chat. Make sure he
    revoked it (@BotFather → /revoke) and entered the new one only on the
    panel.
-7. Accounts (`docs/accounts/PLAN.md`): phases C (Android) and D (iPhone,
-   the Mac app). The owner's steps once phases A and B are merged (the
-   plan's section 7): a Gmail box with an app password and
-   `klaus-panel mail-setup` (the password asked hidden), a new Telegram
-   bot (step 6), the repository variable `ACCOUNT_URL` = the subscription
-   address, then the panel update command.
-8. Known limits, documented:
+7. Accounts (`docs/accounts/PLAN.md`): server, Windows and Android are
+   merged (https://github.com/klausms17/vpn/pull/5,
+   https://github.com/klausms17/vpn/pull/6); the iPhone gets them with its
+   subscriptions, the Mac with its M1–M2. On 3 Oct the owner got his steps
+   (the plan's section 7):
+   - a Gmail box with an app password and `klaus-panel mail-setup` (the
+     password asked hidden);
+   - a new Telegram bot (step 6);
+   - the panel update command;
+   - the repository variable `ACCOUNT_URL` = the subscription address;
+   - new Android and Windows builds.
+   Accounts give the panel's subscription, so they connect only once the
+   panel has a node (step 5).
+8. Mac app (`docs/mac/PLAN.md`): M0 (`windows/` becomes the shared
+   `desktop/` module), then M1 (the daemon and tunnel with `mac.yml`'s
+   smoke test), M2 (the app and `.pkg`, tried by a friend with a Mac), M3
+   (signing once the Apple program is bought), M4 (the panel's Mac tab).
+9. Known limits, documented:
    - UDP flows outlive `Stop`, and a UDP socket is routed by its first
      packet (audit 41/42);
    - DNS for names never seen before still waits while the server is down
