@@ -21,6 +21,10 @@
 #   RELEASE_TAG    release whose APK is published (default stable: the build
 #                  CI makes on purpose from a v* tag or a manual run; the
 #                  build-<branch> test builds come with every push)
+#   PAGE_BRANCH    branch of GITHUB_REPO whose klaus-page.html friends'
+#                  browsers get (default main): the panel takes a new one
+#                  from there by itself every 15 minutes; PAGE_BRANCH=
+#                  (empty) keeps the page from this folder
 #   REPORT_THRESHOLD, REPORT_WINDOW_MIN, REPORT_COOLDOWN_MIN
 #                  Telegram alert when this many different friends' apps
 #                  (default 2) reported the same server within this many
@@ -173,6 +177,10 @@ RELEASE_TAG="${RELEASE_TAG:-$(conf_get RELEASE_TAG)}"
 RELEASE_TAG="${RELEASE_TAG:-stable}"
 GITHUB_API="${GITHUB_API:-$(conf_get GITHUB_API)}"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
+# Saved empty, it stays empty: the page from this folder is kept.
+if [ -z "${PAGE_BRANCH+x}" ]; then
+  if [ -f "$CONF" ] && grep -q '^PAGE_BRANCH=' "$CONF"; then PAGE_BRANCH="$(conf_get PAGE_BRANCH)"; else PAGE_BRANCH=main; fi
+fi
 REPORT_THRESHOLD="${REPORT_THRESHOLD:-$(conf_get REPORT_THRESHOLD)}"
 REPORT_THRESHOLD="${REPORT_THRESHOLD:-2}"
 REPORT_WINDOW_MIN="${REPORT_WINDOW_MIN:-$(conf_get REPORT_WINDOW_MIN)}"
@@ -205,6 +213,7 @@ for v in REPORT_THRESHOLD REPORT_WINDOW_MIN REPORT_COOLDOWN_MIN; do
 done
 [[ "$GITHUB_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "GITHUB_REPO — в виде владелец/репозиторий, например klausms17/vpn"
 [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9._/-]+$ ]] || die "странный RELEASE_TAG: $RELEASE_TAG"
+[[ -z "$PAGE_BRANCH" || "$PAGE_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || die "странное имя ветки PAGE_BRANCH: $PAGE_BRANCH"
 [[ "$GITHUB_TOKEN" =~ ^[A-Za-z0-9_]*$ ]] || die "GITHUB_TOKEN: токен GitHub состоит из латинских букв, цифр и _"
 for u in "$GITHUB_API" "$TELEGRAM_API_BASE"; do
   [[ "$u" =~ ^https?://[A-Za-z0-9.:_-]+(/[A-Za-z0-9._/-]*)?$ ]] || die "странный адрес $u"
@@ -670,17 +679,11 @@ chmod 644 "$RW_DIR/Caddyfile"
 put_file "$RW_DIR/klaus-monitor.py" < "$HERE/klaus-monitor.py"
 # Read by the monitor's unprivileged user.
 chmod 644 "$RW_DIR/klaus-monitor.py"
-# Kirov VPN's page for friends' browsers. Its only settings, the app link
-# and the support link, go into its klaus-config block (a "<" escaped, so
-# no value can close the script tag).
-mkdir -p "$RW_DIR/page"
-page_cfg="$(jq -nc --arg apk "$APK_URL" --arg support "$SUPPORT_URL" '{apkUrl: $apk, supportUrl: $support}' | sed 's/</\\u003c/g')"
-jq -Rsj --arg cfg "$page_cfg" \
-  'sub("<script id=\"klaus-config\" type=\"application/json\">[^<]*</script>";
-    "<script id=\"klaus-config\" type=\"application/json\">" + $cfg + "</script>")' \
-  "$HERE/klaus-page.html" | put_file "$RW_DIR/page/index.html"
-chmod 644 "$RW_DIR/page/index.html"
-mkdir -p "$RW_DIR/app"
+# Kirov VPN's page for friends' browsers (klaus-panel writes it below) and
+# the app published by "klaus-panel publish-apk". Earlier runs kept copies
+# of the page next to it.
+mkdir -p "$RW_DIR/page" "$RW_DIR/app"
+rm -f "$RW_DIR/page/index.html.bak-"* "$RW_DIR/page/index.html.next"
 
 # Containers left from a setup made by hand (e.g. the Caddy example from the
 # Remnawave docs) would block ours by name.
@@ -876,6 +879,7 @@ GITHUB_TOKEN=$(q "$GITHUB_TOKEN")
 GITHUB_REPO=$(q "$GITHUB_REPO")
 RELEASE_TAG=$(q "$RELEASE_TAG")
 STABLE_DEFAULT=1
+PAGE_BRANCH=$(q "$PAGE_BRANCH")
 GITHUB_API=$(q "$GITHUB_API")
 EOF
 
@@ -887,6 +891,7 @@ fi
 
 say "Настраиваю профиль VLESS + REALITY, подписки и страницу подписки"
 KLAUS_PANEL_CONF="$CONF" bash "$KP" setup
+KLAUS_PANEL_CONF="$CONF" bash "$KP" write-page "$HERE/klaus-page.html"
 
 say "Открываю панель и страницу подписки в интернет (Caddy, HTTPS)"
 compose up -d --remove-orphans || die "контейнеры не запустились (подробности выше)"
@@ -957,6 +962,33 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+  # The page for friends' browsers from PAGE_BRANCH (nothing to do while
+  # that is empty).
+  put_unit klaus-panel-page.service <<EOF
+# Written by Kirov VPN install-panel.sh
+[Unit]
+Description=Kirov VPN: take the page for friends' browsers from GitHub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=KLAUS_PANEL_CONF=$CONF
+ExecStart=/usr/local/bin/klaus-panel update-page --quiet
+EOF
+  put_unit klaus-panel-page.timer <<'EOF'
+# Written by Kirov VPN install-panel.sh
+[Unit]
+Description=Kirov VPN: look for a new page for friends every 15 minutes
+
+[Timer]
+OnActiveSec=1min
+OnUnitActiveSec=15min
+RandomizedDelaySec=1min
+
+[Install]
+WantedBy=timers.target
+EOF
   # Friends added in the panel's web form get the servers and lose the
   # form's end date of tomorrow ("klaus-panel tidy-users"). It runs every
   # 20 seconds, so the journal keeps only what it fixed and its errors.
@@ -989,6 +1021,7 @@ EOF
   if [ "$units_changed" = "1" ]; then systemctl daemon-reload; fi
   systemctl enable --now klaus-panel-apk.timer >/dev/null 2>&1 || warn "не удалось включить таймер klaus-panel-apk.timer"
   systemctl enable --now klaus-panel-users.timer >/dev/null 2>&1 || warn "не удалось включить таймер klaus-panel-users.timer"
+  systemctl enable --now klaus-panel-page.timer >/dev/null 2>&1 || warn "не удалось включить таймер klaus-panel-page.timer"
   if command -v ufw >/dev/null && grep -q "Status: active" <<<"$(ufw status)"; then
     say "Открываю порты 80 и 443 в ufw"
     ufw allow 80/tcp >/dev/null
@@ -1028,6 +1061,9 @@ else
   echo "  3. Оповещения в Telegram включены (проверка: klaus-panel telegram-test)"
 fi
 echo "  4. Новые сборки приложения из релиза $RELEASE_TAG публикуются сами; сейчас:  klaus-panel publish-apk"
+if [ -n "$PAGE_BRANCH" ]; then
+  echo "     Страница для знакомых обновляется сама из ветки $PAGE_BRANCH; сейчас:  klaus-panel update-page"
+fi
 echo "  5. Резервная копия:  klaus-panel backup"
 echo
 echo "Все команды: klaus-panel help"

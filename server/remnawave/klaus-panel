@@ -60,6 +60,8 @@ VPN-серверы:
                                RELEASE_TAG, по умолчанию стабильные — релиз stable; для
                                закрытого репозитория нужен GITHUB_TOKEN; раз в час это
                                делается само)
+  update-page                  взять страницу для знакомых из GitHub (ветка PAGE_BRANCH,
+                               по умолчанию main; раз в 15 минут это делается само)
 
 Прочее:
   hwid-limit N [--yes]         включить лимит устройств (N на человека); off — выключить
@@ -981,7 +983,7 @@ cmd_publish_apk() {
         die "в $repo ещё нет релиза stable: стабильную сборку выпускает GitHub Actions по тегу v… или по кнопке Run workflow с галочкой stable (инструкция, раздел 12)"
       fi
       die "в $repo нет релиза $tag" ;;
-    403)
+    403 | 429)
       # Without a token GitHub allows 60 requests an hour per address.
       if [ -z "${GITHUB_TOKEN:-}" ]; then
         [ "$quiet" = "1" ] && return 0
@@ -1067,6 +1069,81 @@ cmd_publish_apk() {
   note "Опубликована версия $ver: https://$SUB_DOMAIN/app/KirovVPN.apk (приложения знакомых предложат обновиться)"
 }
 
+# ---------------------------------------------------------------- page
+# Kirov VPN's page for friends' browsers (klaus-page.html). install-panel.sh
+# writes the one next to it; "update-page" takes the one in PAGE_BRANCH of
+# GITHUB_REPO (a timer does it every 15 minutes), so a change merged there
+# reaches friends with nobody on the server. Its only settings, the app and
+# support links, go into its klaus-config block, a "<" escaped so no value
+# can close the script tag. Anything but a whole page is refused, and the
+# page served stays.
+PAGE_SOURCE="server/remnawave/klaus-page.html"
+PAGE_CONFIG='<script id="klaus-config" type="application/json">'
+
+write_page() { # FILE; fails, changing nothing, for anything but a whole page
+  local cfg
+  [ "$(wc -c < "$1")" -le 524288 ] && head -c 15 "$1" | grep -qix '<!doctype html>' &&
+    grep -q '</html>' "$1" && [ "$(grep -oF "$PAGE_CONFIG" "$1" | wc -l)" = "1" ] || return 1
+  cfg="$(jq -nc --arg apk "${APK_URL:-}" --arg support "${SUPPORT_URL:-}" '{apkUrl: $apk, supportUrl: $support}' | sed 's/</\\u003c/g')"
+  tmpdir
+  jq -Rsj --arg tag "$PAGE_CONFIG" --arg cfg "$cfg" \
+    'sub("<script id=\"klaus-config\" type=\"application/json\">[^<]*</script>"; $tag + $cfg + "</script>")' \
+    "$1" > "$TMPD/index.html"
+  grep -qF "$PAGE_CONFIG$cfg</script>" "$TMPD/index.html" || return 1
+  mkdir -p "$RW_DIR/page"
+  write_file "$RW_DIR/page/index.html" < "$TMPD/index.html"
+  chmod 644 "$RW_DIR/page/index.html"
+}
+
+cmd_write_page() { # FILE (install-panel.sh: the page next to it)
+  [ -f "${1:-}" ] || die "нет файла страницы: ${1:-}"
+  write_page "$1" || die "$1 — не целая страница Kirov VPN (или в ней нет блока klaus-config)"
+}
+
+cmd_update_page() {
+  local repo="${GITHUB_REPO:-klausms17/vpn}" branch="${PAGE_BRANCH-main}"
+  local gh="${GITHUB_API:-https://api.github.com}" quiet=0 before=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --quiet) quiet=1; shift ;;
+      *) die "непонятный параметр: $1" ;;
+    esac
+  done
+  if [ -z "$branch" ]; then
+    [ "$quiet" = "1" ] && return 0
+    die "страница не обновляется сама (PAGE_BRANCH пустой). Брать её из main: sudo PAGE_BRANCH=main bash install-panel.sh"
+  fi
+  [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] || die "странное имя ветки: $branch"
+  tmpdir
+  gh_get "$gh/repos/$repo/contents/$PAGE_SOURCE?ref=$branch" "$TMPD/page.html" application/vnd.github.raw+json
+  case "$GH_CODE" in
+    200) ;;
+    401) die "GitHub не принял GITHUB_TOKEN (истёк или отозван?)" ;;
+    404)
+      # No page in the branch yet, or a closed repository without a token:
+      # the timer looks again later.
+      [ "$quiet" = "1" ] && return 0
+      die "в ветке $branch репозитория $repo нет $PAGE_SOURCE (или репозиторий закрытый: тогда нужен токен, инструкция, раздел 12)" ;;
+    403 | 429)
+      # Without a token GitHub allows 60 requests an hour per address.
+      if [ -z "${GITHUB_TOKEN:-}" ]; then
+        [ "$quiet" = "1" ] && return 0
+        die "GitHub пока не отвечает на запросы без токена (лимит в час): попробуйте позже"
+      fi
+      die "GitHub не дал прочитать $repo (ответ $GH_CODE): у токена нет доступа?" ;;
+    000) die "нет связи с $gh" ;;
+    *) die "GitHub ответил $GH_CODE" ;;
+  esac
+  if [ -f "$RW_DIR/page/index.html" ]; then before="$(sha256sum < "$RW_DIR/page/index.html")"; fi
+  write_page "$TMPD/page.html" || die "страница из $repo (ветка $branch) не целая или без блока klaus-config: оставляю прежнюю"
+  if [ "$before" != "$(sha256sum < "$RW_DIR/page/index.html")" ]; then
+    # The timer's journal says when friends got a new page.
+    say "Страница для знакомых обновлена из $repo (ветка $branch)"
+  elif [ "$quiet" != "1" ]; then
+    say "Страница для знакомых уже последняя ($repo, ветка $branch)"
+  fi
+}
+
 # ---------------------------------------------------------------- main
 cmd="${1:-help}"
 [ $# -gt 0 ] && shift
@@ -1099,5 +1176,7 @@ case "$cmd" in
   telegram-setup) cmd_telegram_setup "$@" ;;
   telegram-test) cmd_telegram_test ;;
   publish-apk) cmd_publish_apk "$@" ;;
+  update-page) cmd_update_page "$@" ;;
+  write-page) cmd_write_page "$@" ;;
   *) usage >&2; exit 1 ;;
 esac

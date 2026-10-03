@@ -79,8 +79,14 @@ and give step-by-step instructions for anything he must do himself.
     reports from the app into Telegram alerts; `klaus-page.html` is the
     light iOS-style page a friend's browser gets for the link (Caddy serves
     it for `Accept: text/html`, apps still get their list from Remnawave;
-    install-panel.sh fills in the APK and support links; tabs Android,
-    iPhone and Windows, the last two «Скоро», the device's own opens);
+    tabs Android, iPhone and Windows, the last two «Скоро», the device's
+    own opens). `klaus-panel write-page` puts it in place with the APK and
+    support links, and a timer runs `klaus-panel update-page` every 15
+    minutes: the page in `main` (`PAGE_BRANCH`) reaches friends with
+    nobody on the server, so a page change is live once it is in `main`.
+    A page that is not whole is refused, and `android.yml` checks that
+    the page in a branch is one the panel takes. The page must work with
+    the panel as installed: it only reads files on `/app/`.
     `test/` holds the Docker end-to-end test and the monitor unit tests.
   - The owner may add friends in the panel's web form instead of the CLI.
     That form starts with no squad and an end date of tomorrow, so a

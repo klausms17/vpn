@@ -61,6 +61,16 @@ jobs:
       - name: Block report monitor tests
         run: python3 -B server/remnawave/test/monitor_test.py
 
+      # The panel takes the friends' page from main by itself and keeps the
+      # one it has when a new one is not whole: such a page fails here,
+      # before it gets there.
+      - name: The friends' page is one the panel takes
+        run: |
+          d="$(mktemp -d)"
+          printf 'RW_DIR=%s\nAPI_URL=http://127.0.0.1:1\nAPI_TOKEN=-\n' "$d" > "$d/klaus-panel.env"
+          KLAUS_PANEL_CONF="$d/klaus-panel.env" bash server/remnawave/klaus-panel write-page server/remnawave/klaus-page.html
+          grep -qF '<script id="klaus-config" type="application/json">{"apkUrl":"","supportUrl":""}</script>' "$d/page/index.html"
+
       - name: Unit and end-to-end tests (real Xray servers)
         working-directory: libxray
         env:

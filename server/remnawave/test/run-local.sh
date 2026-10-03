@@ -22,6 +22,10 @@
 #                     default, the work branch's test builds, moves to it
 #                     once, a branch chosen on purpose stays); an open
 #                     repository needs no token, a closed one does
+#   update-page       the friends' page from the mock's "main" branch (the
+#                     default; PAGE_BRANCH= keeps the page of the folder),
+#                     a broken or cut one refused, a missing one quiet for
+#                     the timer
 #
 # and then
 #   (a) the app's User-Agent gets a base64 list with a vless REALITY link
@@ -93,7 +97,7 @@ RELEASE_OLD=build-claude-compassionate-mayer-6jph8m # the default before "stable
 APK_VERSION=1.0.99
 SPOOFED_IP=203.0.113.77 # a client IP that must never reach the monitor's log
 # This machine's own tokens must never reach the panel under test.
-unset GITHUB_TOKEN GH_TOKEN TELEGRAM_API_BASE
+unset GITHUB_TOKEN GH_TOKEN TELEGRAM_API_BASE PAGE_BRANCH
 
 step() { printf '\n\033[1;36m### %s\033[0m\n' "$*"; }
 pass() { printf '\033[1;32mPASS\033[0m %s\n' "$*"; }
@@ -240,8 +244,17 @@ pass "test page answers"
 step "Mock Telegram and GitHub APIs on :$MOCK_PORT (a fake release with KirovVPN-$APK_VERSION.apk)"
 APK="$WORK/KirovVPN-$APK_VERSION.apk"
 head -c 3000000 /dev/urandom > "$APK"
+# The friends' page as the repository's branches have it: main with a mark
+# of its own, one without its settings block and one cut off.
+PAGE_MARK="klaus-e2e-page-from-main"
+sed "s#<title>Kirov VPN</title>#<title>Kirov VPN</title><!-- $PAGE_MARK -->#" "$RWS/klaus-page.html" > "$WORK/page-main.html"
+grep -q "$PAGE_MARK" "$WORK/page-main.html" || fail "test setup: the page in main"
+grep -v 'id="klaus-config"' "$RWS/klaus-page.html" > "$WORK/page-broken.html"
+head -c 6000 "$RWS/klaus-page.html" > "$WORK/page-cut.html"
 python3 "$HERE/mock-apis.py" --port "$MOCK_PORT" --tg-token "$TG_BOT_TOKEN" --gh-token "$GH_TEST_TOKEN" \
-  --tag "$RELEASE" --bad-tag klaus-bad-sum --temp-tag klaus-temp-key --apk "$APK" > "$WORK/mock.log" 2>&1 &
+  --tag "$RELEASE" --bad-tag klaus-bad-sum --temp-tag klaus-temp-key --apk "$APK" \
+  --page main="$WORK/page-main.html" --page broken="$WORK/page-broken.html" --page cut="$WORK/page-cut.html" \
+  > "$WORK/mock.log" 2>&1 &
 MOCK_PID=$!
 retry 10 mock /_mock/tg/sent -o /dev/null || fail "mock APIs did not start"
 pass "mock APIs answer"
@@ -255,7 +268,8 @@ grep -q "Готово! Панель работает" "$WORK/install-1.log" || f
 [ "$(stat -c %a "$WORK/admin.txt")" = "600" ] || fail "admin credentials are not 600"
 grep -Eq '^Пароль: [A-Za-z0-9]{24,}$' "$WORK/admin.txt" || fail "admin password"
 grep -qx "RELEASE_TAG=$RELEASE" "$CONF" && grep -qx "STABLE_DEFAULT=1" "$CONF" || fail "new panel does not take the stable release"
-pass "panel installed, admin saved to admin.txt (600), app builds from the $RELEASE release"
+grep -qx "PAGE_BRANCH=main" "$CONF" || fail "new panel does not take the friends' page from main"
+pass "panel installed, admin saved to admin.txt (600), app builds from the $RELEASE release, the friends' page from main"
 
 step "klaus-panel telegram-setup: waits for the one-time code, takes its chat, sends a test message"
 # The panel's containers reach the mock on the host through the bridge.
@@ -362,7 +376,7 @@ pass "no support-url header, the page's support button opens the note on https:/
 
 step "install-panel.sh with a new SUB_DOMAIN and SUPPORT_URL (and a branch's builds chosen): Caddy serves the new name"
 install_panel "$WORK/opt" "$WORK/admin.txt" SUB_DOMAIN="$SUB_DOMAIN2" SUPPORT_URL="$SUPPORT" RELEASE_TAG="$RELEASE_OLD" \
-  2>&1 | tee "$WORK/install-3.log"
+  PAGE_BRANCH= 2>&1 | tee "$WORK/install-3.log"
 grep -q "Готово! Панель работает" "$WORK/install-3.log" || fail "re-run with a new SUB_DOMAIN failed"
 grep -q "адрес подписок меняется: $SUB_DOMAIN → $SUB_DOMAIN2" "$WORK/install-3.log" || fail "no warning about the old links"
 https_get "$SUB_DOMAIN2" -o /dev/null || fail "Caddy does not serve the new $SUB_DOMAIN2"
@@ -371,7 +385,8 @@ grep -qx "SUB_PUBLIC_DOMAIN=$SUB_DOMAIN2" "$WORK/opt/.env" || fail "panel .env n
 support_links | tee "$WORK/support-1.json"
 jq -e --arg s "$SUPPORT" '.header == $s and .page == $s' "$WORK/support-1.json" >/dev/null || fail "SUPPORT_URL not applied"
 jq -e --arg s "$SUPPORT" '.supportUrl == $s' <<<"$(page_config "$SUB_DOMAIN2")" >/dev/null || fail "SUPPORT_URL not on Kirov VPN's page"
-pass "https://$SUB_DOMAIN2 served with a certificate, the old name is not; SUPPORT_URL in the header and on the page"
+grep -qx "PAGE_BRANCH=''" "$CONF" || fail "PAGE_BRANCH= did not switch the page updates off"
+pass "https://$SUB_DOMAIN2 served with a certificate, the old name is not; SUPPORT_URL in the header and on the page; page updates off"
 
 step "install-panel.sh back to $SUB_DOMAIN with SUPPORT_URL removed (settings converge)"
 install_panel "$WORK/opt" "$WORK/admin.txt" SUB_DOMAIN="$SUB_DOMAIN" SUPPORT_URL= 2>&1 | tee "$WORK/install-4.log"
@@ -383,7 +398,8 @@ cmp -s "$WORK/support-0.json" "$WORK/support-2.json" || fail "support link did n
 jq -e '.supportUrl == ""' <<<"$(page_config "$SUB_DOMAIN")" >/dev/null || fail "SUPPORT_URL left on Kirov VPN's page"
 grep -qx "RELEASE_TAG=$RELEASE_OLD" "$CONF" || fail "a release chosen on purpose was not kept"
 if grep -q "стабильные" "$WORK/install-4.log"; then fail "a release chosen on purpose was moved to stable"; fi
-pass "back on $SUB_DOMAIN; support link as without SUPPORT_URL again; the chosen $RELEASE_OLD stays"
+grep -qx "PAGE_BRANCH=''" "$CONF" || fail "page updates switched off on purpose came back"
+pass "back on $SUB_DOMAIN; support link as without SUPPORT_URL again; the chosen $RELEASE_OLD and the page updates switched off stay"
 
 step "klaus-panel add-node + install-node.sh"
 kp add-node test-node "$GW" DE --title "Германия" --host 127.0.0.1 --node-port "$NODE_PORT" > "$WORK/add-node.log"
@@ -493,7 +509,7 @@ page_apk_buttons() { # -> the Kirov VPN block's download buttons in the panel's 
 # an older one: its release is the old default, the work branch's test builds.
 sed -i '/^STABLE_DEFAULT=/d' "$CONF"
 grep -qx "RELEASE_TAG=$RELEASE_OLD" "$CONF" || fail "test setup: the old default is not saved"
-install_panel "$WORK/opt" "$WORK/admin.txt" GITHUB_TOKEN="$GH_TEST_TOKEN" GITHUB_API="http://127.0.0.1:$MOCK_PORT" APK_URL= \
+install_panel "$WORK/opt" "$WORK/admin.txt" GITHUB_TOKEN="$GH_TEST_TOKEN" GITHUB_API="http://127.0.0.1:$MOCK_PORT" APK_URL= PAGE_BRANCH=main \
   2>&1 | tee "$WORK/install-5.log"
 grep -q "Готово! Панель работает" "$WORK/install-5.log" || fail "re-run with GITHUB_TOKEN failed"
 grep -q "только стабильные" "$WORK/install-5.log" || fail "no note about the move to stable"
@@ -616,6 +632,46 @@ install_tip || fail "no install tip for Samsung and Huawei next to the download 
 jq -e '.apkUrl == ""' <<<"$(page_config "$SUB_DOMAIN")" >/dev/null || fail "APK_URL left on Kirov VPN's page"
 [ "$(sub_code app/version.json)" = "200" ] || fail "the page finds no published app"
 pass "old default moved to the $RELEASE release; a missing release is quiet for the timer, an unseen repository is not; an open repository read without a token, a closed one asks for it; wrong checksum and temporary key refused; the page entry, remark and build of the former name taken over; replaced builds kept 13 h, then a redirect to the current one (also from the former name); KirovVPN.apk, KirovVPN-$APK_VERSION.apk and version.json (versionCode 99) served; page button «Скачать приложение»; the Samsung and Huawei install tip with and without it"
+
+step "update-page: the friends' page from the repository's main branch, with this panel's settings"
+grep -qx "PAGE_BRANCH=main" "$CONF" || fail "PAGE_BRANCH=main not saved"
+if grep -q "$PAGE_MARK" "$WORK/opt/page/index.html"; then fail "test setup: the page of the folder has the mark of main"; fi
+kp update-page | tee "$WORK/page-1.log"
+grep -q "обновлена" "$WORK/page-1.log" || fail "the page in main was not taken"
+sub_get "$UA_BROWSER" "$SUB" -H 'Accept: text/html' > "$WORK/page-served.html"
+grep -q "$PAGE_MARK" "$WORK/page-served.html" || fail "a browser does not get the page from main"
+jq -e '.apkUrl == "" and .supportUrl == ""' <<<"$(page_config "$SUB_DOMAIN")" >/dev/null || fail "the page from main lost the panel's settings"
+[ "$(stat -c %a "$WORK/opt/page/index.html")" = "644" ] || fail "the page is not readable by Caddy"
+kp update-page | tee "$WORK/page-2.log"
+grep -q "уже последняя" "$WORK/page-2.log" || fail "the same page written again"
+kp update-page --quiet > "$WORK/page-quiet.log" || fail "the timer's run failed"
+[ ! -s "$WORK/page-quiet.log" ] || fail "the timer's run says something with nothing new"
+pass "the page in main served with this panel's settings (644); taken once; the timer quiet with nothing new"
+
+step "update-page: a broken or cut page refused, a missing one quiet for the timer, off when PAGE_BRANCH is empty"
+page_kp() { # BRANCH ARGS...: update-page with PAGE_BRANCH=BRANCH ('' for none)
+  local b="$1"
+  shift
+  sed "s#^PAGE_BRANCH=.*#PAGE_BRANCH='$b'#" "$CONF" > "$WORK/page-branch.env"
+  KLAUS_PANEL_CONF="$WORK/page-branch.env" no_proxy='*' NO_PROXY='*' bash "$RWS/klaus-panel" update-page "$@"
+}
+cp "$WORK/opt/page/index.html" "$WORK/page-before.html"
+for b in broken cut; do
+  if page_kp "$b" --quiet > "$WORK/page-$b.log" 2>&1; then fail "a $b page was taken"; fi
+  cat "$WORK/page-$b.log"
+  grep -q "не целая" "$WORK/page-$b.log" || fail "wrong refusal of a $b page"
+done
+page_kp no-such-branch --quiet || fail "the timer's run failed on a branch without the page"
+if page_kp no-such-branch > "$WORK/page-none.log" 2>&1; then fail "a branch without the page went through"; fi
+cat "$WORK/page-none.log"
+grep -q "нет server/remnawave/klaus-page.html" "$WORK/page-none.log" || fail "wrong message for a branch without the page"
+page_kp '' --quiet || fail "the timer's run failed with the updates off"
+if page_kp '' > "$WORK/page-off.log" 2>&1; then fail "update-page ran with the updates off"; fi
+cat "$WORK/page-off.log"
+grep -q "не обновляется сама" "$WORK/page-off.log" || fail "wrong message with the updates off"
+rm -f "$WORK/page-branch.env"
+cmp -s "$WORK/opt/page/index.html" "$WORK/page-before.html" || fail "a refused page changed the one served"
+pass "a page without its settings block and a cut one refused, the served one kept; a branch without the page quiet for the timer; nothing with PAGE_BRANCH empty"
 
 step "(c) the device is recorded without the friend's IP (the limit itself is off); no history, no page log"
 USER_ID="$(api "/api/users/by-username/friend_1" | jq -r '.response.id')"
