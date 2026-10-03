@@ -20,7 +20,9 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.klausms.vpn.BuildConfig
 import com.klausms.vpn.R
+import com.klausms.vpn.data.AccountStatus
 import com.klausms.vpn.data.AppSettings
+import com.klausms.vpn.ui.AccountView
 import com.klausms.vpn.ui.MainViewModel
 import com.klausms.vpn.ui.components.IconTile
 import com.klausms.vpn.ui.components.InsetGroup
@@ -56,9 +58,11 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit, onNavigate: (String) -
     val settings by vm.settings.collectAsStateWithLifecycle()
     val geoVersion by vm.geoVersion.collectAsStateWithLifecycle()
     val geoUpdating by vm.geoUpdating.collectAsStateWithLifecycle()
+    val account by vm.accountView.collectAsStateWithLifecycle()
     SettingsContent(
         settings = settings,
         geoVersion = geoVersion,
+        account = account,
         onRussianApps = { v -> vm.updateSettings { it.copy(bypassRussianApps = v) } },
         onUpdateGeo = { vm.updateGeo() },
         onBack = onBack,
@@ -71,6 +75,8 @@ fun SettingsScreen(vm: MainViewModel, onBack: () -> Unit, onNavigate: (String) -
 fun SettingsContent(
     settings: AppSettings,
     geoVersion: Long,
+    /** Shown first when the build has accounts. */
+    account: AccountView = AccountView(),
     onRussianApps: (Boolean) -> Unit,
     onUpdateGeo: () -> Unit,
     onBack: () -> Unit,
@@ -96,6 +102,27 @@ fun SettingsContent(
     Column(Modifier.fillMaxSize().background(kc.page)) {
         NavBar("Настройки", onBack)
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = navBarClearance() + 24.dp)) {
+
+            if (account.available) {
+                item { SectionHeader("Аккаунт") }
+                item {
+                    InsetGroup {
+                        ListRow(
+                            title = account.email.ifEmpty { "Войти или создать аккаунт" },
+                            subtitle = when (account.status) {
+                                AccountStatus.SIGNED_OUT -> "Серверы сами появятся на всех ваших устройствах"
+                                AccountStatus.UNCONFIRMED -> "Подтвердите почту"
+                                AccountStatus.PENDING -> "Ждёт доступа"
+                                AccountStatus.ACTIVE -> "Доступ есть"
+                                AccountStatus.REJECTED -> "Доступ не выдан"
+                            },
+                            chevron = true,
+                            leading = { IconTile(R.drawable.ic_person_ios, TileBlue) },
+                            onClick = { onNavigate("account") },
+                        )
+                    }
+                }
+            }
 
             item { SectionHeader("Приложения без VPN") }
             item {

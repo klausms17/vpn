@@ -417,14 +417,17 @@ private fun SubscriptionHeader(sub: Subscription, onRefresh: () -> Unit, onDelet
         }
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }, containerColor = kc.cardPressed) {
             MenuItem("Обновить", R.drawable.ic_refresh_ios) { menu = false; onRefresh() }
-            MenuItem("Удалить подписку", R.drawable.ic_trash_ios, destructive = true) { menu = false; confirmDelete = true }
+            // The account's subscription goes only with the account.
+            val remove = if (sub.account) "Выйти из аккаунта" else "Удалить подписку"
+            MenuItem(remove, R.drawable.ic_trash_ios, destructive = true) { menu = false; confirmDelete = true }
         }
     }
     if (confirmDelete) {
         IosAlert(
-            title = "Удалить подписку «${sub.name}» со всеми серверами?",
+            title = if (sub.account) "Выйти из аккаунта?" else "Удалить подписку «${sub.name}» со всеми серверами?",
+            text = if (sub.account) "Серверы аккаунта будут убраны с телефона. Войти снова можно в настройках." else null,
             onDismiss = { confirmDelete = false },
-            confirm = "Удалить",
+            confirm = if (sub.account) "Выйти" else "Удалить",
             onConfirm = { confirmDelete = false; onDelete() },
             destructive = true,
         )

@@ -18,6 +18,7 @@ public abstract class Libxray {
     public static FetchResult fetch(String url, String userAgent, int timeoutMs, String proxyConfigJSON) throws Exception { throw new Exception(); }
     public static FetchResult fetchWithHeaders(String url, String userAgent, String headersJSON, int timeoutMs, String proxyConfigJSON) throws Exception { throw new Exception(); }
     public static void downloadFile(String url, String dst, String userAgent, int timeoutMs, String proxyConfigJSON) throws Exception { throw new Exception(); }
+    public static HTTPReply request(String method, String url, String userAgent, String headersJSON, byte[] body, int timeoutMs, String proxyConfigJSON) throws Exception { throw new Exception(); }
     public static void checkGeoFile(String path, String codes) throws Exception {}
     public static void trimGeoFile(String src, String dst, String codes) throws Exception {}
     public static int hostInGeoIP(String path, String code, String host, int timeoutMs) throws Exception { return 0; }

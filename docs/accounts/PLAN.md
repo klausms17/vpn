@@ -1,7 +1,8 @@
 # Accounts: plan (3 Oct 2026)
 
 **Status (3 Oct 2026):** being built, in phases (section 9). Phases A (the
-server on the panel) and B (Windows) are built; C (Android) is next.
+server on the panel), B (Windows) and C (Android) are built; D (iPhone and
+Mac) is next.
 
 ## 1. What the owner asked
 
@@ -231,11 +232,20 @@ No IP, no log of requests. The service's own log says what happened
   timeoutMs, proxyConfigJSON)` returning the status and a body of at most
   64 KB, because today's fetch is GET only and drops error bodies. Its
   errors name only the host.
-- `data/AccountApi.kt`, `data/AccountStore.kt` (state in
-  `filesDir/data/account.json`; the token sealed with an AndroidKeyStore
-  AES-GCM key in `noBackupFilesDir`), `ui/AccountSession.kt` (app-scoped,
-  a `StateFlow`), `ui/screens/AccountScreen.kt`, a first «Аккаунт» section
-  in Settings, `Subscription.account`. JVM tests with fakes.
+- `data/AccountApi.kt` (the API, as the Go client speaks it),
+  `data/AccountState.kt` (in `filesDir/data/account.json`),
+  `core/CoreAccountTransport.kt` (directly, then through the selected
+  server), `ui/AccountSession.kt` (app-scoped, a `StateFlow`, one request
+  at a time), `ui/screens/AccountScreen.kt`, a first «Аккаунт» section in
+  Settings, `Subscription.account` (its menu offers «Выйти из аккаунта»
+  instead of deleting it). JVM tests with fakes.
+- The token is kept like the servers' keys and links: in the app's own
+  files, which backups leave out. Sealing it with an AndroidKeyStore key
+  was planned, but it would guard nothing that `profiles.json` does not
+  hold in the clear already (the account's link gives the same servers),
+  and the Keystore fails on some phones.
+- The service is asked when the app comes on screen, and every minute
+  while the account screen shows «Ждём»; each time only when due.
 
 ### 6.3 Windows
 

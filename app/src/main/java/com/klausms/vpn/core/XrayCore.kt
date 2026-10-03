@@ -128,6 +128,14 @@ object XrayCore {
         Libxray.fetchWithHeaders(url, USER_AGENT, headers, timeoutMs, via?.let { proxyOnlyConfig(it) } ?: "")
 
     /**
+     * One call to a small JSON API (the accounts service), optionally
+     * through [via] like [fetch]; the answer comes whatever its status.
+     * [headers]: a JSON object, "" for none; [body]: JSON, or null.
+     */
+    fun request(method: String, url: String, headers: String, body: ByteArray?, via: JsonArray?, timeoutMs: Int = 20_000): libxray.HTTPReply =
+        Libxray.request(method, url, USER_AGENT, headers, body, timeoutMs, via?.let { proxyOnlyConfig(it) } ?: "")
+
+    /**
      * Downloads [url] through the running tunnel's server, without a
      * temporary core: the one way to go through a server in the VPN process.
      */

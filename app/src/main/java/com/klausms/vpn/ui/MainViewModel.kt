@@ -11,7 +11,6 @@ import com.klausms.vpn.core.XrayCore
 import com.klausms.vpn.core.userMessage
 import com.klausms.vpn.data.AppSettings
 import com.klausms.vpn.data.AppUpdate
-import com.klausms.vpn.data.Downloader
 import com.klausms.vpn.data.GeoFiles
 import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
@@ -117,19 +116,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val updater = SubscriptionUpdater(app, repo)
 
-    /**
-     * Direct first (panels are usually reachable); then through the
-     * selected server in case the panel is blocked.
-     */
-    private val downloader = Downloader { url, headers ->
-        try {
-            XrayCore.fetch(url, null, headers)
-        } catch (direct: Exception) {
-            val via = profiles.value.selected?.outbounds ?: throw direct
-            AppLog.w("subscription direct download failed, retrying via proxy", direct)
-            XrayCore.fetch(url, via, headers)
-        }
-    }
+    private val downloader = (app as App).downloader
+
+    private val accountSession = (app as App).account
+
+    /** This phone's account, for the account screen. */
+    val accountView: StateFlow<AccountView> = accountSession.view
 
     /**
      * Saving can fail (storage full). Report it instead of crashing; the
@@ -195,6 +187,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             ui.checkWhitelist(profiles.value.profiles)
             if (staleJob?.isActive == true) return@launch
             staleJob = viewModelScope.launch {
+                // First: access granted meanwhile brings the account's servers.
+                account { checkIfDue() }.join()
                 refreshStaleSubscriptions()
                 // After the refresh: it may have brought the panel's app address.
                 checkForUpdate()
@@ -438,11 +432,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Subscription [id] removed with its servers; the account's goes only with the account, so this signs out. */
     fun deleteSubscription(id: String) = appScope.launch(saveErrors) {
+        if (profiles.value.subscriptions.any { it.id == id && it.account }) {
+            account { logout() }
+            return@launch
+        }
         val selectedWasInside = profiles.value.selected?.subscriptionId == id
         val next = repo.updateProfiles { s -> s.withoutSubscription(id) }
         if (selectedWasInside) {
             if (next.selected == null) stopVpn() else tunnel.reconnectIfRunning()
+        }
+    }
+
+    // ------------------------------------------------------------- account
+
+    /**
+     * Runs [work] on the account in the app scope: it outlives the screen.
+     * The account's servers may come or go with it: a tunnel on a server
+     * that is gone moves to the selection, or stops when there is none.
+     */
+    fun account(work: suspend AccountSession.() -> Unit) = appScope.launch(saveErrors) {
+        val running = status.value.profileId?.takeIf { isTunnelUp }
+        accountSession.work()
+        val now = profiles.value
+        ui.checkWhitelist(now.profiles)
+        if (running != null && now.profiles.none { it.id == running }) {
+            if (now.selected == null) stopVpn() else tunnel.reconnectIfRunning()
         }
     }
 

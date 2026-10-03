@@ -46,6 +46,8 @@ data class Subscription(
     val reportUrl: String? = null,
     /** The owner's latest app build, version.json ("klaus-app-url" header, https only). */
     val appUrl: String? = null,
+    /** The account's subscription (docs/accounts/PLAN.md): it goes only when the account signs out. */
+    val account: Boolean = false,
 )
 
 @Serializable

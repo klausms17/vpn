@@ -45,6 +45,7 @@ import com.klausms.vpn.service.VpnState
 import com.klausms.vpn.ui.components.BusyPill
 import com.klausms.vpn.ui.components.GlassToast
 import com.klausms.vpn.ui.components.IosAlert
+import com.klausms.vpn.ui.screens.AccountScreen
 import com.klausms.vpn.ui.screens.AddKeySheet
 import com.klausms.vpn.ui.screens.AppsScreen
 import com.klausms.vpn.ui.screens.HomeScreen
@@ -174,6 +175,7 @@ class MainActivity : ComponentActivity() {
         Box(Modifier.fillMaxSize().background(kc.page)) {
             when (top) {
                 "settings" -> SettingsScreen(vm = vm, onBack = back, onNavigate = push)
+                "account" -> AccountScreen(vm = vm, onBack = back)
                 "apps" -> AppsScreen(vm = vm, onBack = back)
                 "logs" -> LogsScreen(onBack = back)
                 "licenses" -> {
