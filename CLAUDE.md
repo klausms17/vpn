@@ -173,7 +173,7 @@ and give step-by-step instructions for anything he must do himself.
 - Commits: a short imperative title and a body that says what changed and
   why.
 
-## Status (1 Oct 2026)
+## Status (3 Oct 2026)
 
 - **Android is ready for testing with friends.** A stability audit found
   45 issues; all are fixed except the ones listed as known limits below.
@@ -242,9 +242,11 @@ and give step-by-step instructions for anything he must do himself.
   (1 Oct 2026, run in a cloud session; never run it on the live panel).
   Friends can be added in the web form too (see `tidy-users` above), so the
   owner needs no custom admin UI.
-- `main` has everything up to 27 Sep (PR 1). `claude/panel-privacy` goes to
-  `main` through https://github.com/klausms17/vpn/pull/2; once it is
-  merged, start new work from `main`.
+- `claude/panel-privacy` was merged into `main` on 3 Oct 2026
+  (https://github.com/klausms17/vpn/pull/2). Start new work from `main` on
+  a new branch. On 3 Oct the owner told Claude to merge its own PRs
+  («да, сливай сам»): merge with a merge commit once CI is green. Builds
+  of `main` go to the `build-main` and `windows-build-main` releases.
 - The owner's servers: the current VPN (`install.sh`, one shared key) runs
   on a VPS in Germany; the owner also has a Beget VPS in Russia.
 
@@ -311,22 +313,19 @@ and give step-by-step instructions for anything he must do himself.
      so it needs a stable build first (no token while the repository is
      public). The owner updates the panel with `cd ~/vpn && git pull &&
      sudo bash server/remnawave/install-panel.sh`.
-   - On 3 Oct the owner asked whether Claude could keep the friend page
-     current without him. He was asked to run that update once (it adds
-     the page timer, the tokenless `publish-apk` and the Windows tab), and
-     whether Claude may merge its own PRs into `main` once CI is green,
-     since the page follows `main`. Until he answers, he merges (step 7).
+   - On 3 Oct the owner was asked to run once on the panel server
+     `cd ~/vpn && git checkout main && git pull && sudo bash
+     server/remnawave/install-panel.sh`: it moves the checkout to `main`
+     and adds the page timer, the tokenless `publish-apk` and the Windows
+     tab. From then on a page change merged into `main` reaches friends by
+     itself. He has not confirmed running it yet.
    - The Beget VPS is not needed: a Russian exit bypasses nothing, and a
      panel there would put friends' data under Russian requests and its
      links to the nodes behind TSPU. Later it might be a whitelist relay.
 6. The owner once pasted a Telegram bot token into a chat. Make sure he
    revoked it (@BotFather → /revoke) and entered the new one only on the
    panel.
-7. The owner agreed to move the work to `main` and merges the PRs. The
-   weekly geo rebuild runs only on the default branch. Once
-   `claude/panel-privacy` is merged, put `~/vpn` on the panel server back
-   on `main`.
-8. Known limits, documented:
+7. Known limits, documented:
    - UDP flows outlive `Stop`, and a UDP socket is routed by its first
      packet (audit 41/42);
    - DNS for names never seen before still waits while the server is down
