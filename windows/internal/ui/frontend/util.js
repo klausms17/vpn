@@ -20,6 +20,19 @@ export function icon(name) {
 }
 
 let toastTimer = 0;
+// busy turns button into a waiting one while work runs.
+export async function busy(button, label, work) {
+  const text = button.textContent;
+  button.disabled = true;
+  button.textContent = label;
+  try {
+    return await work();
+  } finally {
+    button.disabled = false;
+    button.textContent = text;
+  }
+}
+
 export function toast(text) {
   const node = $("toast");
   node.textContent = text;

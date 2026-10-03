@@ -60,7 +60,10 @@ func Run(version string, args []string) error {
 		tray.SetIcon(trayIcons[look.icon])
 		tray.SetTooltip(look.tooltip)
 	})
-	bridge := &Bridge{link: link, version: version, uiLog: filepath.Join(dir, "ui.log")}
+	bridge := &Bridge{
+		link: link, version: version, uiLog: filepath.Join(dir, "ui.log"),
+		proxy: proxyCheck{settings: windowsProxyKeys, listening: listening, log: log.Info},
+	}
 	for _, a := range args {
 		if _, ok := bridge.links.offer(a); ok {
 			log.Info("started with an add link")

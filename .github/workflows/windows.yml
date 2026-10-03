@@ -144,6 +144,12 @@ jobs:
           DESKTOP_MATCHER: "1"
         run: go test -count=1 -timeout 25m ./...
 
+      # The window's code that reads and changes Windows' own settings (in
+      # keys of the test's own).
+      - name: The window's tests on Windows
+        working-directory: windows
+        run: go test -count=1 ./internal/ui/
+
   package:
     name: Installer
     needs: logic

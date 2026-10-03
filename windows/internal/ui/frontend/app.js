@@ -9,6 +9,7 @@ import { renderServers, serversShown } from "./servers.js";
 import { onShowServers, renderPane } from "./pane.js";
 import { onSaved, renderSettings } from "./settings.js";
 import { loadJournal } from "./journal.js";
+import { checkProxy } from "./proxy.js";
 
 let snap = null;
 
@@ -17,7 +18,7 @@ function render(s) {
   snap = s;
   // Odd data in one part must not leave the others, the button among
   // them, showing an old state.
-  for (const part of [renderServers, renderPane, renderSettings]) {
+  for (const part of [renderServers, renderPane, renderSettings, checkProxy]) {
     try {
       part(s);
     } catch (err) {

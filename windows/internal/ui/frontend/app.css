@@ -211,6 +211,31 @@ button { font: inherit; color: inherit; }
 .btn.danger { color: #FFFFFF; background: linear-gradient(180deg, #F0646A, var(--red)); }
 .btn.wide { width: 100%; height: 40px; }
 
+/* ------------------------------------------------------------ banner */
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 26px 0;
+  padding: 12px 12px 12px 14px;
+  border-radius: 14px;
+  background: #FFF8EB;
+  box-shadow: inset 0 0 0 1px rgba(199, 122, 10, 0.3);
+}
+.banner > svg { flex: none; width: 20px; height: 20px; color: var(--amber); }
+.banner-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--slate);
+}
+.banner-text strong { font-size: 13.5px; font-weight: 650; color: var(--ink); }
+
 /* ------------------------------------------------------------ servers */
 
 .groups { display: flex; flex-direction: column; gap: 14px; }
