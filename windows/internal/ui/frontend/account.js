@@ -76,8 +76,12 @@ function login() {
 }
 
 $("account-login").addEventListener("click", login);
+// The view for an unconfirmed address then says where the letter went.
 $("account-register").addEventListener("click", () =>
-  run($("account-register"), "Создание…", () => call("AccountRegister", email(), $("account-password").value)));
+  run($("account-register"), "Создание…", async () => {
+    await call("AccountRegister", email(), $("account-password").value);
+    return "";
+  }));
 $("account-forgot").addEventListener("click", () => {
   if (!email()) {
     say("Введите почту, на которую зарегистрирован аккаунт, и нажмите «Забыли пароль?» ещё раз.", true);

@@ -31,9 +31,11 @@ func TestRequestReturnsEveryAnswer(t *testing.T) {
 		string(reply.Body) != `POST application/json Bearer tok KlausVPN/1.0.1 (Windows) {"email":"ivan@mail.ru"}` {
 		t.Fatalf("echo: %+v %v", reply, err)
 	}
-	reply, err = Request("GET", srv.URL+"/echo", "", "", nil, 5000, "")
-	if err != nil || string(reply.Body) != "GET   Go-http-client/1.1 " {
-		t.Fatalf("a GET without a body: %q %v", reply.Body, err)
+	for _, none := range [][]byte{nil, {}} {
+		reply, err = Request("GET", srv.URL+"/echo", "", "", none, 5000, "")
+		if err != nil || string(reply.Body) != "GET   Go-http-client/1.1 " {
+			t.Fatalf("a GET without a body (%v): %q %v", none == nil, reply.Body, err)
+		}
 	}
 	reply, err = Request("POST", srv.URL+"/refuse", "", "", []byte(`{}`), 5000, "")
 	if err != nil || reply.Status != 429 || !strings.Contains(string(reply.Body), "too_often") {

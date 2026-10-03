@@ -23,7 +23,8 @@ const maxReplyBytes = 64 << 10
 // Request sends one call to a small HTTP API, such as the accounts service
 // (docs/accounts/PLAN.md), and returns the answer whatever its status: such
 // an API says in the body why it refused. method is GET or POST; body is
-// sent as JSON (nil for none); headersJSON is as for FetchWithHeaders and
+// sent as JSON (empty for none: gomobile may hand over an empty array for
+// none); headersJSON is as for FetchWithHeaders and
 // may carry Authorization. Without proxyConfigJSON it goes directly, with
 // it through a temporary instance (see FetchWithHeaders). Errors name the
 // host only: never the URL, a header or the body.
@@ -77,7 +78,7 @@ func doRequest(ctx context.Context, tr http.RoundTripper, method, rawURL, userAg
 		return nil, errors.New("only GET and POST")
 	}
 	var reader io.Reader
-	if body != nil {
+	if len(body) > 0 {
 		reader = bytes.NewReader(body)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, reader)
@@ -87,7 +88,7 @@ func doRequest(ctx context.Context, tr http.RoundTripper, method, rawURL, userAg
 	for name, values := range extra {
 		req.Header[name] = values
 	}
-	if body != nil {
+	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if userAgent != "" {

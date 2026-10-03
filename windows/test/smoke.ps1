@@ -235,7 +235,7 @@ try {
   Check ("$out" -eq '{"account":{"available":true,"email":"smoke@kirov.test","status":"active"},"subscriptions":[{"name":"Smoke account","servers":1}]}') "the account's servers are there ($out)"
   $calls = @(Get-Content "$work\sub\account.log")
   Check (@($calls -match '^login device=Windows \d').Count -eq 2 -and @($calls -match '^ua=KlausVPN/').Count -ge 1) "the accounts service was told the device, the subscription downloaded ($calls)"
-  Check (-not (Select-String -Path "$data\account.json" -Pattern 'smoke-session-token', 'smoke@kirov' -SimpleMatch -Quiet)) 'the session is kept sealed'
+  Check (-not (Select-String -Path "$data\data\account.json" -Pattern 'smoke-session-token', 'smoke@kirov' -SimpleMatch -Quiet)) 'the session is kept sealed'
   $journal = (& (Join-Path $Tools 'kirovctl.exe') logs) -join "`n"
   Check ($journal -match 'signed in to the account' -and $journal -notmatch 'smoke@kirov' -and $journal -notmatch 'sub/account') 'the journal tells of it without the email or the link'
   Ctl account-logout | Out-Null
