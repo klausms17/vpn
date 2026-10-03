@@ -352,3 +352,15 @@ func TestAStoredServerTakesTheParsedOne(t *testing.T) {
 		t.Errorf("name %q", got)
 	}
 }
+
+func TestAnAccountsSubscriptionStaysTheAccounts(t *testing.T) {
+	mine := sub
+	mine.Account = true
+	state := model.ProfilesState{Subscriptions: []model.Subscription{mine}}
+	next := Merge(state, "s1", fetched(parsed("NL", "nl.example.com")), now, ids())
+	next = MarkFailed(next, "s1", "HTTP 502", now)
+	next = Merge(next, "s1", Fetched{Notice: HWIDLimit}, now, ids())
+	if !next.Subscriptions[0].Account {
+		t.Error("the account's mark was lost")
+	}
+}

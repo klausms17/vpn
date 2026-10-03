@@ -57,9 +57,13 @@ jobs:
         working-directory: server/remnawave/test/e2e
         run: go vet ./...
 
-      # Standard library only, like klaus-monitor itself: nothing to install.
+      # Standard library only, like the services themselves: nothing to
+      # install.
       - name: Block report monitor tests
         run: python3 -B server/remnawave/test/monitor_test.py
+
+      - name: Accounts service tests
+        run: python3 -B server/remnawave/test/accounts_test.py
 
       # The panel takes the friends' page from main by itself and keeps the
       # one it has when a new one is not whole: such a page fails here,

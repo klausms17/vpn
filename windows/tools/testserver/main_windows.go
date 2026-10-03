@@ -2,6 +2,7 @@
 // test of the Windows app; it is never shipped. It writes its share link
 // to -link and its access log to -log, and serves until it is stopped.
 // With -sub it also serves a subscription to that server, as a panel
+// would, and an account whose access is granted, as the accounts service
 // would (see serveSubscription).
 //
 // It runs on the PC whose traffic the tunnel captures, so its own
@@ -24,8 +25,10 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net"
@@ -105,9 +108,12 @@ func main() {
 }
 
 // serveSubscription serves a subscription with link on 127.0.0.1 over
-// HTTPS, with the headers Remnawave sends. Into dir it writes sub.url, its
-// address, sub.cer, the certificate the test makes Windows trust, and
-// sub.log, a line per download with what the app said of itself.
+// HTTPS, with the headers Remnawave sends, and the accounts service's API
+// for one account (accountAPI). Into dir it writes sub.url, the
+// subscription's address, account.url, the accounts service's, sub.cer,
+// the certificate the test makes Windows trust, sub.log, a line per
+// download with what the app said of itself, and account.log, a line per
+// call to the accounts service.
 func serveSubscription(dir, link string) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -135,30 +141,99 @@ func serveSubscription(dir, link string) {
 		log.Fatal(err)
 	}
 	var mu sync.Mutex
-	body := base64.StdEncoding.EncodeToString([]byte(link + "\n"))
-	title := base64.StdEncoding.EncodeToString([]byte("Smoke subscription"))
-	go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := r.Header
+	note := func(file, line string) {
 		mu.Lock()
-		f, err := os.OpenFile(filepath.Join(dir, "sub.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		defer mu.Unlock()
+		f, err := os.OpenFile(filepath.Join(dir, file), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		if err == nil {
-			fmt.Fprintf(f, "ua=%s hwid=%d os=%s ver=%s model=%s\n", r.UserAgent(), len(h.Get("X-Hwid")),
-				h.Get("X-Device-Os"), h.Get("X-Ver-Os"), h.Get("X-Device-Model"))
+			fmt.Fprintln(f, line)
 			f.Close()
 		}
-		mu.Unlock()
-		w.Header().Set("Profile-Title", "base64:"+title)
-		w.Header().Set("Subscription-Userinfo", fmt.Sprintf("upload=0; download=1048576; total=1073741824; expire=%d", time.Now().Add(30*24*time.Hour).Unix()))
-		w.Header().Set("Profile-Update-Interval", "1")
-		fmt.Fprint(w, body)
-	}))
+	}
+	subscription := func(title, link, file string) http.HandlerFunc {
+		body := base64.StdEncoding.EncodeToString([]byte(link + "\n"))
+		profileTitle := "base64:" + base64.StdEncoding.EncodeToString([]byte(title))
+		return func(w http.ResponseWriter, r *http.Request) {
+			h := r.Header
+			note(file, fmt.Sprintf("ua=%s hwid=%d os=%s ver=%s model=%s", r.UserAgent(), len(h.Get("X-Hwid")),
+				h.Get("X-Device-Os"), h.Get("X-Ver-Os"), h.Get("X-Device-Model")))
+			w.Header().Set("Profile-Title", profileTitle)
+			w.Header().Set("Subscription-Userinfo", fmt.Sprintf("upload=0; download=1048576; total=1073741824; expire=%d", time.Now().Add(30*24*time.Hour).Unix()))
+			w.Header().Set("Profile-Update-Interval", "1")
+			fmt.Fprint(w, body)
+		}
+	}
+	base := "https://" + l.Addr().String()
+	mux := http.NewServeMux()
+	mux.Handle("/sub/smoke", subscription("Smoke subscription", link, "sub.log"))
+	mux.Handle("/sub/account", subscription("Smoke account", strings.TrimSuffix(link, "-sub")+"-account", "account.log"))
+	mux.Handle("/account/v1/", accountAPI(base+"/sub/account", func(line string) { note("account.log", line) }))
+	go http.Serve(l, mux)
 	write := func(name string, data []byte) {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
 			log.Fatal(err)
 		}
 	}
 	write("sub.cer", der)
-	write("sub.url", []byte(fmt.Sprintf("https://%s/sub/smoke\n", l.Addr())))
+	write("sub.url", []byte(base+"/sub/smoke\n"))
+	write("account.url", []byte(base+"\n"))
+}
+
+// The one account of accountAPI.
+const (
+	accountEmail    = "smoke@kirov.test"
+	accountPassword = "smoke pass"
+	accountToken    = "smoke-session-token"
+)
+
+// accountAPI answers as the accounts service (docs/accounts/PLAN.md) for
+// one account whose access is granted, with the subscription subURL, and
+// notes each call.
+func accountAPI(subURL string, note func(string)) http.Handler {
+	var (
+		mu       sync.Mutex
+		signedIn bool
+	)
+	acc := map[string]string{"email": accountEmail, "status": "active", "subscriptionUrl": subURL}
+	reply := func(w http.ResponseWriter, status int, v any) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(v)
+	}
+	refuse := func(w http.ResponseWriter, status int, code, text string) {
+		reply(w, status, map[string]string{"error": text, "code": code})
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		session := signedIn && r.Header.Get("Authorization") == "Bearer "+accountToken
+		switch call := r.Method + " " + strings.TrimPrefix(r.URL.Path, "/account/v1/"); call {
+		case "POST login":
+			var in struct{ Email, Password, Device string }
+			json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&in)
+			note("login device=" + in.Device)
+			if in.Email != accountEmail || in.Password != accountPassword {
+				refuse(w, http.StatusUnauthorized, "bad_login", "Неверная почта или пароль.")
+				return
+			}
+			signedIn = true
+			reply(w, http.StatusOK, map[string]any{"token": accountToken, "account": acc})
+		case "GET me", "POST logout":
+			note(call)
+			if !session {
+				refuse(w, http.StatusUnauthorized, "signed_out", "Вы вышли из аккаунта. Войдите снова.")
+				return
+			}
+			if call == "GET me" {
+				reply(w, http.StatusOK, map[string]any{"account": acc})
+				return
+			}
+			signedIn = false
+			reply(w, http.StatusOK, map[string]bool{"ok": true})
+		default:
+			refuse(w, http.StatusNotFound, "not_found", "Нет такого запроса.")
+		}
+	})
 }
 
 // tlsTarget serves TLS 1.3 on 127.0.0.1 and returns its address.

@@ -70,6 +70,63 @@ func (b *Bridge) Refresh(id string) (string, error) {
 	return r.Message, nil
 }
 
+// accountWait bounds an account request: the accounts service is asked
+// directly, then through the tunnel, and the account's servers may be
+// downloaded after it.
+const accountWait = 2 * time.Minute
+
+// accountCall runs an account op with what the user typed and returns the
+// service's message for them.
+func (b *Bridge) accountCall(op, email, password string) (string, error) {
+	var r ipc.AccountResult
+	ctx, cancel := context.WithTimeout(context.Background(), accountWait)
+	defer cancel()
+	if err := b.link.call(ctx, op, ipc.AccountArgs{Email: email, Password: password}, &r); err != nil {
+		return "", err
+	}
+	return r.Message, nil
+}
+
+// AccountRegister signs up with an email and a password.
+func (b *Bridge) AccountRegister(email, password string) (string, error) {
+	return b.accountCall(ipc.OpAccountRegister, email, password)
+}
+
+// AccountResend mails the confirmation link again (to the address signed
+// up with when email is empty).
+func (b *Bridge) AccountResend(email string) (string, error) {
+	return b.accountCall(ipc.OpAccountResend, email, "")
+}
+
+// AccountLogin signs this PC in.
+func (b *Bridge) AccountLogin(email, password string) (string, error) {
+	return b.accountCall(ipc.OpAccountLogin, email, password)
+}
+
+// AccountForgot mails a link to set a new password.
+func (b *Bridge) AccountForgot(email string) (string, error) {
+	return b.accountCall(ipc.OpAccountForgot, email, "")
+}
+
+// AccountLogout signs this PC out; the account's servers go.
+func (b *Bridge) AccountLogout() error {
+	ctx, cancel := context.WithTimeout(context.Background(), accountWait)
+	defer cancel()
+	return b.link.call(ctx, ipc.OpAccountLogout, nil, nil)
+}
+
+// AccountDelete deletes the account, its password asked again.
+func (b *Bridge) AccountDelete(password string) (string, error) {
+	return b.accountCall(ipc.OpAccountDelete, "", password)
+}
+
+// AccountCheck asks the accounts service about the account now.
+func (b *Bridge) AccountCheck() error {
+	ctx, cancel := context.WithTimeout(context.Background(), accountWait)
+	defer cancel()
+	return b.link.call(ctx, ipc.OpAccountCheck, nil, nil)
+}
+
 // DeleteSubscription removes subscription id with its servers.
 func (b *Bridge) DeleteSubscription(id string) error {
 	return b.request(ipc.OpDeleteSubscription, ipc.IDArgs{ID: id}, nil)

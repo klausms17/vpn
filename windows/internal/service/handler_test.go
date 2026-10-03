@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/klausms17/vpn/libxray"
+	"github.com/klausms17/vpn/libxray/client/account"
 	"github.com/klausms17/vpn/libxray/client/model"
 	"github.com/klausms17/vpn/libxray/client/store"
 	"github.com/klausms17/vpn/windows/internal/ipc"
@@ -141,6 +142,8 @@ func newEnv(t *testing.T) *testEnv {
 		}
 		return env.panel(url)
 	}, func() int64 { return 1234 })
+	env.h.accounts = newAccounts(env.h, nil, store.New(filepath.Join(dir, "account.json"),
+		func() account.State { return account.State{} }, nil, func(string) {}), func() int64 { return 1234 })
 	return env
 }
 
@@ -288,8 +291,13 @@ func TestConnectDisconnectAndStatus(t *testing.T) {
 func TestGreeting(t *testing.T) {
 	env := newEnv(t)
 	evs := env.h.greet()
-	if len(evs) != 4 || evs[0].Event != ipc.EventStatus || evs[1].Event != ipc.EventProfiles || evs[2].Event != ipc.EventPings || evs[3].Event != ipc.EventSettings {
+	if len(evs) != 5 || evs[0].Event != ipc.EventStatus || evs[1].Event != ipc.EventProfiles || evs[2].Event != ipc.EventPings ||
+		evs[3].Event != ipc.EventSettings || evs[4].Event != ipc.EventAccount {
 		t.Fatalf("greeting %v", evs)
+	}
+	// A build without an accounts service says so: the window hides it.
+	if string(evs[4].Data) != `{"available":false}` {
+		t.Errorf("account %s", evs[4].Data)
 	}
 	// An empty list is [], never null: the window iterates it.
 	if !strings.Contains(string(evs[1].Data), `"profiles":[]`) {

@@ -47,6 +47,9 @@ type Subscription struct {
 	SupportURL string `json:"supportUrl,omitempty"`
 	ReportURL  string `json:"reportUrl,omitempty"`
 	AppURL     string `json:"appUrl,omitempty"`
+	// Account marks the subscription of the account signed in
+	// (docs/accounts/PLAN.md): signing out removes it.
+	Account bool `json:"account,omitempty"`
 }
 
 // ProfilesState is everything saved about servers.

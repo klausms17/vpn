@@ -204,10 +204,12 @@ renameInput.addEventListener("keydown", (e) => {
 const confirmDialog = $("confirm-dialog");
 let confirmed = null;
 
-// confirmDelete asks before deleting; action runs on «Удалить».
-export function confirmDelete(title, text, action) {
+// confirmDelete asks before deleting; action runs on «Удалить», or on the
+// label given.
+export function confirmDelete(title, text, action, ok = "Удалить") {
   $("confirm-title").textContent = title;
   $("confirm-text").textContent = text;
+  $("confirm-ok").textContent = ok;
   confirmed = action;
   open(confirmDialog, $("confirm-cancel"));
 }

@@ -36,6 +36,7 @@ type handler struct {
 	settings *store.Store[ipc.Settings]
 	pinger   *pinger
 	subs     *subscriptions
+	accounts *accounts
 	// keys reads the keys in pasted text (importer.Keys, with the service's
 	// check).
 	keys func(ctx context.Context, text string) ([]model.Key, []string, error)
@@ -136,8 +137,33 @@ func (h *handler) handle(ctx context.Context, op string, args json.RawMessage) (
 			return nil, errBadRequest
 		}
 		return nil, h.deleteSubscription(a.ID)
+	case ipc.OpAccountLogout:
+		return nil, h.accounts.logout(ctx)
+	case ipc.OpAccountCheck:
+		return nil, h.accounts.check(ctx)
+	case ipc.OpAccountRegister, ipc.OpAccountResend, ipc.OpAccountLogin, ipc.OpAccountForgot, ipc.OpAccountDelete:
+		var a ipc.AccountArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, errBadRequest
+		}
+		return h.account(ctx, op, a)
 	}
 	return nil, ipc.ErrUnknownOp
+}
+
+// account runs the account ops that take what the user typed.
+func (h *handler) account(ctx context.Context, op string, a ipc.AccountArgs) (any, error) {
+	switch op {
+	case ipc.OpAccountRegister:
+		return h.accounts.register(ctx, a)
+	case ipc.OpAccountResend:
+		return h.accounts.resend(ctx, a)
+	case ipc.OpAccountLogin:
+		return h.accounts.login(ctx, a)
+	case ipc.OpAccountForgot:
+		return h.accounts.forgot(ctx, a)
+	}
+	return h.accounts.remove(ctx, a)
 }
 
 // importText adds the keys in text, or the subscription it links to; an
@@ -358,7 +384,8 @@ func (h *handler) readLogs() ipc.Logs {
 }
 
 // greet is what a new window gets first: the status, the servers, their
-// checks and the settings. It cannot tell the windows anything itself.
+// checks, the settings and the account. It cannot tell the windows
+// anything itself.
 func (h *handler) greet() []ipc.Event {
 	h.opened()
 	return []ipc.Event{
@@ -366,6 +393,7 @@ func (h *handler) greet() []ipc.Event {
 		ipc.NewEvent(ipc.EventProfiles, h.profilesData()),
 		ipc.NewEvent(ipc.EventPings, h.pinger.current()),
 		ipc.NewEvent(ipc.EventSettings, h.settings.Read()),
+		ipc.NewEvent(ipc.EventAccount, h.accounts.shown()),
 	}
 }
 

@@ -8,9 +8,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/klausms17/vpn/libxray"
+	"github.com/klausms17/vpn/libxray/client/account"
 	"github.com/klausms17/vpn/libxray/client/applog"
 	"github.com/klausms17/vpn/libxray/client/importer"
 	"github.com/klausms17/vpn/libxray/client/model"
@@ -22,6 +24,7 @@ import (
 	"github.com/klausms17/vpn/windows/internal/netbind"
 	"github.com/klausms17/vpn/windows/internal/winsys"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 )
 
@@ -52,7 +55,30 @@ const (
 	// and then every refreshEvery (also whenever a window opens).
 	refreshFirst = 30 * time.Second
 	refreshEvery = time.Hour
+	// The accounts service is asked like a subscription is fetched; the
+	// account is looked at every accountTick, and asked when due.
+	directAccountMs = 20_000
+	tunnelAccountMs = 15_000
+	accountTick     = time.Minute
 )
+
+// accountURL is this build's accounts service (the repository variable
+// ACCOUNT_URL, through -ldflags -X); empty: the build has none.
+var accountURL string
+
+// accountsBase is the accounts service: this build's, or one an
+// administrator set for a test (HKLM\SOFTWARE\Kirov VPN, AccountURL; only
+// administrators can write there). "" when there is none.
+func accountsBase() string {
+	base := accountURL
+	if k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Kirov VPN`, registry.QUERY_VALUE); err == nil {
+		if v, _, err := k.GetStringValue("AccountURL"); err == nil && v != "" {
+			base = v
+		}
+		k.Close()
+	}
+	return strings.TrimRight(subscription.HTTPSURL(base), "/")
+}
 
 // pbtAPMResumeAutomatic is the power event of a wake from sleep.
 const pbtAPMResumeAutomatic = 0x12
@@ -213,7 +239,31 @@ func start(version string) (*app, error) {
 		}
 		return core.c.FetchThroughTunnel(url, userAgent, headers, tunnelFetchMs)
 	}, func() int64 { return time.Now().UnixMilli() })
-	h.opened = func() { h.subs.kick(ctx) }
+	var accountClient *account.Client
+	if base := accountsBase(); base != "" {
+		directAccount := account.Direct(userAgent, directAccountMs)
+		accountClient = &account.Client{Base: base, Device: "Windows " + winsys.Version(), Do: func(actx context.Context, r account.Request) (account.Response, error) {
+			resp, err := directAccount(actx, r)
+			// Only when the service was not reached: a request it answered
+			// must not be sent twice.
+			if err == nil || eng.Status().State != ipc.Connected {
+				return resp, err
+			}
+			reply, err := core.c.RequestThroughTunnel(r.Method, r.URL, userAgent, r.Headers(), r.Body, tunnelAccountMs)
+			if err != nil {
+				return account.Response{}, err
+			}
+			return account.Response{Status: int(reply.Status), Body: reply.Body}, nil
+		}}
+	}
+	// Sealed: the session token signs this PC in.
+	h.accounts = newAccounts(h, accountClient, store.New(filepath.Join(dataDir, "account.json"),
+		func() account.State { return account.State{} }, winsys.DPAPI{Name: "Kirov VPN account"}, log.Warn),
+		func() int64 { return time.Now().UnixMilli() })
+	h.opened = func() {
+		h.subs.kick(ctx)
+		go h.accounts.checkIfDue(ctx)
+	}
 	server = ipc.NewServer(h.handle, h.greet, log.Warn)
 	a.engine = eng
 	a.listener, err = ipc.Listen()
@@ -252,6 +302,18 @@ func start(version string) (*app, error) {
 			case <-t.C:
 				h.subs.kick(ctx)
 				t.Reset(refreshEvery)
+			}
+		}
+	}()
+	go func() {
+		t := time.NewTicker(accountTick)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				h.accounts.checkIfDue(ctx)
 			}
 		}
 	}()

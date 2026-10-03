@@ -4,7 +4,8 @@
 #
 # Run as root on a fresh Ubuntu 22.04+/Debian 12+ VPS abroad (2 CPU, 4 GB).
 # Both domains must already point at this server. Copy this file,
-# klaus-panel, klaus-monitor.py and klaus-page.html into one folder, then:
+# klaus-panel, klaus-monitor.py, klaus-accounts.py and klaus-page.html into
+# one folder, then:
 #
 #   sudo PANEL_DOMAIN=panel.example.com SUB_DOMAIN=sub.example.com bash install-panel.sh
 #
@@ -46,6 +47,7 @@
 # remove it) replace the saved ones.
 #
 # Telegram alerts are switched on afterwards: klaus-panel telegram-setup.
+# Accounts in the apps need a mailbox to send from: klaus-panel mail-setup.
 #
 # For the local test harness only (server/remnawave/test): RW_DIR, ADMIN_FILE,
 # SKIP_SYSTEM=1 (no apt/Docker/firewall/sysctl/systemd changes),
@@ -69,6 +71,11 @@ SUBPAGE_SCOPES='["system:metadata", "subscription-page-configs:list", "subscript
 # there and are they connected. Never users:list: the list holds every
 # friend's keys, and the monitor faces the internet.
 MONITOR_SCOPES='["users:by-short-uuid", "hosts:list", "nodes:list"]'
+# The accounts service: makes a user when the owner grants access, and
+# removes it with the account. It faces the internet as well: no lists.
+ACCOUNTS_SCOPES='["users:create", "users:delete"]'
+# The accounts' database belongs to the user its container runs as.
+ACCOUNTS_UID=65534
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
@@ -77,8 +84,8 @@ warn() { printf '\033[1;33mВнимание:\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31mОшибка:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "запустите от root (sudo … bash install-panel.sh)"
-for f in klaus-panel klaus-monitor.py klaus-page.html; do
-  [ -f "$HERE/$f" ] || die "рядом со скриптом нет файла $f: скопируйте install-panel.sh, klaus-panel, klaus-monitor.py и klaus-page.html в одну папку"
+for f in klaus-panel klaus-monitor.py klaus-accounts.py klaus-page.html; do
+  [ -f "$HERE/$f" ] || die "рядом со скриптом нет файла $f: скопируйте install-panel.sh, klaus-panel, klaus-monitor.py, klaus-accounts.py и klaus-page.html в одну папку"
 done
 
 # ---------------------------------------------------------------- restore
@@ -126,6 +133,12 @@ if [ -n "$RESTORE" ]; then
     if [ -f "$RESTORE_DIR/$f" ]; then install -m 600 "$RESTORE_DIR/$f" "$RW_DIR/$f"; fi
   done
   if [ -f "$RESTORE_DIR/admin.txt" ] && [ ! -f "$ADMIN_FILE" ]; then install -m 600 "$RESTORE_DIR/admin.txt" "$ADMIN_FILE"; fi
+  # Friends' accounts (klaus-accounts), from backups made since they exist.
+  if [ -f "$RESTORE_DIR/accounts.db" ]; then
+    install -d -m 700 -o "$ACCOUNTS_UID" -g "$ACCOUNTS_UID" "$RW_DIR/accounts"
+    rm -f "$RW_DIR/accounts/accounts.db-wal" "$RW_DIR/accounts/accounts.db-shm"
+    install -m 600 -o "$ACCOUNTS_UID" -g "$ACCOUNTS_UID" "$RESTORE_DIR/accounts.db" "$RW_DIR/accounts/accounts.db"
+  fi
   # The published app (klaus-panel publish-apk), so friends' update check
   # and the download button work right away.
   if [ -d "$RESTORE_DIR/app" ]; then
@@ -154,6 +167,15 @@ REALITY_PORT="${REALITY_PORT:-443}"
 PANEL_IP="${PANEL_IP:-}"
 API_TOKEN="$(conf_get API_TOKEN)"
 MONITOR_TOKEN="$(conf_get MONITOR_TOKEN)"
+ACCOUNTS_TOKEN="$(conf_get ACCOUNTS_TOKEN)"
+# Set by "klaus-panel mail-setup".
+SMTP_HOST="$(conf_get SMTP_HOST)"
+SMTP_PORT="$(conf_get SMTP_PORT)"
+SMTP_TLS="$(conf_get SMTP_TLS)"
+SMTP_USER="$(conf_get SMTP_USER)"
+SMTP_PASSWORD="$(conf_get SMTP_PASSWORD)"
+SMTP_FROM="$(conf_get SMTP_FROM)"
+MAIL_DAILY_LIMIT="$(conf_get MAIL_DAILY_LIMIT)"
 # Set by "klaus-panel telegram-setup".
 TELEGRAM_BOT_TOKEN="$(conf_get TELEGRAM_BOT_TOKEN)"
 TELEGRAM_CHAT_ID="$(conf_get TELEGRAM_CHAT_ID)"
@@ -544,6 +566,35 @@ services:
       timeout: 5s
       retries: 3
 
+  # Accounts in the apps (klaus-accounts.py): sign-up, sign-in and the pages
+  # its letters open. Only Caddy reaches it (/account/ on the subscription
+  # address); its database is ./accounts.
+  klaus-accounts:
+    image: python:3-alpine
+    container_name: klaus-accounts
+    hostname: klaus-accounts
+    <<: [*common, *logging]
+    env_file: klaus-accounts.env
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - DATA_DIR=/data
+    command: ['python3', '-u', '/app/klaus-accounts.py', 'serve']
+    volumes:
+      - ./klaus-accounts.py:/app/klaus-accounts.py:ro
+      - ./accounts:/data
+    user: '65534:65534'
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    healthcheck:
+      test: ['CMD', 'python3', '-c', 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8081/account/health", timeout=3)']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   caddy:
     image: caddy:2
     container_name: caddy
@@ -597,8 +648,8 @@ tls_line=""
 # No access log, and the error log (a request that failed, e.g. while the
 # page restarts) keeps neither the address nor the link of the friend.
 # Nor does anything behind Caddy learn the address: the page, the panel it
-# asks (which would store it with the friend's phone) and the monitor all
-# get 127.0.0.1.
+# asks (which would store it with the friend's phone), the monitor and the
+# accounts all get 127.0.0.1.
 put_file "$RW_DIR/Caddyfile" <<EOF
 # Written by Kirov VPN install-panel.sh; re-running the script rewrites it.
 {
@@ -632,6 +683,14 @@ $tls_line
 	}
 	handle /klaus/* {
 		reverse_proxy klaus-monitor:8080 {
+			header_up X-Forwarded-For 127.0.0.1
+		}
+	}
+	handle /account/* {
+		request_body {
+			max_size 64KB
+		}
+		reverse_proxy klaus-accounts:8081 {
 			header_up X-Forwarded-For 127.0.0.1
 		}
 	}
@@ -685,9 +744,12 @@ chmod 644 "$RW_DIR/Caddyfile"
 # the monitor ("klaus-panel setup" writes its settings).
 [ -f "$RW_DIR/subscription.env" ] || : > "$RW_DIR/subscription.env"
 [ -f "$RW_DIR/klaus-monitor.env" ] || : > "$RW_DIR/klaus-monitor.env"
+[ -f "$RW_DIR/klaus-accounts.env" ] || : > "$RW_DIR/klaus-accounts.env"
 put_file "$RW_DIR/klaus-monitor.py" < "$HERE/klaus-monitor.py"
-# Read by the monitor's unprivileged user.
-chmod 644 "$RW_DIR/klaus-monitor.py"
+put_file "$RW_DIR/klaus-accounts.py" < "$HERE/klaus-accounts.py"
+# Read by the services' unprivileged user, who owns the accounts' database.
+chmod 644 "$RW_DIR/klaus-monitor.py" "$RW_DIR/klaus-accounts.py"
+install -d -m 700 -o "$ACCOUNTS_UID" -g "$ACCOUNTS_UID" "$RW_DIR/accounts"
 # Kirov VPN's page for friends' browsers (klaus-panel writes it below) and
 # the app published by "klaus-panel publish-apk". Earlier runs kept copies
 # of the page next to it.
@@ -696,7 +758,7 @@ rm -f "$RW_DIR/page/index.html.bak-"* "$RW_DIR/page/index.html.next"
 
 # Containers left from a setup made by hand (e.g. the Caddy example from the
 # Remnawave docs) would block ours by name.
-for c in caddy remnawave-subscription-page klaus-monitor; do
+for c in caddy remnawave-subscription-page klaus-monitor klaus-accounts; do
   project="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$c" 2>/dev/null || true)"
   if docker inspect "$c" >/dev/null 2>&1 && [ "$project" != "remnawave" ]; then
     [ "$FORCE" = "1" ] || die "уже есть контейнер $c не из этой установки; FORCE=1 заменит его"
@@ -852,6 +914,18 @@ if ! token_ok "$MONITOR_TOKEN" /api/hosts || ! token_ok "$MONITOR_TOKEN" /api/no
   new_token klaus-monitor "$MONITOR_SCOPES"
   MONITOR_TOKEN="$TOKEN"
 fi
+# The accounts service, the same way. Without a list its token can only be
+# checked by deleting a user that does not exist.
+accounts_token_ok() {
+  [ -n "$ACCOUNTS_TOKEN" ] || return 1
+  api DELETE /api/users/2147483647 "" "$ACCOUNTS_TOKEN"
+  [ "$HTTP_CODE" = "404" ] && ! token_ok "$ACCOUNTS_TOKEN" "/api/users?start=0&size=1"
+}
+if ! accounts_token_ok; then
+  say "Создаю API-токен для аккаунтов"
+  new_token klaus-accounts "$ACCOUNTS_SCOPES"
+  ACCOUNTS_TOKEN="$TOKEN"
+fi
 
 put_file "$RW_DIR/subscription.env" <<EOF
 # Written by Kirov VPN install-panel.sh; re-running the script rewrites it.
@@ -864,7 +938,8 @@ EOF
 q() { printf '%q' "$1"; }
 put_file "$CONF" <<EOF
 # klaus-panel settings, written by install-panel.sh. Keep it secret: the
-# token gives full control over the panel.
+# token gives full control over the panel, and the mail password sends as
+# the owner's mailbox.
 RW_DIR=$(q "$RW_DIR")
 API_URL=$(q "$API_URL")
 API_TOKEN=$(q "$API_TOKEN")
@@ -878,6 +953,14 @@ REALITY_SNI=$(q "$REALITY_SNI")
 REALITY_TARGET=$(q "$REALITY_TARGET")
 REALITY_PORT=$(q "$REALITY_PORT")
 MONITOR_TOKEN=$(q "$MONITOR_TOKEN")
+ACCOUNTS_TOKEN=$(q "$ACCOUNTS_TOKEN")
+SMTP_HOST=$(q "$SMTP_HOST")
+SMTP_PORT=$(q "$SMTP_PORT")
+SMTP_TLS=$(q "$SMTP_TLS")
+SMTP_USER=$(q "$SMTP_USER")
+SMTP_PASSWORD=$(q "$SMTP_PASSWORD")
+SMTP_FROM=$(q "$SMTP_FROM")
+MAIL_DAILY_LIMIT=$(q "$MAIL_DAILY_LIMIT")
 TELEGRAM_BOT_TOKEN=$(q "$TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID=$(q "$TELEGRAM_CHAT_ID")
 TELEGRAM_API_BASE=$(q "$TELEGRAM_API_BASE")
@@ -912,10 +995,14 @@ if ! docker exec caddy cat /etc/caddy/Caddyfile 2>/dev/null | cmp -s - "$RW_DIR/
   say "Перезапускаю Caddy с новыми настройками"
   docker restart caddy >/dev/null || die "не удалось перезапустить Caddy"
 fi
-# The same for the monitor's script (a new version of klaus-monitor.py).
+# The same for the monitor's and the accounts' scripts.
 if ! docker exec klaus-monitor cat /app/klaus-monitor.py 2>/dev/null | cmp -s - "$RW_DIR/klaus-monitor.py"; then
   say "Перезапускаю монитор блокировок с новой версией"
   docker restart klaus-monitor >/dev/null || die "не удалось перезапустить klaus-monitor"
+fi
+if ! docker exec klaus-accounts cat /app/klaus-accounts.py 2>/dev/null | cmp -s - "$RW_DIR/klaus-accounts.py"; then
+  say "Перезапускаю аккаунты с новой версией"
+  docker restart klaus-accounts >/dev/null || die "не удалось перезапустить klaus-accounts"
 fi
 for i in $(seq 1 60); do
   [ "$(docker inspect -f '{{.State.Health.Status}}' remnawave-subscription-page 2>/dev/null)" = "healthy" ] && break
@@ -929,6 +1016,14 @@ for i in $(seq 1 20); do
   if [ "$i" -eq 20 ]; then
     docker compose logs --tail 20 klaus-monitor >&2 || true
     warn "монитор блокировок (klaus-monitor) не запустился, журнал выше; VPN знакомых от него не зависит"
+  fi
+  sleep 3
+done
+for i in $(seq 1 20); do
+  [ "$(docker inspect -f '{{.State.Health.Status}}' klaus-accounts 2>/dev/null)" = "healthy" ] && break
+  if [ "$i" -eq 20 ]; then
+    docker compose logs --tail 20 klaus-accounts >&2 || true
+    warn "аккаунты (klaus-accounts) не запустились, журнал выше; ссылки и VPN знакомых от них не зависят"
   fi
   sleep 3
 done
@@ -1101,6 +1196,11 @@ if [ -n "$PAGE_BRANCH" ]; then
   echo "     Страница для знакомых обновляется сама из ветки $PAGE_BRANCH; сейчас:  klaus-panel update-page"
 fi
 echo "  5. Резервная копия:  klaus-panel backup"
+if [ -z "$SMTP_HOST" ]; then
+  echo "  6. Аккаунты в приложениях (вход по почте вместо ссылки):  klaus-panel mail-setup АДРЕС-ДЛЯ-ПИСЕМ"
+else
+  echo "  6. Аккаунты включены, письма идут с $SMTP_USER; список:  klaus-panel accounts"
+fi
 echo
 echo "Все команды: klaus-panel help"
 if [ "$MOVED_TO_STABLE" = "1" ]; then

@@ -25,6 +25,8 @@ type Snapshot struct {
 	Pings    ipc.Pings    `json:"pings"`
 	// Settings is nil until the service has sent them.
 	Settings *ipc.Settings `json:"settings"`
+	// Account is this PC's account (docs/accounts/PLAN.md).
+	Account ipc.Account `json:"account"`
 	// Seq orders the snapshots: the page ignores one older than what it
 	// shows (an answer to Snapshot that crossed an event).
 	Seq uint64 `json:"seq"`
@@ -168,6 +170,11 @@ func (l *link) onEvent(ev ipc.Event) {
 		var st ipc.Settings
 		if json.Unmarshal(ev.Data, &st) == nil {
 			l.update(func(s *Snapshot) { s.Settings = &st })
+		}
+	case ipc.EventAccount:
+		var a ipc.Account
+		if json.Unmarshal(ev.Data, &a) == nil {
+			l.update(func(s *Snapshot) { s.Account = a })
 		}
 	}
 }

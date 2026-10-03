@@ -35,6 +35,10 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3.5h7l4 4V20a.5.5 0 0 1-.5.5h-10A1.5 1.5 0 0 1 6 19V5a1.5 1.5 0 0 1 1-1.5z"/><path d="M14 3.5V8h4"/><path d="M9 12.5h6"/><path d="M9 16h6"/></svg>
       Журнал
     </button>
+    <button type="button" class="rail-btn" data-view="account" id="rail-account" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.6"/><path d="M5 19.5c1.3-3.4 3.8-5.1 7-5.1s5.7 1.7 7 5.1"/></svg>
+      Аккаунт
+    </button>
     <span class="rail-gap"></span>
     <button type="button" class="rail-btn solo" data-view="about" title="О программе" aria-label="О программе">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg>
@@ -173,6 +177,59 @@
       <div class="scroll"><div class="narrow journal">
         <p class="note">В журнале нет ключей, адресов и названий сайтов: его можно отправить тому, кто помогает с VPN.</p>
         <div class="journal" id="logs"></div>
+      </div></div>
+    </section>
+
+    <!-- The account (docs/accounts/PLAN.md): one per computer, held by the
+         service. The window sends what the user typed and never sees the
+         session or the account's link. -->
+    <section class="view" id="view-account" hidden>
+      <header class="view-head"><h1>Аккаунт</h1></header>
+      <div class="scroll"><div class="narrow account">
+        <div class="card account-why">
+          <p>С аккаунтом VPN работает на всех ваших устройствах: телефоне, компьютере, iPhone и Mac. Войдите с одной почтой, и серверы появятся сами, без ссылок и ключей. Забыли пароль — восстановите его по почте. Без аккаунта всё работает как раньше.</p>
+        </div>
+
+        <div class="card account-box" id="account-signed-out" hidden>
+          <label class="field"><span>Почта</span><input type="email" id="account-email" autocomplete="off" spellcheck="false" maxlength="254"></label>
+          <label class="field"><span>Пароль</span><input type="password" id="account-password" autocomplete="off" maxlength="128"></label>
+          <div class="account-actions">
+            <button type="button" class="btn primary" id="account-login">Войти</button>
+            <button type="button" class="btn plain" id="account-register">Создать аккаунт</button>
+            <button type="button" class="link-btn" id="account-forgot">Забыли пароль?</button>
+          </div>
+          <p class="note">Новый пароль — не короче 8 символов.</p>
+        </div>
+
+        <div class="card account-box" id="account-unconfirmed" hidden>
+          <h2>Подтвердите почту</h2>
+          <p id="account-unconfirmed-text"></p>
+          <label class="field"><span>Подтвердили? Введите пароль, чтобы войти</span><input type="password" id="account-password2" autocomplete="off" maxlength="128"></label>
+          <div class="account-actions">
+            <button type="button" class="btn primary" id="account-login2">Войти</button>
+            <button type="button" class="btn plain" id="account-resend">Отправить письмо ещё раз</button>
+            <button type="button" class="link-btn" id="account-other">Другая почта</button>
+          </div>
+        </div>
+
+        <div class="card account-box" id="account-signed-in" hidden>
+          <h2 id="account-shown-email"></h2>
+          <p id="account-status-text"></p>
+          <div class="account-actions">
+            <button type="button" class="btn plain" id="account-check">Проверить сейчас</button>
+            <button type="button" class="btn plain" id="account-logout">Выйти</button>
+            <button type="button" class="link-btn danger" id="account-delete">Удалить аккаунт</button>
+          </div>
+          <div class="account-delete" id="account-delete-box" hidden>
+            <p>Аккаунт удалится насовсем, а его серверы пропадут со всех устройств. Введите пароль, чтобы подтвердить.</p>
+            <label class="field"><span>Пароль</span><input type="password" id="account-delete-password" autocomplete="off" maxlength="128"></label>
+            <div class="account-actions">
+              <button type="button" class="btn danger" id="account-delete-ok">Удалить навсегда</button>
+              <button type="button" class="btn plain" id="account-delete-cancel">Отмена</button>
+            </div>
+          </div>
+        </div>
+        <p class="note account-message" id="account-message" role="status" hidden></p>
       </div></div>
     </section>
 
