@@ -206,7 +206,7 @@ func startPanel(t *testing.T) *fakePanel {
 			p.mu.Lock()
 			p.gone = strings.TrimPrefix(r.URL.Path, "/api/users/")
 			p.mu.Unlock()
-			w.Write([]byte(`{"response":{"isDeleted":true}}`))
+			// As Remnawave answers a deletion: 200 and no body.
 		default:
 			w.WriteHeader(404)
 		}

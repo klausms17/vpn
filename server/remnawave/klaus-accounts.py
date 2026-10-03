@@ -117,6 +117,7 @@ MAX_JSON = 8192
 MAX_FORM = 4096
 MAX_DRAIN = 65536  # Caddy lets no bigger body through
 MAX_TRACKED = 20000  # addresses kept in memory per table, whatever happens
+MAX_PANEL_ANSWER = 1 << 20
 
 TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
@@ -594,7 +595,8 @@ class Panel:
         self.url, self.token, self.squad = url, token, squad
 
     def request(self, method, path, body=None):
-        """-> (HTTP status, parsed JSON or None); PanelError when the panel
+        """-> (HTTP status, parsed JSON or None: Remnawave answers some
+        calls, such as a deletion, with no body); PanelError when the panel
         does not answer."""
         req = urllib.request.Request(self.url + path, method=method, headers={
             "Authorization": "Bearer " + self.token,
@@ -606,11 +608,15 @@ class Panel:
         }, data=json.dumps(body).encode() if body is not None else None)
         try:
             with urllib.request.urlopen(req, timeout=20) as resp:
-                return resp.status, json.load(resp)
+                status, raw = resp.status, resp.read(MAX_PANEL_ANSWER)
         except urllib.error.HTTPError as e:
             return e.code, None
         except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as e:
             raise PanelError("panel API: %s" % type(e).__name__) from None
+        try:
+            return status, json.loads(raw) if raw.strip() else None
+        except ValueError:
+            return status, None
 
     def create(self, address):
         """Creates the user for an account as klaus-panel add-user does, so

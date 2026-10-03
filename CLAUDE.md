@@ -297,7 +297,7 @@ and give step-by-step instructions for anything he must do himself.
     `klaus-panel account-approve`, which makes a panel user like
     `add-user`; its link becomes the account's subscription in the apps.
     Mail goes through a Gmail app password set with
-    `klaus-panel mail-setup`. `accounts_test.py` (28 tests) and the Docker
+    `klaus-panel mail-setup`. `accounts_test.py` (29 tests) and the Docker
     e2e pass.
   - Phase B, Windows, is built: `libxray.Request`, `libxray/client/account`,
     the service's `account.go`, pipe protocol 4, an «Аккаунт» view in the

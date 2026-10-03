@@ -15,6 +15,7 @@ import base64
 import contextlib
 import hashlib
 import http.client
+import http.server
 import importlib.util
 import io
 import json
@@ -491,6 +492,47 @@ class PanelTest(unittest.TestCase):
             panel.create("ivan@mail.ru")
         with self.assertRaises(m.PanelError):
             m.Panel("http://panel", "", "squad").create("ivan@mail.ru")
+
+
+    def test_the_panel_over_http(self):
+        # Remnawave as it answers: a created user in JSON, a deletion with
+        # 200 and no body, a missing user with 404.
+        seen = []
+
+        class Remnawave(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def answer(self, status, body=b""):
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                length = int(self.headers["Content-Length"])
+                seen.append((self.command, self.path, self.headers["Authorization"], self.headers["X-Forwarded-Proto"],
+                             json.loads(self.rfile.read(length))))
+                self.answer(201, json.dumps({"response": {"id": 7, "subscriptionUrl": "https://sub.example/s7"}}).encode())
+
+            def do_DELETE(self):
+                seen.append((self.command, self.path))
+                self.answer({"/api/users/7": 200, "/api/users/8": 404}.get(self.path, 500))
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Remnawave)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        m = load()
+        panel = m.Panel("http://127.0.0.1:%d" % server.server_address[1], "tok", "squad")
+        user_id, _, url = panel.create("ivan@mail.ru")
+        self.assertEqual(("7", "https://sub.example/s7"), (user_id, url))
+        self.assertEqual(("POST", "/api/users", "Bearer tok", "https"), seen[0][:4])
+        panel.delete(user_id)
+        panel.delete("8")
+        with self.assertRaises(m.PanelError):
+            panel.delete("9")
+        self.assertEqual([("DELETE", "/api/users/7"), ("DELETE", "/api/users/8"), ("DELETE", "/api/users/9")], seen[1:])
 
 
 class TelegramTest(unittest.TestCase):
