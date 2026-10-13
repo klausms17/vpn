@@ -34,6 +34,8 @@
 #                  without it the page's support button only says to ask you
 #   ADMIN_USER     panel login (default admin); the password is generated
 #   REALITY_SNI    site the VPN imitates (default: first working from a list)
+#   RELAY_SNI      site the relays in Russia imitate (default ya.ru; later
+#                  "klaus-panel relay-site" changes it)
 #   FORCE=1        take over an existing Remnawave setup not made by this script
 #   RESTORE=file   move the panel to this (new) server from a backup made by
 #                  "klaus-panel backup": same users, links and servers. If it
@@ -52,7 +54,8 @@
 # For the local test harness only (server/remnawave/test): RW_DIR, ADMIN_FILE,
 # SKIP_SYSTEM=1 (no apt/Docker/firewall/sysctl/systemd changes),
 # CADDY_TLS=internal, REALITY_TARGET=host:port, REALITY_PORT, GITHUB_API,
-# TELEGRAM_API_BASE (mock APIs).
+# TELEGRAM_API_BASE (mock APIs), RELAY_TARGET=host:port and RELAY_PROBE_URL
+# (the relays' REALITY target and the URL they probe the exits with).
 set -euo pipefail
 
 RW_DIR="${RW_DIR:-/opt/remnawave}"
@@ -163,6 +166,9 @@ SAVED_SNI="$(conf_get REALITY_SNI)"
 REALITY_SNI="${REALITY_SNI:-$SAVED_SNI}"
 REALITY_TARGET="${REALITY_TARGET-$(conf_get REALITY_TARGET)}"
 REALITY_PORT="${REALITY_PORT:-$(conf_get REALITY_PORT)}"
+RELAY_SNI="${RELAY_SNI:-$(conf_get RELAY_SNI)}"
+RELAY_TARGET="${RELAY_TARGET-$(conf_get RELAY_TARGET)}"
+RELAY_PROBE_URL="${RELAY_PROBE_URL-$(conf_get RELAY_PROBE_URL)}"
 REALITY_PORT="${REALITY_PORT:-443}"
 PANEL_IP="${PANEL_IP:-}"
 API_TOKEN="$(conf_get API_TOKEN)"
@@ -952,6 +958,9 @@ SUPPORT_URL=$(q "$SUPPORT_URL")
 REALITY_SNI=$(q "$REALITY_SNI")
 REALITY_TARGET=$(q "$REALITY_TARGET")
 REALITY_PORT=$(q "$REALITY_PORT")
+RELAY_SNI=$(q "$RELAY_SNI")
+RELAY_TARGET=$(q "$RELAY_TARGET")
+RELAY_PROBE_URL=$(q "$RELAY_PROBE_URL")
 MONITOR_TOKEN=$(q "$MONITOR_TOKEN")
 ACCOUNTS_TOKEN=$(q "$ACCOUNTS_TOKEN")
 SMTP_HOST=$(q "$SMTP_HOST")

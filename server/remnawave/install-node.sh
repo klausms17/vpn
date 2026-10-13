@@ -19,6 +19,8 @@
 #                prints it when it is not 443. A re-run keeps it too
 #   MIGRATE=1    this VPS runs the old install.sh Xray: switch it off and
 #                hand port 443 to the new server (the old keys stop working)
+#   REALITY_SITE the site a relay in Russia imitates ("klaus-panel add-node
+#                --relay" prints it): checked to answer here with TLS 1.3
 #
 # Re-running with a new SECRET_KEY replaces the old one; it also updates
 # the node to the latest version. After a panel move only PANEL_IP is needed.
@@ -31,6 +33,7 @@ NODE_DIR="${NODE_DIR:-/opt/remnanode}"
 NODE_PORT="${NODE_PORT:-}"
 VPN_PORT="${VPN_PORT:-}"
 MIGRATE="${MIGRATE:-0}"
+REALITY_SITE="${REALITY_SITE:-}"
 SKIP_SYSTEM="${SKIP_SYSTEM:-0}"
 PANEL_IP="${PANEL_IP:-}"
 SECRET_KEY="${SECRET_KEY:-}"
@@ -60,6 +63,7 @@ for p in "$NODE_PORT" "$VPN_PORT"; do
   if ! [[ "$p" =~ ^[0-9]+$ ]] || [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then die "странный порт: $p"; fi
 done
 [ "$NODE_PORT" != "$VPN_PORT" ] || die "NODE_PORT и VPN_PORT должны различаться"
+[[ "$REALITY_SITE" =~ ^[A-Za-z0-9.-]*$ ]] || die "странный REALITY_SITE: скопируйте команду из вывода «klaus-panel add-node» целиком"
 
 # ---------------------------------------------------------------- system
 apt_install() {
@@ -134,6 +138,13 @@ fi
 if [ "$SKIP_SYSTEM" != "1" ]; then
   say "Устанавливаю зависимости"
   apt_install curl ca-certificates
+  # REALITY asks the site it imitates for every handshake: a site that does
+  # not answer here would make every connection to this server fail.
+  if [ -n "$REALITY_SITE" ]; then
+    say "Проверяю, что сайт маскировки $REALITY_SITE открывается отсюда"
+    curl -sS --tlsv1.3 --max-time 15 -o /dev/null "https://$REALITY_SITE/" ||
+      die "сайт $REALITY_SITE не открывается отсюда по TLS 1.3, а сервер маскируется под него. Выберите другой на панели (например: klaus-panel relay-site vk.com) и запустите эту команду снова с REALITY_SITE=новый-сайт"
+  fi
   install_docker
 
   say "Включаю BBR (быстрее на медленных и дальних каналах)"

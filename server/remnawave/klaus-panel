@@ -12,6 +12,9 @@ PROFILE_NAME="KlausVPN"   # config profile shared by all VPN servers
 SQUAD_NAME="KlausVPN"     # internal squad every friend is in
 PANEL_SQUAD="Default-Squad" # the panel's own squad, for its own profile's servers
 INBOUND_TAG="VLESS_REALITY"
+RELAY_PROFILE_NAME="KlausRelay"      # config profile of the relays in Russia
+RELAY_INBOUND_TAG="VLESS_REALITY_RELAY"
+EXIT_PREFIX="EXIT-"                  # the relays' outbounds to the exits abroad
 # The response rule for the app is found by this name, and it matches the
 # app's User-Agent "KlausVPN/…": both keep the app's former name on purpose.
 RULE_NAME="Klaus VPN"
@@ -55,6 +58,18 @@ VPN-серверы:
   disable-node ИМЯ             убрать сервер из подписок (например, заблокирован)
   enable-node ИМЯ              вернуть сервер
 
+Каскад: российский сервер впереди, выходы за границей позади:
+  add-exit ИМЯ                 добавить выход — сервер за границей с install.sh; ключ
+                               от него спросит скрыто. Его адреса нет в подписках, его
+                               знают только российские серверы
+  list-exits                   выходы
+  delete-exit ИМЯ [--yes]      убрать выход (например, заблокирован)
+  add-node ИМЯ IP [СТРАНА] --relay [--title НАЗВАНИЕ] [--host АДРЕС] [--node-port 2222]
+                               добавить российский сервер: знакомые подключаются к нему,
+                               а он отправляет всё через самый быстрый живой выход
+  relay-site [САЙТ]            под какой сайт маскируются российские серверы (по
+                               умолчанию ya.ru; без САЙТА — показать)
+
 Оповещения и приложение:
   telegram-setup [ТОКЕН]       оповещения в Telegram: токен бота от @BotFather, затем
                                откройте показанную ссылку и нажмите «Запустить»
@@ -95,6 +110,8 @@ load_conf() {
   command -v jq >/dev/null || die "нужна программа jq (apt install jq)"
   TELEGRAM_API_BASE="${TELEGRAM_API_BASE_ENV:-${TELEGRAM_API_BASE:-https://api.telegram.org}}"
   APP_DIR="$RW_DIR/app"
+  RELAY_SNI="${RELAY_SNI:-ya.ru}"
+  RELAY_PROBE_URL="${RELAY_PROBE_URL:-https://www.gstatic.com/generate_204}"
 }
 
 # ---------------------------------------------------------------- files
@@ -206,14 +223,19 @@ user_json() { # NAME -> RESP (user object) or dies
   check_resp GET "/api/users/by-username/$1"
 }
 
-profile_uuid() {
-  api_ok GET /api/config-profiles
-  PROFILE_UUID="$(jq -r --arg n "$PROFILE_NAME" 'first(.response.configProfiles[] | select(.name == $n) | .uuid) // empty' <<<"$RESP")"
-  [ -n "$PROFILE_UUID" ] || die "в панели нет профиля $PROFILE_NAME: запустите install-panel.sh ещё раз"
+profile_uuid() { # [PROFILE INBOUND_TAG]: the servers abroad by default
+  local name="${1:-$PROFILE_NAME}" tag="${2:-$INBOUND_TAG}"
+  find_profile "$name"
+  [ -n "$PROFILE_UUID" ] || die "в панели нет профиля $name: запустите install-panel.sh ещё раз"
   api_ok GET "/api/config-profiles/$PROFILE_UUID/inbounds"
-  INBOUND_UUID="$(jq -r --arg t "$INBOUND_TAG" 'first(.response.inbounds[] | select(.tag == $t) | .uuid) // empty' <<<"$RESP")"
-  INBOUND_PORT="$(jq -r --arg t "$INBOUND_TAG" 'first(.response.inbounds[] | select(.tag == $t) | .port) // empty' <<<"$RESP")"
-  [ -n "$INBOUND_UUID" ] || die "в профиле $PROFILE_NAME нет входа $INBOUND_TAG: запустите install-panel.sh ещё раз"
+  INBOUND_UUID="$(jq -r --arg t "$tag" 'first(.response.inbounds[] | select(.tag == $t) | .uuid) // empty' <<<"$RESP")"
+  INBOUND_PORT="$(jq -r --arg t "$tag" 'first(.response.inbounds[] | select(.tag == $t) | .port) // empty' <<<"$RESP")"
+  [ -n "$INBOUND_UUID" ] || die "в профиле $name нет входа $tag: запустите install-panel.sh ещё раз"
+}
+
+find_profile() { # NAME -> PROFILE_UUID (empty when the panel has none)
+  api_ok GET /api/config-profiles
+  PROFILE_UUID="$(jq -r --arg n "$1" 'first(.response.configProfiles[] | select(.name == $n) | .uuid) // empty' <<<"$RESP")"
 }
 
 squad_uuid() {
@@ -245,17 +267,38 @@ confirm() { # QUESTION; --yes on the command line skips it
 # link is the exception: it always follows SUPPORT_URL, also when that is
 # removed.
 
+# jq shared by both profiles (the servers abroad and the Russian relays):
+# their REALITY inbound and the settings every server of ours runs with.
+# Takes $tag, $port, $sni, $target, $key and $sid.
+# shellcheck disable=SC2016 # jq variables, not the shell's
+PROFILE_JQ='
+  def ours: {
+    tag: $tag, listen: "0.0.0.0", port: $port, protocol: "vless",
+    settings: {clients: [], decryption: "none"},
+    sniffing: {enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: true},
+    streamSettings: {network: "raw", security: "reality",
+      realitySettings: {target: $target, serverNames: [$sni], privateKey: $key, shortIds: [$sid]}}
+  };
+  def follow_settings:
+    (.inbounds[] | select(.tag == $tag)) |= (.port = $port
+      | .streamSettings.realitySettings.target = $target
+      | .streamSettings.realitySettings.serverNames = [$sni]);
+  # Xray closes a connection after 5 idle minutes by default, and phones
+  # keep push channels (Google push, mail) quiet for 15-28 minutes: each
+  # would be cut and redone every 5 minutes, waking the phone. 30 minutes
+  # outlasts them. The node keeps level 0 settings next to its own
+  # statistics switches. A value set by hand in the panel stays.
+  def node_settings: .policy.levels["0"].connIdle //= 1800
+    # The servers keep no record of who connected from where and what they
+    # opened: no access log, and addresses in error messages are masked.
+    # Set on every run, also over a hand edit.
+    | .log = ((.log // {}) + {access: "none", dnsLog: false, maskAddress: "full"});
+'
+
 profile_config() { # CURRENT_CONFIG_JSON PRIVATE_KEY SHORT_ID
   local target="${REALITY_TARGET:-$REALITY_SNI:443}"
   jq -c --arg tag "$INBOUND_TAG" --argjson port "$REALITY_PORT" --arg sni "$REALITY_SNI" \
-    --arg target "$target" --arg key "$2" --arg sid "$3" '
-    def ours: {
-      tag: $tag, listen: "0.0.0.0", port: $port, protocol: "vless",
-      settings: {clients: [], decryption: "none"},
-      sniffing: {enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: true},
-      streamSettings: {network: "raw", security: "reality",
-        realitySettings: {target: $target, serverNames: [$sni], privateKey: $key, shortIds: [$sid]}}
-    };
+    --arg target "$target" --arg key "$2" --arg sid "$3" "$PROFILE_JQ"'
     (if . == null then {
       log: {loglevel: "warning"},
       inbounds: [ours],
@@ -266,27 +309,13 @@ profile_config() { # CURRENT_CONFIG_JSON PRIVATE_KEY SHORT_ID
         {ip: ["geoip:private"], outboundTag: "BLOCK"},
         {protocol: ["bittorrent"], outboundTag: "BLOCK"}
       ]}
-    } else
-      (.inbounds[] | select(.tag == $tag)) |= (.port = $port
-        | .streamSettings.realitySettings.target = $target
-        | .streamSettings.realitySettings.serverNames = [$sni])
-    end)
-    # Xray closes a connection after 5 idle minutes by default, and phones
-    # keep push channels (Google push, mail) quiet for 15-28 minutes: each
-    # would be cut and redone every 5 minutes, waking the phone. 30 minutes
-    # outlasts them. The node keeps level 0 settings next to its own
-    # statistics switches. A value set by hand in the panel stays.
-    | .policy.levels["0"].connIdle //= 1800
-    # The servers keep no record of who connected from where and what they
-    # opened: no access log, and addresses in error messages are masked.
-    # Set on every run, also over a hand edit.
-    | .log = ((.log // {}) + {access: "none", dnsLog: false, maskAddress: "full"})' <<<"$1"
+    } else follow_settings end)
+    | node_settings' <<<"$1"
 }
 
 setup_profile() {
   local cur new key sid
-  api_ok GET /api/config-profiles
-  PROFILE_UUID="$(jq -r --arg n "$PROFILE_NAME" 'first(.response.configProfiles[] | select(.name == $n) | .uuid) // empty' <<<"$RESP")"
+  find_profile "$PROFILE_NAME"
   if [ -z "$PROFILE_UUID" ]; then
     say "Создаю профиль $PROFILE_NAME (VLESS + REALITY, порт $REALITY_PORT, маскировка под $REALITY_SNI)"
     api_ok GET /api/system/tools/x25519/generate
@@ -317,10 +346,15 @@ setup_squad() {
     api_ok POST /api/internal-squads "$(jq -nc --arg n "$SQUAD_NAME" --arg i "$INBOUND_UUID" '{name: $n, inbounds: [$i]}')"
     return
   fi
+  squad_include "$INBOUND_UUID"
+}
+
+squad_include() { # INBOUND_UUID: every friend gets the servers of this inbound too
   local inbounds
+  squad_uuid
   inbounds="$(jq -c --arg n "$SQUAD_NAME" 'first(.response.internalSquads[] | select(.name == $n)) | [.inbounds[].uuid]' <<<"$RESP")"
-  if ! jq -e --arg i "$INBOUND_UUID" 'index($i) != null' <<<"$inbounds" >/dev/null; then
-    api_ok PATCH /api/internal-squads "$(jq -nc --arg u "$SQUAD_UUID" --arg i "$INBOUND_UUID" --argjson in "$inbounds" '{uuid: $u, inbounds: ($in + [$i])}')"
+  if ! jq -e --arg i "$1" 'index($i) != null' <<<"$inbounds" >/dev/null; then
+    api_ok PATCH /api/internal-squads "$(jq -nc --arg u "$SQUAD_UUID" --arg i "$1" --argjson in "$inbounds" '{uuid: $u, inbounds: ($in + [$i])}')"
   fi
 }
 
@@ -491,6 +525,7 @@ cmd_setup() {
   command -v openssl >/dev/null || die "нужна программа openssl"
   setup_profile
   setup_squad
+  setup_relay
   setup_subscription_settings
   refresh_version_json
   link_former_apk
@@ -670,9 +705,10 @@ cmd_tidy_users() {
 valid_address() { [[ "$1" =~ ^[A-Za-z0-9.:-]+$ ]]; }
 
 cmd_add_node() {
-  local name="" address="" country="XX" host="" title="" node_port=2222 body node_uuid secret
+  local name="" address="" country="" host="" title="" node_port=2222 relay=0 body node_uuid secret
   while [ $# -gt 0 ]; do
     case "$1" in
+      --relay) relay=1; shift ;;
       --host) host="${2:-}"; shift 2 ;;
       --title) title="${2:-}"; shift 2 ;;
       --node-port) node_port="${2:-}"; shift 2 ;;
@@ -685,6 +721,9 @@ cmd_add_node() {
     esac
   done
   if [ -z "$name" ] || [ -z "$address" ]; then die "пример: klaus-panel add-node de-1 203.0.113.10 DE"; fi
+  if [ -z "$country" ]; then
+    if [ "$relay" = "1" ]; then country=RU; else country=XX; fi
+  fi
   [[ "$name" =~ ^[A-Za-z0-9_.-]{3,30}$ ]] || die "имя сервера: 3–30 латинских букв, цифр, _ . -"
   host="${host:-$address}"
   title="${title:-$name}"
@@ -700,7 +739,14 @@ cmd_add_node() {
   [[ "$node_port" =~ ^[0-9]+$ ]] || die "--node-port: нужно число"
   api_ok GET /api/nodes
   jq -e --arg n "$name" 'any(.response[]; .name == $n)' <<<"$RESP" >/dev/null && die "сервер $name уже есть"
-  profile_uuid
+  if [ "$relay" = "1" ]; then
+    relay_current
+    { [ -n "$PROFILE_UUID" ] && [ "$(exit_count "$RELAY_CUR")" -gt 0 ]; } ||
+      die "сначала добавьте выход — сервер за границей с install.sh: klaus-panel add-exit ИМЯ"
+    profile_uuid "$RELAY_PROFILE_NAME" "$RELAY_INBOUND_TAG"
+  else
+    profile_uuid
+  fi
 
   body="$(jq -nc --arg n "$name" --arg a "$address" --argjson p "$node_port" --arg c "$country" \
     --arg pu "$PROFILE_UUID" --arg iu "$INBOUND_UUID" '{
@@ -723,6 +769,9 @@ cmd_add_node() {
   local extra=""
   [ "$node_port" != "2222" ] && extra+=" NODE_PORT=$node_port"
   [ "$INBOUND_PORT" != "443" ] && extra+=" VPN_PORT=$INBOUND_PORT"
+  # A relay asks the site it imitates for every handshake: the installer
+  # checks that the site answers there.
+  [ "$relay" = "1" ] && extra+=" REALITY_SITE=$RELAY_SNI"
   echo
   say "Сервер $name добавлен. Теперь на нём ($address) выполните (install-node.sh копируется так же, как install-panel.sh):"
   echo
@@ -730,6 +779,7 @@ cmd_add_node() {
   echo
   echo "Через минуту после установки проверьте: klaus-panel list-nodes (должно быть «на связи»)."
   echo "Знакомые получат этот сервер сами при следующем обновлении подписки."
+  if [ "$relay" = "1" ]; then echo "Он отправляет трафик через выходы за границей: klaus-panel list-exits."; fi
 }
 
 cmd_list_nodes() {
@@ -768,6 +818,224 @@ node_action() { # enable|disable NAME
   else
     say "$2 снова в подписках"
   fi
+}
+
+# ---------------------------------------------------------------- relays
+# A relay is a node in Russia: friends connect to a Russian address, and
+# the relay sends everything on to an exit abroad. An exit is a plain
+# VLESS + REALITY server (server/install.sh) whose address is in no
+# subscription, so watching friends' connections does not reveal it; when
+# one is blocked anyway, another is added here and friends' links stay.
+# The exits are outbounds of the relays' own profile: a balancer sends the
+# traffic through the fastest exit that answered its last probe.
+
+relay_config() { # CURRENT_CONFIG_JSON [PRIVATE_KEY SHORT_ID]
+  local target="${RELAY_TARGET:-$RELAY_SNI:443}"
+  jq -c --arg tag "$RELAY_INBOUND_TAG" --argjson port "$REALITY_PORT" --arg sni "$RELAY_SNI" \
+    --arg target "$target" --arg key "${2:-}" --arg sid "${3:-}" --arg prefix "$EXIT_PREFIX" \
+    --arg probe "$RELAY_PROBE_URL" "$PROFILE_JQ"'
+    (if . == null then {
+      log: {loglevel: "warning"},
+      inbounds: [ours],
+      outbounds: [{tag: "BLOCK", protocol: "blackhole"}],
+      routing: {rules: [
+        {ip: ["geoip:private"], outboundTag: "BLOCK"},
+        {protocol: ["bittorrent"], outboundTag: "BLOCK"},
+        # The rest goes abroad: a relay never lets traffic out in Russia,
+        # also when every exit is down.
+        {network: "tcp,udp", balancerTag: "EXITS"}
+      ]}
+    } else follow_settings end)
+    | node_settings
+    | [.outbounds[] | select(.tag | startswith($prefix)) | .tag] as $exits
+    # Before the first probes have answered, the first exit takes it all.
+    | .routing.balancers = [(.routing.balancers // [])[] | select(.tag != "EXITS")]
+        + [{tag: "EXITS", selector: [$prefix], strategy: {type: "leastPing"}}
+           + (if $exits == [] then {} else {fallbackTag: $exits[0]} end)]
+    | .observatory = {subjectSelector: [$prefix], probeUrl: $probe, probeInterval: "1m", enableConcurrency: true}' <<<"$1"
+}
+
+relay_current() { # -> PROFILE_UUID and RELAY_CUR, both empty before the first exit
+  RELAY_CUR=""
+  find_profile "$RELAY_PROFILE_NAME"
+  [ -n "$PROFILE_UUID" ] || return 0
+  api_ok GET "/api/config-profiles/$PROFILE_UUID"
+  RELAY_CUR="$(jq -c '.response.config' <<<"$RESP")"
+}
+
+save_relay() { # NEW_CONFIG_JSON, written if it differs from RELAY_CUR. On stdin:
+  # the config holds the exits' keys, and arguments show in "ps".
+  [ "$(jq -S -c . <<<"$RELAY_CUR")" != "$(jq -S -c . <<<"$1")" ] || return 0
+  api_ok PATCH /api/config-profiles "$(jq -c --arg u "$PROFILE_UUID" '{uuid: $u, config: .}' <<<"$1")"
+}
+
+exit_count() { jq --arg p "$EXIT_PREFIX" '[.outbounds[] | select(.tag | startswith($p))] | length' <<<"$1"; }
+
+relay_node_count() { # nodes running the relays' profile PROFILE_UUID
+  api_ok GET /api/nodes
+  jq --arg u "$PROFILE_UUID" '[.response[] | select(.configProfile.activeConfigProfileUuid == $u)] | length' <<<"$RESP"
+}
+
+# Called by setup and relay-site: the relays follow REALITY_PORT and
+# RELAY_SNI. Nothing to do before the first exit.
+setup_relay() {
+  relay_current
+  [ -n "$PROFILE_UUID" ] || return 0
+  save_relay "$(relay_config "$RELAY_CUR")"
+  profile_uuid "$RELAY_PROFILE_NAME" "$RELAY_INBOUND_TAG"
+  squad_include "$INBOUND_UUID"
+}
+
+urldecode() { local s="${1//+/%2B}"; printf '%b' "${s//%/\\x}"; }
+
+# An exit's share link -> EXIT_JSON, its Xray outbound, or dies. VLESS with
+# REALITY over RAW or XHTTP, as server/install.sh gives them. Errors never
+# quote the link.
+exit_outbound() { # TAG LINK
+  local link="$2" body rest hostport id host port k v net flow="" fp path mode
+  local -A q=()
+  [ "${#link}" -le 4000 ] || die "ключ слишком длинный"
+  case "$link" in vless://*@*) ;; *) die "нужен ключ vless:// сервера-выхода (его выдаёт install.sh)" ;; esac
+  body="${link#vless://}"
+  body="${body%%#*}"
+  id="$(urldecode "${body%%@*}")"
+  rest="${body#*@}"
+  hostport="${rest%%\?*}"
+  if [ "$rest" != "$hostport" ]; then
+    while IFS='=' read -r k v; do
+      if [[ "$k" =~ ^[A-Za-z0-9]{1,20}$ ]]; then q[$k]="$(urldecode "$v")"; fi
+    done < <(tr '&' '\n' <<<"${rest#*\?}")
+  fi
+  hostport="${hostport%/}"
+  port="${hostport##*:}"
+  host="${hostport%:*}"
+  host="${host#[}"
+  host="${host%]}"
+  [[ "$id" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]] || die "в ключе нет правильного UUID: скопируйте ключ целиком"
+  valid_address "$host" || die "в ключе странный адрес сервера"
+  { [[ "$port" =~ ^[0-9]{1,5}$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; } || die "в ключе странный порт"
+  [ "${q[security]:-}" = "reality" ] || die "нужен ключ с REALITY (security=reality), как от install.sh"
+  [[ "${q[pbk]:-}" =~ ^[A-Za-z0-9_-]{43}$ ]] || die "в ключе нет публичного ключа REALITY (pbk)"
+  [[ "${q[sid]:-}" =~ ^[0-9a-fA-F]{0,16}$ ]] || die "в ключе странный sid"
+  [[ "${q[sni]:-}" =~ ^[A-Za-z0-9.-]{1,253}$ ]] || die "в ключе нет сайта маскировки (sni)"
+  [[ "${q[pqv]:-}" =~ ^[A-Za-z0-9_-]*$ ]] || die "в ключе странный pqv"
+  # Current REALITY servers need a post-quantum key share in the hello;
+  # only these fingerprints always send it.
+  case "$(tr '[:upper:]' '[:lower:]' <<<"${q[fp]:-chrome}")" in
+    firefox) fp=firefox ;; safari) fp=safari ;; *) fp=chrome ;;
+  esac
+  case "${q[type]:-tcp}" in
+    tcp | raw)
+      net=raw
+      case "${q[flow]:-}" in "" | xtls-rprx-vision) flow="${q[flow]:-}" ;; *) die "в ключе странный flow" ;; esac ;;
+    xhttp)
+      net=xhttp
+      path="${q[path]:-/}"
+      mode="${q[mode]:-auto}"
+      [[ "$path" =~ ^/[A-Za-z0-9._~/-]{0,200}$ ]] || die "в ключе странный path"
+      case "$mode" in auto | packet-up | stream-up | stream-one) ;; *) die "в ключе странный mode" ;; esac ;;
+    *) die "транспорт ${q[type]:0:20} не подходит для выхода: нужен tcp или xhttp" ;;
+  esac
+  # Through the environment: the id is a password, and arguments show in "ps".
+  EXIT_JSON="$(X_ID="$id" X_HOST="$host" X_PORT="$port" X_FLOW="$flow" X_NET="$net" X_PATH="${path:-}" \
+    X_MODE="${mode:-}" X_SNI="${q[sni]}" X_FP="$fp" X_PBK="${q[pbk]}" X_SID="${q[sid]:-}" X_PQV="${q[pqv]:-}" \
+    jq -nc --arg tag "$1" 'env as $e | {
+      tag: $tag, protocol: "vless",
+      settings: {vnext: [{address: $e.X_HOST, port: ($e.X_PORT | tonumber),
+        users: [{id: $e.X_ID, encryption: "none"} + (if $e.X_FLOW != "" then {flow: $e.X_FLOW} else {} end)]}]},
+      streamSettings: ({network: $e.X_NET, security: "reality",
+        realitySettings: ({serverName: $e.X_SNI, fingerprint: $e.X_FP, password: $e.X_PBK, shortId: $e.X_SID}
+          + (if $e.X_PQV != "" then {mldsa65Verify: $e.X_PQV} else {} end))}
+        + (if $e.X_NET == "xhttp" then {xhttpSettings: {path: $e.X_PATH, mode: $e.X_MODE}} else {} end))
+    }')"
+}
+
+cmd_add_exit() {
+  local name="${1:-}" link="" key sid cfg had=0
+  [[ "$name" =~ ^[A-Za-z0-9_.-]{2,30}$ ]] || die "пример: klaus-panel add-exit nl-1 (имя: 2–30 латинских букв, цифр, _ . -)"
+  [ $# -le 1 ] || die "ключ не пишите в команде (он останется в истории): команда спросит его сама"
+  if [ -t 0 ]; then
+    read -r -s -p "Ключ сервера-выхода (vless://…, его выдал install.sh; на экране он не появится): " link
+    echo
+  else
+    IFS= read -r link || true
+  fi
+  link="$(tr -d '[:space:]' <<<"$link")"
+  exit_outbound "$EXIT_PREFIX$name" "$link"
+  relay_current
+  if [ -z "$PROFILE_UUID" ]; then
+    say "Создаю профиль $RELAY_PROFILE_NAME для российских серверов (маскировка под $RELAY_SNI)"
+    api_ok GET /api/system/tools/x25519/generate
+    key="$(jq -r '.response.keypairs[0].privateKey' <<<"$RESP")"
+    sid="$(openssl rand -hex 8)"
+    cfg="$(relay_config null "$key" "$sid")"
+  else
+    cfg="$RELAY_CUR"
+    jq -e --arg t "$EXIT_PREFIX$name" 'any(.outbounds[]; .tag == $t)' <<<"$cfg" >/dev/null && had=1
+  fi
+  # A new exit goes last, so the first one stays the fallback; one of the
+  # same name is replaced in place.
+  cfg="$(X_EXIT="$EXIT_JSON" jq -c '(env.X_EXIT | fromjson) as $o
+    | if any(.outbounds[]; .tag == $o.tag) then .outbounds |= map(if .tag == $o.tag then $o else . end)
+      else .outbounds += [$o] end' <<<"$cfg")"
+  cfg="$(relay_config "$cfg")"
+  if [ -z "$PROFILE_UUID" ]; then
+    api_ok POST /api/config-profiles "$(jq -c --arg n "$RELAY_PROFILE_NAME" '{name: $n, config: .}' <<<"$cfg")"
+  else
+    save_relay "$cfg"
+  fi
+  profile_uuid "$RELAY_PROFILE_NAME" "$RELAY_INBOUND_TAG"
+  squad_include "$INBOUND_UUID"
+  if [ "$had" = "1" ]; then say "Выход $name заменён"; else say "Выход $name добавлен"; fi
+  if [ "$(relay_node_count)" -gt 0 ]; then
+    echo "Российские серверы начнут пользоваться им в течение минуты."
+  else
+    echo "Теперь добавьте российский сервер: klaus-panel add-node ru-1 IP_СЕРВЕРА RU --relay --title \"Россия\""
+  fi
+}
+
+cmd_list_exits() {
+  relay_current
+  if [ -z "$PROFILE_UUID" ] || [ "$(exit_count "$RELAY_CUR")" = "0" ]; then
+    echo "Выходов нет. Добавить: klaus-panel add-exit ИМЯ"
+    return 0
+  fi
+  jq -r --arg p "$EXIT_PREFIX" '["ИМЯ", "АДРЕС", "ПОРТ", "ТРАНСПОРТ"],
+    (.outbounds[] | select(.tag | startswith($p)) | .settings.vnext[0] as $v
+      | [(.tag | ltrimstr($p)), $v.address, ($v.port | tostring), .streamSettings.network]) | @tsv' <<<"$RELAY_CUR" | table
+  echo
+  echo "Российские серверы ($(relay_node_count)) ведут трафик через самый быстрый выход из тех, что ответили на"
+  echo "проверку (раз в минуту), пока ответов нет — через первый. Маскировка: $RELAY_SNI."
+}
+
+cmd_delete_exit() {
+  local name="${1:-}" tag
+  [ -n "$name" ] || die "укажите имя выхода (список: klaus-panel list-exits)"
+  tag="$EXIT_PREFIX$name"
+  relay_current
+  { [ -n "$PROFILE_UUID" ] && jq -e --arg t "$tag" 'any(.outbounds[]; .tag == $t)' <<<"$RELAY_CUR" >/dev/null; } ||
+    die "нет выхода $name (список: klaus-panel list-exits)"
+  if [ "$(exit_count "$RELAY_CUR")" = "1" ] && [ "$(relay_node_count)" -gt 0 ]; then
+    die "это последний выход: российским серверам некуда будет вести трафик. Сначала добавьте другой (klaus-panel add-exit)"
+  fi
+  confirm "Убрать выход $name?"
+  save_relay "$(relay_config "$(jq -c --arg t "$tag" '.outbounds |= map(select(.tag != $t))' <<<"$RELAY_CUR")")"
+  say "Выход $name убран"
+}
+
+cmd_relay_site() {
+  local site="${1:-}"
+  if [ -z "$site" ]; then
+    echo "Российские серверы маскируются под $RELAY_SNI"
+    return 0
+  fi
+  [[ "$site" =~ ^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ ]] || die "нужно имя сайта, например vk.com"
+  set_line "$CONF" RELAY_SNI "$site"
+  RELAY_SNI="$site"
+  setup_relay
+  say "Российские серверы теперь маскируются под $site (знакомые получат это с обновлением подписки)"
+  echo "Сайт должен открываться с каждого из них по TLS 1.3. Проверка на сервере:"
+  echo "  curl --tlsv1.3 -sS -o /dev/null https://$site/ && echo OK"
 }
 
 # ---------------------------------------------------------------- misc
@@ -1453,6 +1721,10 @@ case "$cmd" in
   list-nodes) cmd_list_nodes ;;
   disable-node) node_action disable "$@" ;;
   enable-node) node_action enable "$@" ;;
+  add-exit) cmd_add_exit "$@" ;;
+  list-exits) cmd_list_exits ;;
+  delete-exit) cmd_delete_exit "$@" ;;
+  relay-site) cmd_relay_site "$@" ;;
   hwid-limit) cmd_hwid_limit "$@" ;;
   backup) cmd_backup ;;
   telegram-setup) cmd_telegram_setup "$@" ;;
