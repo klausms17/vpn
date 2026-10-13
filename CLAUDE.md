@@ -81,9 +81,9 @@ and give step-by-step instructions for anything he must do himself.
   - `install-relay.sh`: a Russian relay for mobile "whitelist" mode.
   - `remnawave/`: the panel for friends. `install-panel.sh` and
     `install-node.sh` install it; `klaus-panel` is the owner's CLI (friends,
-    nodes, publish-apk and publish-windows, telegram-setup, mail-setup and
-    the account commands; publishing needs `GITHUB_TOKEN` only for a
-    private repository); `klaus-monitor.py` turns block reports from the
+    nodes, the cascade, publish-apk and publish-windows, telegram-setup,
+    mail-setup and the account commands; publishing needs `GITHUB_TOKEN`
+    only for a private repository); `klaus-monitor.py` turns block reports from the
     app into Telegram alerts; `klaus-accounts.py` is the accounts service
     (sign-up, its letters, the owner's Telegram buttons, sign-in; see
     `docs/accounts/PLAN.md`), in a container like the monitor's, on
@@ -101,6 +101,12 @@ and give step-by-step instructions for anything he must do himself.
     the panel as installed: it only reads files on `/app/`.
     `test/` holds the Docker end-to-end test and the unit tests of the
     monitor and the accounts.
+  - The cascade: `add-node --relay` makes a node in Russia with the
+    profile `KlausRelay`, whose inbound is in every friend's squad and
+    whose outbounds are the exits abroad (`add-exit` asks for an
+    `install.sh` key hidden, `list-exits`, `delete-exit`, `relay-site`).
+    A `leastPing` balancer over Xray's observatory picks a live exit; the
+    relay never sends traffic out in Russia. Exits are in no subscription.
   - The owner may add friends in the panel's web form instead of the CLI.
     That form starts with no squad and an end date of tomorrow, so a
     systemd timer runs `klaus-panel tidy-users` every 20 seconds: users
@@ -341,6 +347,16 @@ and give step-by-step instructions for anything he must do himself.
   of `main` go to the `build-main` and `windows-build-main` releases.
 - The owner's servers: the current VPN (`install.sh`, one shared key) runs
   on a VPS in Germany; the owner also has a Beget VPS in Russia.
+- **Cascade** (13 Oct 2026): the owner's VPS at Fornex kept being blocked,
+  and Fornex forbids VPNs. He asked how to hide better; a friend suggested
+  a Russian server in front. Built: relays in Russia in the panel with
+  exits abroad behind them (see the map), in `docs/README.ru.md` section
+  12 «Каскад», and in the Docker e2e (a relay in its own container, a dead
+  exit first, the friend's traffic leaving through the live one). Browsec's
+  German 204.11.2.81 turned out to be AS203218, a tiny Swiss ISP behind
+  iFog: big VPNs use little-known networks. The owner checks his Beget VPS
+  and looks for small hosters abroad for exits; he will send the names to
+  check. Not asked yet: was Fornex blocked by the TSPU or by Fornex itself.
 
 ## Next steps
 
@@ -392,6 +408,10 @@ and give step-by-step instructions for anything he must do himself.
    tool in the drafts), then phases 4–6 (a working tunnel within about
    50 MB, then feature parity).
 5. The panel is installed (see Status). Still open:
+   - The cascade (README section 12): the owner updates the panel, puts
+     `install.sh` on a VPS abroad and adds it with `add-exit`, then the
+     Beget VPS with `add-node ru-1 IP RU --relay`. Fornex's leftover
+     balance can be a spare exit.
    - No node serves it yet, so friends' links connect nowhere. The old
      German VPN server runs the owner's own admin panel with per-friend
      keys that many iPhone friends use, so it keeps working until the
@@ -417,9 +437,9 @@ and give step-by-step instructions for anything he must do himself.
      itself. He ran it the same day («готово, панель работает»). Changes
      to the panel itself, such as `publish-windows`, still need that
      command once.
-   - The Beget VPS is not needed: a Russian exit bypasses nothing, and a
-     panel there would put friends' data under Russian requests and its
-     links to the nodes behind TSPU. Later it might be a whitelist relay.
+   - The Beget VPS becomes the first relay of the cascade (README section
+     12). It must not host the panel: that would put friends' data under
+     Russian requests.
 6. The owner once pasted a Telegram bot token into a chat. Make sure he
    revoked it (@BotFather → /revoke) and entered the new one only on the
    panel.

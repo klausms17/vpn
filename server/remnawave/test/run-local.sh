@@ -41,6 +41,12 @@
 #       subscription page,
 #   (d) the app's own Go core (libxray, via test/e2e) parses the
 #       subscription and fetches a page through the node,
+#   (e) the cascade: add-exit (the key asked for, a bad one refused, none
+#       shown by list-exits), add-node --relay (refused before the first
+#       exit), a relay in a container of its own whose friends' traffic
+#       leaves through the exit (the first node) and never from the relay
+#       itself, past a dead exit that comes first; a re-run of setup changes
+#       nothing, relay-site, delete-exit keeps the last exit,
 #   plus: a disabled friend is refused by the node, a friend made as the
 #   panel's web form makes one (no squad, end date tomorrow) gets the
 #   servers and no end date from tidy-users while older and hand-set users
@@ -79,7 +85,8 @@
 # Needs root (it adds 11.11.11.11 to lo for the test page: the profile
 # blocks private addresses), Docker with compose, go, python3, jq, curl,
 # openssl, iproute2, the free ports 80, 443, 3000, 3001, 3010, 6767, 42222,
-# 44443, 44080, 18090, 18025 and no real Remnawave on this machine. Missing images
+# 44443, 44080, 44081, 18080, 18081, 18090, 18025 and no real Remnawave on
+# this machine. Missing images
 # are pulled from mirror.gcr.io (Docker Hub limits anonymous pulls).
 #
 #   sudo bash server/remnawave/test/run-local.sh
@@ -98,6 +105,7 @@ VPN_PORT=44443
 TARGET=127.0.0.1:44080 # the site REALITY imitates: a local TLS 1.3 server
 WEB_IP=11.11.11.11
 WEB="$WEB_IP:18080"
+RELAY_TARGET="$WEB_IP:44081" # the relay's: its container reaches the host's 11.11.11.11
 TOKEN="klaus-e2e-$RANDOM$RANDOM"
 HWID=5f2a9c1e7b3d4e6f8a0b1c2d3e4f5a6b
 HWID_PC=c0ffee11c0ffee22c0ffee33c0ffee44 # the same friend's PC
@@ -129,7 +137,7 @@ python3 "$HERE/monitor_test.py" || fail "klaus-monitor unit tests"
 python3 -B "$HERE/accounts_test.py" || fail "klaus-accounts unit tests"
 docker info >/dev/null 2>&1 || fail "docker is not running"
 if [ -e /opt/remnawave ] || [ -e /opt/remnanode ]; then fail "this machine has a real Remnawave setup; not touching it"; fi
-for c in remnawave remnawave-db remnawave-redis remnawave-subscription-page caddy remnanode klaus-monitor klaus-accounts; do
+for c in remnawave remnawave-db remnawave-redis remnawave-subscription-page caddy remnanode klaus-relay klaus-monitor klaus-accounts; do
   docker inspect "$c" >/dev/null 2>&1 && fail "container $c already exists"
 done
 for img in $IMAGES; do
@@ -145,6 +153,7 @@ echo "work dir: $WORK"
 
 # ---------------------------------------------------------------- teardown
 SERVE_PID=""
+RELAY_SERVE_PID=""
 MOCK_PID=""
 teardown() {
   local rc=$?
@@ -156,7 +165,10 @@ teardown() {
     if [ -f "$d/docker-compose.yml" ]; then docker compose --project-directory "$d" down -v >/dev/null 2>&1 || true; fi
   done
   if [ -f "$WORK/node/docker-compose.yml" ]; then docker compose --project-directory "$WORK/node" down >/dev/null 2>&1 || true; fi
+  docker rm -f klaus-relay >/dev/null 2>&1 || true
+  docker network rm klaus-relay-net >/dev/null 2>&1 || true
   if [ -n "$SERVE_PID" ]; then kill "$SERVE_PID" 2>/dev/null || true; fi
+  if [ -n "$RELAY_SERVE_PID" ]; then kill "$RELAY_SERVE_PID" 2>/dev/null || true; fi
   if [ -n "$MOCK_PID" ]; then kill "$MOCK_PID" 2>/dev/null || true; fi
   ip addr del "$WEB_IP/32" dev lo 2>/dev/null || true
   echo
@@ -257,7 +269,10 @@ step "Test page on $WEB and the REALITY target on $TARGET"
 ip addr add "$WEB_IP/32" dev lo 2>/dev/null || true
 "$WORK/e2e" serve -target "$TARGET" -http "$WEB" -token "$TOKEN" > "$WORK/serve.log" 2>&1 &
 SERVE_PID=$!
+"$WORK/e2e" serve -target "$RELAY_TARGET" -http "$WEB_IP:18081" -token relay-target > "$WORK/serve-relay.log" 2>&1 &
+RELAY_SERVE_PID=$!
 retry 10 curl -fsS --noproxy '*' -o /dev/null "http://$WEB/" 2>/dev/null || fail "test page did not start"
+retry 10 curl -fsS --noproxy '*' -o /dev/null "http://$WEB_IP:18081/" 2>/dev/null || fail "the relay's target did not start"
 pass "test page answers"
 
 step "Mock Telegram and GitHub APIs on :$MOCK_PORT (a fake release with KirovVPN-$APK_VERSION.apk)"
@@ -285,6 +300,7 @@ step "install-panel.sh (fresh)"
 CONF="$WORK/opt/klaus-panel.env"
 install_panel "$WORK/opt" "$WORK/admin.txt" PANEL_DOMAIN="$PANEL_DOMAIN" SUB_DOMAIN="$SUB_DOMAIN" \
   REALITY_SNI=www.example.com REALITY_TARGET="$TARGET" REALITY_PORT="$VPN_PORT" \
+  RELAY_SNI=www.example.com RELAY_TARGET="$RELAY_TARGET" RELAY_PROBE_URL="http://$WEB/" \
   APK_URL=https://example.com/KirovVPN.apk 2>&1 | tee "$WORK/install-1.log"
 grep -q "Готово! Панель работает" "$WORK/install-1.log" || fail "install-panel.sh failed"
 [ "$(stat -c %a "$WORK/admin.txt")" = "600" ] || fail "admin credentials are not 600"
@@ -1074,6 +1090,99 @@ for secret in ivan masha mail.example "$SESSION" "${CONFIRM#*t=}" "${RESET#*t=}"
 done
 if grep -Eq '([0-9]{1,3}\.){3}[0-9]{1,3}' "$WORK/accounts.log"; then fail "the accounts' log contains an IP address"; fi
 pass "letters to one address 2 minutes apart; reset by its letter signs the device out; a refusal from the CLI shows in the app; the list; no addresses, tokens, links or IPs in the logs"
+
+step "(e) the cascade: a relay in Russia sends friends' traffic out through the exits abroad"
+# The relay is a second node in a container of its own (the first one
+# holds the host's ports), on a network with a fixed address that the panel
+# joins too. Its exit is the first node, with the key of a user of its own:
+# any VLESS REALITY server will do, as server/install.sh gives.
+RELAY_GW=10.250.250.1
+RELAY_IP=10.250.250.10
+docker network create --subnet 10.250.250.0/24 --gateway "$RELAY_GW" klaus-relay-net >/dev/null
+docker network connect klaus-relay-net remnawave
+if kp add-node ru-relay "$RELAY_IP" --relay > "$WORK/relay-early.log" 2>&1; then fail "a relay without exits was added"; fi
+grep -q "сначала добавьте выход" "$WORK/relay-early.log" || fail "no hint to add an exit first"
+kp add-user relay_friend > "$WORK/add-user-relay.log"
+RSUB="$(grep -o "https://$SUB_DOMAIN/[A-Za-z0-9_-]*" "$WORK/add-user-relay.log" | head -n 1)"
+RHWID=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+EXIT_KEY="$(sub_get "$UA_APP" "$RSUB" -H "X-Hwid: $RHWID" | base64 -d | grep -m 1 "@127.0.0.1:$VPN_PORT?" | sed "s/@127\.0\.0\.1:/@$RELAY_GW:/")"
+EXIT_ID="${EXIT_KEY#vless://}"
+EXIT_ID="${EXIT_ID%%@*}"
+[ -n "$EXIT_ID" ] || fail "no key for the exit"
+for bad in 'not a key' 'vmess://e30=' "${EXIT_KEY/security=reality/security=none}" "${EXIT_KEY/$EXIT_ID/not-a-uuid}"; do
+  if printf '%s\n' "$bad" | kp add-exit bad > "$WORK/exit-bad.log" 2>&1; then fail "add-exit took a bad key"; fi
+  if grep -qF "$EXIT_ID" "$WORK/exit-bad.log"; then fail "add-exit quoted the key"; fi
+  tail -n 1 "$WORK/exit-bad.log"
+done
+if kp add-exit typed "$EXIT_KEY" > "$WORK/exit-typed.log" 2>&1; then fail "add-exit took a key from the command line"; fi
+# The first exit is the fallback: a dead one first shows that the probes
+# steer the traffic around it.
+printf '%s\n' "${EXIT_KEY/@$RELAY_GW:$VPN_PORT/@$RELAY_GW:9}" | kp add-exit dead | tee "$WORK/add-exit-1.log"
+grep -q "Теперь добавьте российский сервер" "$WORK/add-exit-1.log" || fail "add-exit without relays"
+printf '%s\n' "$EXIT_KEY" | kp add-exit de-exit | tee "$WORK/add-exit-2.log"
+kp list-exits | tee "$WORK/exits.txt"
+grep -Eq "^dead[[:space:]]+$RELAY_GW[[:space:]]+9[[:space:]]+raw" "$WORK/exits.txt" &&
+  grep -Eq "^de-exit[[:space:]]+$RELAY_GW[[:space:]]+$VPN_PORT[[:space:]]+raw" "$WORK/exits.txt" || fail "list-exits"
+if grep -qF "$EXIT_ID" "$WORK"/add-exit-*.log "$WORK/exits.txt"; then fail "the exit's key is shown"; fi
+squad_has_relay() {
+  api /api/internal-squads | jq -e '[.response.internalSquads[] | select(.name == "KlausVPN") | .inbounds[].tag] | index("VLESS_REALITY_RELAY") != null' >/dev/null
+}
+squad_has_relay || fail "the friends' squad has no relay inbound"
+
+kp add-node ru-relay "$RELAY_IP" --relay --title "Россия" --node-port "$NODE_PORT" > "$WORK/add-relay.log"
+sed -E "s/SECRET_KEY='[^']+'/SECRET_KEY='…'/" "$WORK/add-relay.log"
+grep -q "REALITY_SITE=www.example.com" "$WORK/add-relay.log" || fail "the relay's command does not check its site"
+RELAY_SECRET="$(grep -o "SECRET_KEY='[^']*'" "$WORK/add-relay.log" | sed "s/^SECRET_KEY='//; s/'$//")"
+mkdir -p "$WORK/relay"
+printf 'NODE_PORT=%s\nSECRET_KEY=%s\n' "$NODE_PORT" "$RELAY_SECRET" > "$WORK/relay/.env"
+docker run -d --name klaus-relay --network klaus-relay-net --ip "$RELAY_IP" --cap-add NET_ADMIN \
+  --env-file "$WORK/relay/.env" remnawave/node:latest >/dev/null
+relay_up() { grep -Eq "^ru-relay[[:space:]]+RU[[:space:]].*на связи" <<<"$(kp list-nodes)"; }
+retry 45 relay_up || { kp list-nodes; docker logs --tail 30 klaus-relay; fail "the relay did not connect"; }
+kp list-nodes
+grep -Eq "^vless://[^@]+@$RELAY_IP:$VPN_PORT\?.*sni=www\.example\.com.*#%D0%A0%D0%BE%D1%81%D1%81%D0%B8%D1%8F$" \
+  <<<"$(sub_get "$UA_APP" "$RSUB" -H "X-Hwid: $RHWID" | base64 -d)" || fail "no relay named Россия in the subscription"
+# Through the relay the page sees the exit's address, not the relay's.
+relay_fetch() {
+  "$WORK/e2e" check -sub "$RSUB" -resolve "$SUB_DOMAIN:127.0.0.1" -cacert "$WORK/caddy-root.crt" \
+    -hwid "$RHWID" -url "http://$WEB/" -expect "$TOKEN" > "$WORK/relay-check.log" 2>&1
+}
+retry 45 relay_fetch || { cat "$WORK/relay-check.log"; docker logs --tail 30 klaus-relay; fail "no traffic through the relay"; }
+awk '/^server "Россия"/ { getline; print }' "$WORK/relay-check.log" | tee "$WORK/relay-answer.txt"
+grep -q "$TOKEN from " "$WORK/relay-answer.txt" || fail "no answer through the relay"
+if grep -q "from $RELAY_IP:" "$WORK/relay-answer.txt"; then fail "the relay sent the traffic out itself"; fi
+pass "the relay connected; its friend's request left through the live exit, past the dead one added first"
+
+step "(e) setup changes nothing in the relays' profile; relay-site; delete-exit keeps the last exit"
+relay_profile() {
+  local u
+  u="$(api /api/config-profiles | jq -r 'first(.response.configProfiles[] | select(.name == "KlausRelay")) | .uuid')"
+  api "/api/config-profiles/$u" | jq -S '.response.config'
+}
+relay_profile > "$WORK/relay-profile-1.json"
+jq -e '.routing.balancers[0].fallbackTag == "EXIT-dead" and .observatory.subjectSelector == ["EXIT-"]
+  and .log.access == "none" and .policy.levels["0"].connIdle == 1800' "$WORK/relay-profile-1.json" >/dev/null ||
+  fail "the relays' profile"
+kp setup > /dev/null
+relay_profile > "$WORK/relay-profile-2.json"
+cmp -s "$WORK/relay-profile-1.json" "$WORK/relay-profile-2.json" || fail "setup changed the relays' profile"
+if kp relay-site 'bad site' 2>/dev/null; then fail "relay-site took a bad name"; fi
+kp relay-site cdn.example.com
+[ "$(relay_profile | jq -r '.inbounds[] | select(.tag == "VLESS_REALITY_RELAY") | .streamSettings.realitySettings.serverNames[0]')" = "cdn.example.com" ] ||
+  fail "relay-site did not reach the profile"
+grep -qx "RELAY_SNI=cdn.example.com" "$CONF" || fail "relay-site not saved"
+kp relay-site www.example.com >/dev/null
+kp delete-exit dead --yes
+if kp delete-exit de-exit --yes 2> "$WORK/delete-last.err"; then fail "the last exit was deleted"; fi
+grep -q "последний выход" "$WORK/delete-last.err" || fail "no reason for keeping the last exit"
+[ "$(relay_profile | jq -r '.routing.balancers[0].fallbackTag')" = "EXIT-de-exit" ] || fail "the fallback did not move on"
+retry 10 relay_fetch || { cat "$WORK/relay-check.log"; fail "the relay after delete-exit"; }
+kp disable-node ru-relay
+docker rm -f klaus-relay >/dev/null
+docker network disconnect klaus-relay-net remnawave
+docker network rm klaus-relay-net >/dev/null
+if grep -q "@$RELAY_IP:" <<<"$(sub_get "$UA_APP" "$RSUB" -H "X-Hwid: $RHWID" | base64 -d)"; then fail "the disabled relay is still in the subscription"; fi
+pass "a re-run of setup keeps the profile; relay-site changes the relays' site; the last exit stays; the relay works on the one left"
 
 step "backup; a restore that stops early (a .ru domain given by mistake)"
 BACKUP_DIR="$WORK/backups" kp backup
