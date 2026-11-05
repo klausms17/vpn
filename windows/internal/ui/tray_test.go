@@ -19,6 +19,7 @@ func TestTrayLook(t *testing.T) {
 		{up(ipc.Status{State: ipc.Disconnected}), "off", "Kirov VPN — отключено", "Подключить", true, true},
 		{up(ipc.Status{State: ipc.Connecting, ProfileName: "DE"}), "connecting", "Kirov VPN — подключение… (DE)", "Отключить", false, true},
 		{up(ipc.Status{State: ipc.Connected, ProfileName: "Германия"}), "on", "Kirov VPN — подключено (Германия)", "Отключить", false, true},
+		{up(ipc.Status{State: ipc.Connected, ProfileName: "Германия", Warning: "Трафик перехватывает другой VPN"}), "error", "Kirov VPN — мешает другой VPN", "Отключить", false, true},
 		{up(ipc.Status{State: ipc.Disconnecting, ProfileName: "DE"}), "connecting", "Kirov VPN — отключение… (DE)", "Подключить", true, false},
 		{up(ipc.Status{State: ipc.Failed, Message: "Ядро не запустилось"}), "error", "Kirov VPN — ошибка подключения", "Подключить", true, true},
 	} {

@@ -6,8 +6,10 @@
 # sign in to an account and out, restart the tunnel 50 times, kill the
 # service and
 # see it come back, start with another adapter holding the tunnel's
-# address, install over itself, uninstall. Run by windows.yml; it changes
-# the PC's network and installs a service, so never run it on a real PC.
+# address, have another VPN that takes part of the tunnel's traffic named
+# while it runs, install over itself, uninstall. Run by windows.yml; it
+# changes the PC's network and installs a service, so never run it on a
+# real PC.
 param(
   [Parameter(Mandatory)] [string] $Installer,
   # The folder with kirovctl.exe and testserver.exe.
@@ -97,12 +99,13 @@ function Settings([string] $json) {
   Ctl wait-connected | Out-Null
 }
 
-# Starts the stand-in for another VPN holding the tunnel's address.
+# Starts the stand-in for another VPN: an adapter with the tunnel's
+# address, or with -route one that routes part of the internet itself.
 function OtherVpn([string[]] $more) {
   Remove-Item "$work\other.ready" -ErrorAction SilentlyContinue
   $o = Start-Process (Join-Path $Tools 'othervpn.exe') -ArgumentList (@('-ready', "$work\other.ready") + $more) -PassThru -RedirectStandardError "$work\other.err"
   for ($i = 0; $i -lt 60 -and -not (Test-Path "$work\other.ready"); $i++) { Start-Sleep -Milliseconds 500 }
-  Check (Test-Path "$work\other.ready") "another adapter has the tunnel's address ($($more -join ' '))"
+  Check (Test-Path "$work\other.ready") "the stand-in for another VPN is ready ($($more -join ' '))"
   return $o
 }
 
@@ -304,6 +307,29 @@ try {
   for ($i = 0; $i -lt 40 -and (Get-NetAdapter -Name 'Other VPN' -ErrorAction SilentlyContinue); $i++) { Start-Sleep -Milliseconds 250 }
   Ctl connect | Out-Null
   Check (Http204) 'once it is gone, the tunnel comes up'
+  Write-Host '::endgroup::'
+
+  Write-Host '::group::Another VPN takes part of the traffic'
+  # Its route is longer than the tunnel's that covers it, so Windows sends
+  # those addresses to it, as it did with Browsec's 104 routes. Nothing of
+  # the runner's own counts.
+  $since = ((Ctl wait-no-warning | Select-Object -Last 1) | ConvertFrom-Json).connectedSince
+  $other = OtherVpn @('-up', '-name', 'browbox-tun-smoke', '-type', 'sing-tun', '-route', '203.0.113.0/24')
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  $out = Ctl wait-warning
+  $sw.Stop()
+  Check ("$out" -match 'Browsec' -and "$out" -match 'browbox-tun-smoke' -and $sw.Elapsed.TotalSeconds -lt 15) "the window is told which VPN takes it, after $([int]$sw.Elapsed.TotalSeconds) s"
+  Check (Select-String -Path "$data\logs\service.log" -Pattern 'another VPN takes the tunnel' -SimpleMatch -Quiet) 'the journal tells of it'
+  $before = Through
+  Check (Http204) 'a site still answers'
+  for ($i = 0; $i -lt 20 -and (Through) -eq $before; $i++) { Start-Sleep -Milliseconds 250 }
+  Check ((Through) -gt $before) 'through the tunnel and its server'
+  Stop-Process -Id $other.Id
+  $sw.Restart()
+  Ctl wait-no-warning | Out-Null
+  $sw.Stop()
+  Check ($sw.Elapsed.TotalSeconds -lt 15) "the notice went with the other VPN, after $([int]$sw.Elapsed.TotalSeconds) s"
+  Check (((Ctl status | Select-Object -Last 1) | ConvertFrom-Json).connectedSince -eq $since) 'the tunnel stayed up throughout'
   Write-Host '::endgroup::'
 
   Write-Host '::group::Install over itself'

@@ -91,6 +91,10 @@ type Status struct {
 	ProfileName string `json:"profileName,omitempty"`
 	// Message is the error, or a notice while connected.
 	Message string `json:"message,omitempty"`
+	// Warning, while connected, is what outside Kirov VPN keeps the tunnel
+	// from working: another VPN that takes its traffic. A window of an
+	// older version leaves it out.
+	Warning string `json:"warning,omitempty"`
 	// ConnectedSince is in Unix milliseconds.
 	ConnectedSince int64 `json:"connectedSince,omitempty"`
 }

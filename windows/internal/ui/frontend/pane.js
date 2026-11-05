@@ -58,8 +58,8 @@ export function renderPane(s) {
       text = st.message || "";
       break;
     case "on":
-      title.textContent = "Подключено";
-      text = st.message || "";
+      title.textContent = st.warning ? "Мешает другой VPN" : "Подключено";
+      text = [st.warning, st.message].filter(Boolean).join(" ");
       break;
     case "disconnecting":
       title.textContent = "Отключение…";
@@ -69,7 +69,8 @@ export function renderPane(s) {
       text = st.message || "";
       break;
   }
-  if (state === "on" && !st.message && st.connectedSince) {
+  pane.toggleAttribute("data-warn", state === "on" && !!st.warning);
+  if (state === "on" && !st.message && !st.warning && st.connectedSince) {
     const timer = el("span", "timer");
     const tick = () => { timer.textContent = duration(Date.now() - st.connectedSince); };
     tick();

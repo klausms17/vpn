@@ -60,6 +60,11 @@ const (
 	directAccountMs = 20_000
 	tunnelAccountMs = 15_000
 	accountTick     = time.Minute
+	// While the tunnel is up, the routes are read for another VPN that
+	// takes its traffic this long after Windows' routes change, and every
+	// conflictEvery besides.
+	conflictSettle = 2 * time.Second
+	conflictEvery  = 30 * time.Second
 )
 
 // accountURL is this build's accounts service (the repository variable
@@ -171,6 +176,17 @@ func start(version string) (*app, error) {
 		eng    *engine.Engine
 		server *ipc.Server
 	)
+	// The windows get the engine's status, with a warning while another VPN
+	// takes the connected tunnel's traffic.
+	status := newStatusFeed(func(s ipc.Status) { server.Broadcast(ipc.NewEvent(ipc.EventStatus, s)) })
+	conflicts := newConflictWatch(conflictDeps{
+		read:      readRoutes,
+		subscribe: watchRouteChanges,
+		report:    status.warn,
+		log:       log.Warn,
+		settle:    conflictSettle,
+		every:     conflictEvery,
+	})
 	binder, err := netbind.New(adapter, log.Info, func(prev, next netbind.Choice) {
 		// Only a move from one network to another; losing the network or
 		// getting it back leaves the connections that may still work.
@@ -195,7 +211,7 @@ func start(version string) (*app, error) {
 		Profiles: profiles.ReadStrict,
 		Build:    buildConfig(xrayLog, settings.Read),
 		TrimLog:  func() { tunnel.TrimLog(xrayLog, tunnel.LogMaxBytes, tunnel.LogKeepBytes) },
-		Publish:  func(s ipc.Status) { server.Broadcast(ipc.NewEvent(ipc.EventStatus, s)) },
+		Publish:  func(s ipc.Status) { status.fromEngine(s); conflicts.tunnel(s.State == ipc.Connected) },
 		Explain:  explainer{holder: addressHolder, ipv6Off: ipv6Off}.explain,
 		Log:      log.Info,
 	})
@@ -211,7 +227,7 @@ func start(version string) (*app, error) {
 	userAgent := fmt.Sprintf("KlausVPN/%s (Windows)", version)
 	direct := subscription.Direct(userAgent, headers, directFetchMs)
 	h := &handler{
-		tunnel:   eng,
+		tunnel:   shownTunnel{Tunnel: eng, feed: status},
 		profiles: profiles,
 		settings: settings,
 		pinger:   newPinger(core.probe, profiles.ReadStrict, func(p ipc.Pings) { server.Broadcast(ipc.NewEvent(ipc.EventPings, p)) }),
@@ -275,6 +291,7 @@ func start(version string) (*app, error) {
 		eng.Run(ctx)
 		close(a.stopped)
 	}()
+	go conflicts.run(ctx)
 	go func() {
 		if err := server.Serve(a.listener); err != nil {
 			log.Error("pipe: " + err.Error())

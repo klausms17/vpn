@@ -9,6 +9,8 @@
 //	kirovctl refresh         download the subscriptions again
 //	kirovctl connect         connect and wait until connected
 //	kirovctl wait-connected  wait until the tunnel is up
+//	kirovctl wait-warning    wait until the tunnel is up and another VPN takes its traffic
+//	kirovctl wait-no-warning wait until the tunnel is up and no other VPN takes its traffic
 //	kirovctl disconnect      disconnect and wait until disconnected
 //	kirovctl ping            check every server and print the results
 //	kirovctl set-settings    save the settings read from standard input
@@ -36,7 +38,7 @@ const timeout = 90 * time.Second
 
 func main() {
 	if len(os.Args) != 2 {
-		fail(errors.New("usage: kirovctl wait-service | pipe-sddl | status | import | refresh | connect | wait-connected | disconnect | ping | set-settings | logs | account | account-login | account-logout"))
+		fail(errors.New("usage: kirovctl wait-service | pipe-sddl | status | import | refresh | connect | wait-connected | wait-warning | wait-no-warning | disconnect | ping | set-settings | logs | account | account-login | account-logout"))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -120,6 +122,12 @@ func main() {
 		}
 	case "wait-connected":
 		if err := w.until(ctx, func(w *watch) bool { return w.st.State == ipc.Connected && w.st.Message == "" }); err != nil {
+			fail(err)
+		}
+		print(w.status())
+	case "wait-warning", "wait-no-warning":
+		warned := os.Args[1] == "wait-warning"
+		if err := w.until(ctx, func(w *watch) bool { return w.st.State == ipc.Connected && (w.st.Warning != "") == warned }); err != nil {
 			fail(err)
 		}
 		print(w.status())

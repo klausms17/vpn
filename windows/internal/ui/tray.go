@@ -35,6 +35,9 @@ func lookOf(s Snapshot) trayLook {
 			look.action, look.connect = "Отключить", false
 		case ipc.Connected:
 			state, look.icon = "подключено", "on"
+			if s.Status.Warning != "" {
+				state, look.icon = "мешает другой VPN", "error"
+			}
 			look.action, look.connect = "Отключить", false
 		case ipc.Disconnecting:
 			state, look.icon = "отключение…", "connecting"

@@ -518,7 +518,9 @@ button { font: inherit; color: inherit; }
   user-select: text;
 }
 .timer { font: 600 15px var(--display); font-variant-numeric: tabular-nums; color: var(--mint-deep); }
-.pane[data-state="error"] .detail { color: #B4262B; }
+.pane[data-state="error"] .detail,
+.pane[data-warn] .detail { color: #B4262B; }
+.pane[data-warn] .detail { max-width: none; }
 .link {
   padding: 2px 8px;
   border: 0;
