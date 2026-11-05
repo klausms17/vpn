@@ -207,12 +207,13 @@ var (
 		"initial_windows_size": anything, "user_agent": anything,
 	})
 	hysteriaSettings = fields(map[string]rule{"version": anything, "auth": anything, "udpIdleTimeout": anything})
-	mask             = func(types ...string) rule {
-		return fields(map[string]rule{"type": oneOf(types...), "settings": anything})
-	}
-	finalmask = fields(map[string]rule{
-		"tcp": list(mask("fragment", "header-custom")),
-		"udp": list(mask("salamander", "noise", "header-custom")),
+	finalmask        = fields(map[string]rule{
+		"tcp": list(mask(map[string]rule{"fragment": anything, "header-custom": anything})),
+		"udp": list(mask(map[string]rule{
+			"salamander": anything, "header-custom": anything,
+			// Not noise's "script": a Lua program the core would run as SYSTEM.
+			"noise": fields(map[string]rule{"reset": anything, "noise": anything}),
+		})),
 		"quicParams": fields(map[string]rule{
 			"congestion": anything, "bbrProfile": anything, "brutalUp": anything, "brutalDown": anything,
 			"brutalDisableLossCompensation": anything, "initStreamReceiveWindow": anything,
@@ -228,6 +229,28 @@ var (
 		"tcpUserTimeout": anything, "tcpWindowClamp": anything, "tcpMaxSeg": anything,
 	})
 )
+
+// mask takes a finalmask of one of the types in settings, whose settings
+// pass that type's rule.
+func mask(settings map[string]rule) rule {
+	return func(v any, path string) error {
+		obj, ok := v.(map[string]any)
+		if !ok {
+			return refused(path)
+		}
+		kind := ""
+		for k, val := range obj {
+			if fold(k) == "type" {
+				kind, _ = val.(string)
+			}
+		}
+		s, ok := settings[strings.ToLower(kind)]
+		if !ok {
+			return refused(path + ".type: " + clip(kind))
+		}
+		return fields(map[string]rule{"type": anything, "settings": s})(v, path)
+	}
+}
 
 // stream is streamSettings; nested, it is an XHTTP downloadSettings, which
 // also names its own server and may not nest another.

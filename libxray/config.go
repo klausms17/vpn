@@ -688,7 +688,8 @@ func hostFromURL(s string) string {
 
 // sanitizeOutbound removes options a link or subscription must never
 // control: key logging to arbitrary files ("masterKeyLog"), REALITY's debug
-// output ("show") and Hysteria's congestion debug ("quicParams.debug"). It
+// output ("show"), Hysteria's congestion debug ("quicParams.debug") and a
+// finalmask's Lua "script", a program the core would run. It
 // also maps REALITY fingerprints that do not always send the post-quantum
 // key share to chrome, as links do.
 func sanitizeOutbound(v any) {
@@ -701,6 +702,8 @@ func sanitizeOutbound(v any) {
 			case strings.EqualFold(k, "masterKeyLog"):
 				delete(x, k)
 				continue
+			case strings.EqualFold(k, "finalmask"):
+				deleteFoldDeep(child, "script")
 			case strings.EqualFold(k, "quicParams"):
 				// Hysteria's congestion debug switches on process-wide output.
 				if qp, ok := child.(map[string]any); ok {
@@ -721,6 +724,22 @@ func sanitizeOutbound(v any) {
 	case []any:
 		for _, child := range x {
 			sanitizeOutbound(child)
+		}
+	}
+}
+
+// deleteFoldDeep removes key, matched case-insensitively, from every object
+// inside v.
+func deleteFoldDeep(v any, key string) {
+	switch x := v.(type) {
+	case map[string]any:
+		deleteFold(x, key)
+		for _, child := range x {
+			deleteFoldDeep(child, key)
+		}
+	case []any:
+		for _, child := range x {
+			deleteFoldDeep(child, key)
 		}
 	}
 }

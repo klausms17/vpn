@@ -59,22 +59,6 @@ func SetMemoryLimit(bytes int64, gcPercent int32) {
 // steadyGC is the collector setting outside of Start.
 var steadyGC = 100
 
-// prepareTunFd hands Xray its own copy of the provider's descriptor. On
-// darwin Xray wraps the fd from the environment in an os.File whose
-// finalizer closes it some time after Stop: with the original fd that would
-// close the tunnel under the next core. The copy is what gets closed.
-func prepareTunFd(fd int32) (int32, error) {
-	if fd <= 0 {
-		return 0, nil
-	}
-	d, err := unix.Dup(int(fd))
-	if err != nil {
-		return 0, err
-	}
-	unix.CloseOnExec(d)
-	return int32(d), nil
-}
-
 // startGC collects hard while a config is parsed (geo lists make a lot of
 // short-lived garbage, and the extension must not cross its limit at the
 // peak); the returned func restores the steady setting.

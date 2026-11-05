@@ -244,6 +244,25 @@ func TestOutboundsAreSanitized(t *testing.T) {
 	}
 }
 
+// A finalmask's Lua script is a program: a link or subscription never gets
+// the core to run one. The noise packets themselves stay.
+func TestNoiseScriptsAreDropped(t *testing.T) {
+	ob := json.RawMessage(`{"protocol":"vless","streamSettings":{"Finalmask":{"udp":[
+		{"type":"noise","settings":{"Script":"/data/x.lua"}},
+		{"type":"noise","settings":{"noise":[{"type":"rand","packet":"10-20"}]}}]}}}`)
+	res, err := prepareOutbounds([]json.RawMessage{ob})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(mustJSON(res[0]))
+	if strings.Contains(out, "x.lua") {
+		t.Errorf("the script stayed: %s", out)
+	}
+	if !strings.Contains(out, `"packet":"10-20"`) {
+		t.Errorf("the noise packets were dropped: %s", out)
+	}
+}
+
 // Xray's loader matches keys case-insensitively, so must the sanitizer.
 func TestOutboundsAreSanitizedWhateverTheCase(t *testing.T) {
 	ob := json.RawMessage(`{"protocol":"hysteria","streamSettings":{"network":"hysteria",

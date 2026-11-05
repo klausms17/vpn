@@ -27,7 +27,7 @@ func outbounds(t *testing.T, link string) []json.RawMessage {
 
 func TestWhatShareLinksMakeIsAllowed(t *testing.T) {
 	extra := url.QueryEscape(`{"xPaddingBytes":"100-1000","xmux":{"maxConcurrency":"16-32"},"downloadSettings":{"address":"dl.example.com","port":443,"network":"xhttp","security":"tls","tlsSettings":{"serverName":"dl.example.com"},"xhttpSettings":{"path":"/dl"}}}`)
-	fm := url.QueryEscape(`{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","length":"100-200"}}]}`)
+	fm := url.QueryEscape(`{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","length":"100-200"}}],"udp":[{"type":"noise","settings":{"noise":[{"type":"rand","packet":"10-20"}]}}]}`)
 	for _, link := range []string{
 		"vless://" + uuid + "@vpn.example.com:443?type=tcp&security=reality&pbk=Iv4yHdwV8Hc9BPh-c3zWJhDPLA1WZwpFNjTCn9JM2TM&sni=www.example.com&sid=ab&fp=chrome&flow=xtls-rprx-vision#DE",
 		"vless://" + uuid + "@vpn.example.com:443?type=ws&security=tls&path=%2Fws&host=cdn.example.com&heartbeatPeriod=30#WS",
@@ -69,6 +69,7 @@ func TestAnythingElseIsRefused(t *testing.T) {
 		"raw socket options":            vless(`{"sockopt":{"customSockopt":[{"level":"6","opt":"1","value":"1"}]}}`),
 		"UDP port hopping":              vless(`{"finalmask":{"udp":[{"type":"udphop","settings":{}}]}}`),
 		"ICMP":                          vless(`{"finalmask":{"udp":[{"type":"xicmp"}]}}`),
+		"a noise script":                vless(`{"finalmask":{"udp":[{"type":"noise","settings":{"script":"x.lua"}}]}}`),
 		"QUIC debug":                    vless(`{"finalmask":{"quicParams":{"debug":true}}}`),
 		"Hysteria's masquerade":         vless(`{"network":"hysteria","hysteriaSettings":{"masquerade":{"type":"file","dir":"C:\\"}}}`),
 		"a key with a Kelvin sign":      vless(`{"networ\u212a":"raw"}`),

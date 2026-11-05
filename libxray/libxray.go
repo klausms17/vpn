@@ -131,9 +131,8 @@ func NewController() *Controller {
 // Start builds an Xray instance from configJSON and starts it. tunFd is the
 // file descriptor of the VPN interface: Android's VpnService fd, or the
 // utun of an iOS packet tunnel (TunnelFD); 0 when the config has no tun
-// inbound. The fd stays owned by the caller: Xray never closes it, so the
-// caller must close it only after Stop returns (on iOS Xray works on a
-// copy, see prepareTunFd).
+// inbound. The fd stays owned by the caller: Xray reads a copy of it and
+// closes only that copy, so the caller closes its own after Stop returns.
 func (c *Controller) Start(configJSON string, tunFd int32) (err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -142,12 +141,8 @@ func (c *Controller) Start(configJSON string, tunFd int32) (err error) {
 	if c.cur != nil {
 		return errors.New("core is already running")
 	}
-	fd, err := prepareTunFd(tunFd)
-	if err != nil {
-		return fmt.Errorf("tun fd: %w", err)
-	}
-	if fd > 0 {
-		err = os.Setenv(envTunFd, strconv.Itoa(int(fd)))
+	if tunFd > 0 {
+		err = os.Setenv(envTunFd, strconv.Itoa(int(tunFd)))
 	} else {
 		err = os.Unsetenv(envTunFd)
 	}
