@@ -112,6 +112,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v7
+        id: go
         with:
           go-version-file: libxray/go.mod
           cache-dependency-path: libxray/go.sum
@@ -132,13 +133,14 @@ jobs:
         run: echo "NDK_VERSION=$(basename "$ANDROID_NDK_LATEST_HOME")" >> "$GITHUB_ENV"
 
       # gomobile takes about five minutes; the library changes only with the
-      # Go code, its modules, the build script or the NDK it is linked with.
+      # Go code (its packages under internal/ and client/ too), its modules,
+      # the Go release, the build script or the NDK it is linked with.
       - name: Core library from the cache
         id: core-lib
         uses: actions/cache@v6
         with:
           path: app/libs/libxray.aar
-          key: libxray-android-${{ env.NDK_VERSION }}-${{ hashFiles('libxray/*.go', '!libxray/*_test.go', 'libxray/go.mod', 'libxray/go.sum', 'scripts/build-libxray.sh') }}
+          key: libxray-android-${{ env.NDK_VERSION }}-go${{ steps.go.outputs.go-version }}-${{ hashFiles('libxray/**/*.go', '!libxray/**/*_test.go', 'libxray/go.mod', 'libxray/go.sum', 'scripts/build-libxray.sh') }}
 
       - name: Build Xray core library (gomobile)
         if: steps.core-lib.outputs.cache-hit != 'true'

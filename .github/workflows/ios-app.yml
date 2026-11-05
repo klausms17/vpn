@@ -1,13 +1,13 @@
 name: iPhone app
 
-# Builds the iPhone app on a macOS runner. macOS minutes are expensive
-# (they count 10x on private repositories), so this runs only when the app
-# itself changes, or by hand; core changes are checked on Linux (ios.yml).
+# Builds the iPhone app on a macOS runner when the app or the core it links
+# changes, or by hand. The repository is public, so macOS minutes are free.
 on:
   push:
     branches: ["**"]
     paths:
       - "ios/**"
+      - "libxray/**"
       - "scripts/build-libxray-ios.sh"
       - "scripts/fetch-geo.sh"
       - "scripts/prepare-geo.sh"
@@ -34,6 +34,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v7
+        id: go
         with:
           go-version-file: libxray/go.mod
           cache-dependency-path: libxray/go.sum
@@ -49,7 +50,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ios/Frameworks/Libxray.xcframework
-          key: libxray-ios-${{ steps.xcode.outputs.build }}-${{ hashFiles('libxray/*.go', 'libxray/go.mod', 'libxray/go.sum', 'scripts/build-libxray-ios.sh') }}
+          key: libxray-ios-${{ steps.xcode.outputs.build }}-go${{ steps.go.outputs.go-version }}-${{ hashFiles('libxray/**/*.go', '!libxray/**/*_test.go', 'libxray/go.mod', 'libxray/go.sum', 'scripts/build-libxray-ios.sh') }}
 
       - name: Build the core framework (gomobile)
         if: steps.core.outputs.cache-hit != 'true'
