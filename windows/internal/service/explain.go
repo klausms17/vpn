@@ -13,6 +13,10 @@ const (
 	errAlreadyExists       = syscall.Errno(183)  // ERROR_ALREADY_EXISTS
 	errObjectAlreadyExists = syscall.Errno(5010) // ERROR_OBJECT_ALREADY_EXISTS
 	errNotFound            = syscall.Errno(1168) // ERROR_NOT_FOUND
+	// wintun could not make the tunnel's adapter: its name is taken past
+	// what wintun resolves, or the device does not start.
+	errDupName            = syscall.Errno(52)   // ERROR_DUP_NAME
+	errDeviceNotAvailable = syscall.Errno(4319) // ERROR_DEVICE_NOT_AVAILABLE
 )
 
 // addressTaken refuses a start because a connected adapter, not the
@@ -50,6 +54,8 @@ func (x explainer) explain(err error) (message string, final bool) {
 			return "В Windows выключен протокол IPv6, а без него адаптер Kirov VPN не настраивается. Включите IPv6 и перезагрузите компьютер.", true
 		}
 		return "Windows не успела подготовить сетевой адаптер Kirov VPN. Подключитесь ещё раз; если не выйдет, перезагрузите компьютер.", false
+	case errors.Is(err, errDupName), errors.Is(err, errDeviceNotAvailable):
+		return "Windows не смогла создать сетевой адаптер Kirov VPN. Перезагрузите компьютер и подключитесь снова; если не выйдет, переустановите Kirov VPN.", false
 	case strings.Contains(err.Error(), "outside the TUN"):
 		// The core's own words when it cannot add its WFP filters.
 		return "Не удалось включить защиту от утечек DNS (фильтры Windows). Перезагрузите компьютер и подключитесь снова.", false

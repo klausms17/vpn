@@ -28,6 +28,8 @@ func TestExplain(t *testing.T) {
 		{"the address was held for a moment", none, coreErr(errObjectAlreadyExists), "Адрес VPN был занят другим сетевым адаптером.", false},
 		{"IPv6 switched off", clash, coreErr(errNotFound), "В Windows выключен протокол IPv6", true},
 		{"the adapter not ready yet", none, coreErr(errNotFound), "Windows не успела подготовить сетевой адаптер Kirov VPN.", false},
+		{"the adapter's name is taken", none, coreErr(errDupName), "Windows не смогла создать сетевой адаптер Kirov VPN.", false},
+		{"the adapter does not start", none, coreErr(errDeviceNotAvailable), "Windows не смогла создать сетевой адаптер Kirov VPN.", false},
 		{"no WFP", none, errors.New("unable to block DNS and IPv6 outside the TUN (remove autoSystemWfpBlockLeak to run without) > FwpmEngineOpen0 failed"), "Не удалось включить защиту от утечек DNS", false},
 		{"anything else", none, coreErr(errors.New("The system cannot find the file specified.")), "Не удалось запустить VPN (The system cannot find the file specified). Подключитесь ещё раз", false},
 	} {
