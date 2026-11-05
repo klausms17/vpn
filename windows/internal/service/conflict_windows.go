@@ -35,8 +35,9 @@ func readRoutes() routeTable {
 			description: a.Description(),
 			up:          a.OperStatus == winipcfg.IfOperStatusUp,
 			// What PowerShell's Get-NetAdapter -Physical lists, a virtual
-			// machine's network card too; VPNs' TAP adapters are Ethernet
-			// without either flag.
+			// machine's network card too. VPNs' adapters (wintun,
+			// WireGuard, TAP-Windows) are of another type, or Ethernet
+			// with neither flag.
 			physical: a.InterfaceAndOperStatusFlags&(winipcfg.IAOSFHardwareInterface|winipcfg.IAOSFConnectorPresent) != 0 &&
 				(a.Type == winipcfg.IfTypeEthernetCSMACD || a.Type == winipcfg.IfTypeIEEE80211),
 			loopback: a.Type == winipcfg.IfTypeSoftwareLoopback,

@@ -94,7 +94,7 @@ func TestFindConflicts(t *testing.T) {
 		{"a LAN and an ISP's public subnet on Wi-Fi", on(wifiLUID, 25, "192.168.1.0/24", "95.165.0.0/22", "0.0.0.0/0"), nil, false},
 		{"ranges the tunnel leaves out", on(wireguardLUID, 0, "100.64.0.0/10", "10.8.0.0/24", "169.254.0.0/16", "198.18.0.0/15", "239.255.255.250/32"), nil, false},
 		{"a disconnected adapter", on(downLUID, 0, "88.0.0.0/6"), nil, false},
-		{"broader routes", on(wireguardLUID, 0, "0.0.0.0/1", "128.0.0.0/1", "0.0.0.0/0"), nil, false},
+		{"a full tunnel's 0.0.0.0/1 and 128.0.0.0/1 or default route, however cheap", on(wireguardLUID, 0, "0.0.0.0/1", "128.0.0.0/1", "0.0.0.0/0"), nil, false},
 		{"the tunnel's own route, as cheap", on(wireguardLUID, 0, "64.0.0.0/3"), []want{{"wg0", "WireGuard"}}, false},
 		{"the tunnel's own route, costlier", on(wireguardLUID, 5, "64.0.0.0/3"), nil, false},
 		{"Windows' own subnet of a LAN VPN", []route{{prefix: netip.MustParsePrefix("26.0.0.0/8"), luid: radminLUID, local: true}}, nil, false},
@@ -122,6 +122,22 @@ func TestFindConflicts(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConflictSharesCountAddressesOnce(t *testing.T) {
+	// Two VPNs on the same five /4 routes, Browsec with one more inside
+	// them: about 36% of the tunnel's addresses, not 72%.
+	same := []string{"32.0.0.0/4", "48.0.0.0/4", "64.0.0.0/4", "128.0.0.0/4", "144.0.0.0/4"}
+	routes := append(on(browsecLUID, 0, append(same, "64.0.0.0/8")...), on(wireguardLUID, 0, same...)...)
+	found, _ := findConflicts(routeTable{tunnel: tunLUID, routes: append(tunnelRoutes(t), routes...), adapters: testAdapters})
+	if len(found.adapters) != 2 || found.most || found.adapters[0].routes != 6 {
+		t.Fatalf("%+v", found)
+	}
+	for _, c := range found.adapters {
+		if c.share < 0.36 || c.share > 0.365 {
+			t.Errorf("%s takes %.3f", c.adapter, c.share)
+		}
 	}
 }
 
@@ -167,9 +183,9 @@ func TestConflictNotice(t *testing.T) {
 		{"two take it all", takeover{adapters: []conflict{browsec, wg}, most: true},
 			"Трафик перехватывают другие VPN — Browsec (адаптер «browbox-tun-1b4e28ba-2fa1-11d2…»), WireGuard (адаптер «wg0»). Выключите их: пока они включены, Kirov VPN не работает."},
 		{"one takes some sites", takeover{adapters: []conflict{unknown}},
-			"Часть сайтов перехватывает другой VPN — адаптер «Meta»: они идут мимо Kirov VPN. Если они нужны через Kirov VPN, выключите его."},
+			"Часть сайтов открывается не через Kirov VPN: их перехватывает другой VPN — адаптер «Meta». Чтобы они открывались через Kirov VPN, выключите этот VPN."},
 		{"many take some sites", takeover{adapters: []conflict{wg, unknown, wg, unknown, wg}},
-			"Часть сайтов перехватывают другие VPN — WireGuard (адаптер «wg0»), адаптер «Meta», WireGuard (адаптер «wg0») и ещё 2: они идут мимо Kirov VPN. Если они нужны через Kirov VPN, выключите их."},
+			"Часть сайтов открывается не через Kirov VPN: их перехватывают другие VPN — WireGuard (адаптер «wg0»), адаптер «Meta», WireGuard (адаптер «wg0») и ещё 2. Чтобы они открывались через Kirov VPN, выключите эти VPN."},
 	} {
 		if got := c.t.notice(); got != c.want {
 			t.Errorf("%s:\n got %s\nwant %s", c.name, got, c.want)

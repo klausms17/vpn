@@ -61,8 +61,8 @@ const (
 	tunnelAccountMs = 15_000
 	accountTick     = time.Minute
 	// While the tunnel is up, the routes are read for another VPN that
-	// takes its traffic this long after Windows' routes change, and every
-	// conflictEvery besides.
+	// takes its traffic once Windows' routes have not changed for this
+	// long, and every conflictEvery besides.
 	conflictSettle = 2 * time.Second
 	conflictEvery  = 30 * time.Second
 )

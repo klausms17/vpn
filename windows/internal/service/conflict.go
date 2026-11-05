@@ -82,40 +82,41 @@ var notInternet = []netip.Prefix{
 // while the tunnel has no routes yet, as it starts or restarts.
 func findConflicts(t routeTable) (found takeover, ok bool) {
 	var ours []route
-	var space float64
+	var carried []netip.Prefix
 	for _, r := range t.routes {
 		if r.luid == t.tunnel && !r.local && r.prefix.Addr().Is4() {
 			ours = append(ours, r)
-			space += size(r.prefix)
+			carried = append(carried, r.prefix)
 		}
 	}
 	if len(ours) == 0 {
 		return takeover{}, false
 	}
 	byAdapter := map[uint64]*conflict{}
-	var taken float64
+	taken := map[uint64][]netip.Prefix{}
+	var all []netip.Prefix
 	for _, r := range t.routes {
 		a, known := t.adapters[r.luid]
 		if r.luid == t.tunnel || !known || !a.up || a.physical || a.loopback || r.local ||
 			!r.prefix.Addr().Is4() || r.prefix.Bits() == 32 || within(r.prefix, notInternet) || !wins(r, ours) {
 			continue
 		}
-		c := byAdapter[r.luid]
-		if c == nil {
-			c = &conflict{adapter: cmp.Or(a.name, a.description), product: productOf(a.name, a.description)}
-			byAdapter[r.luid] = c
+		if byAdapter[r.luid] == nil {
+			byAdapter[r.luid] = &conflict{adapter: cmp.Or(a.name, a.description), product: productOf(a.name, a.description)}
 		}
-		c.routes++
-		c.share += size(r.prefix) / space
-		taken += size(r.prefix)
+		taken[r.luid] = append(taken[r.luid], r.prefix)
+		all = append(all, r.prefix)
 	}
-	for _, c := range byAdapter {
+	space := covered(carried)
+	for luid, c := range byAdapter {
+		c.routes = len(taken[luid])
+		c.share = covered(taken[luid]) / space
 		found.adapters = append(found.adapters, *c)
 	}
 	slices.SortFunc(found.adapters, func(a, b conflict) int {
 		return cmp.Or(cmp.Compare(b.share, a.share), strings.Compare(a.adapter, b.adapter))
 	})
-	found.most = taken > space/2
+	found.most = covered(all) > space/2
 	return found, true
 }
 
@@ -143,7 +144,25 @@ func within(p netip.Prefix, nets []netip.Prefix) bool {
 	return false
 }
 
-func size(p netip.Prefix) float64 { return float64(uint64(1) << (32 - p.Bits())) }
+// covered counts the addresses of prefixes once, however they nest or
+// repeat (two VPNs with the same route, or one with 8.0.0.0/8 and
+// 8.8.8.0/24). It sorts prefixes.
+func covered(prefixes []netip.Prefix) float64 {
+	// Routes nest or are apart, so each one inside another comes after it.
+	slices.SortFunc(prefixes, func(a, b netip.Prefix) int {
+		return cmp.Or(a.Addr().Compare(b.Addr()), cmp.Compare(a.Bits(), b.Bits()))
+	})
+	var sum float64
+	var outer netip.Prefix
+	for _, p := range prefixes {
+		if outer.IsValid() && outer.Bits() <= p.Bits() && outer.Contains(p.Addr()) {
+			continue
+		}
+		sum += float64(uint64(1) << (32 - p.Bits()))
+		outer = p
+	}
+	return sum
+}
 
 // products are VPN programs whose adapters tell them by a word in their
 // name or description, the programs before the protocols they run.
@@ -215,9 +234,9 @@ func (t takeover) notice() string {
 	case t.most:
 		return "Трафик перехватывают другие VPN — " + list + ". Выключите их: пока они включены, Kirov VPN не работает."
 	case one:
-		return "Часть сайтов перехватывает другой VPN — " + list + ": они идут мимо Kirov VPN. Если они нужны через Kirov VPN, выключите его."
+		return "Часть сайтов открывается не через Kirov VPN: их перехватывает другой VPN — " + list + ". Чтобы они открывались через Kirov VPN, выключите этот VPN."
 	}
-	return "Часть сайтов перехватывают другие VPN — " + list + ": они идут мимо Kirov VPN. Если они нужны через Kirov VPN, выключите их."
+	return "Часть сайтов открывается не через Kirov VPN: их перехватывают другие VPN — " + list + ". Чтобы они открывались через Kirov VPN, выключите эти VPN."
 }
 
 // logLine is the journal's line about it, without addresses.

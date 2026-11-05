@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -144,6 +145,50 @@ func TestConflictWatch(t *testing.T) {
 	defer logMu.Unlock()
 	if len(logged) != 3 || !strings.Contains(logged[0], "Browsec") || !strings.Contains(logged[1], "no other VPN") {
 		t.Errorf("logged %q", logged)
+	}
+}
+
+func TestConflictWatchReadsOnceChangesPause(t *testing.T) {
+	// WireGuard takes 8.8.8.0/24, which the tunnel's 8.0.0.0/7 carries.
+	other := on(wireguardLUID, 0, "8.8.8.0/24")
+	table := func(ours []route) routeTable {
+		return routeTable{tunnel: tunLUID, routes: append(append([]route{}, ours...), other...), adapters: testAdapters}
+	}
+	var cover route
+	var rest []route
+	for _, r := range tunnelRoutes(t) {
+		if r.prefix == netip.MustParsePrefix("8.0.0.0/7") {
+			cover = r
+		} else {
+			rest = append(rest, r)
+		}
+	}
+	routes := &fakeRoutes{table: table(append(rest, cover))}
+	const settle = 200 * time.Millisecond
+	w, reports := watchFor(t, conflictDeps{read: routes.read, subscribe: routes.subscribe, settle: settle, every: time.Hour})
+	w.tunnel(true)
+	if r := next(t, reports); !strings.Contains(r, "WireGuard") {
+		t.Fatalf("at once: %q", r)
+	}
+	// The tunnel restarts and Xray sets its routes again over longer than
+	// settle, 8.0.0.0/7 last: nothing is read until it is done.
+	routes.set(table(nil))
+	const steps = 10
+	for i := 1; i <= steps; i++ {
+		time.Sleep(settle / 8)
+		routes.set(table(rest[:len(rest)*i/steps]))
+	}
+	time.Sleep(settle / 8)
+	routes.set(table(append(rest, cover)))
+	select {
+	case r := <-reports:
+		t.Fatalf("reported %q amid the changes", r)
+	case <-time.After(3 * settle):
+	}
+	other = nil
+	routes.set(table(append(rest, cover)))
+	if r := next(t, reports); r != "" {
+		t.Fatalf("once WireGuard is off: %q", r)
 	}
 }
 

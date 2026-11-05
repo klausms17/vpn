@@ -20,12 +20,9 @@ import (
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 )
 
-// The adapter's own address with -route, and the gateway the route goes
-// through: sing-tun's, as Browsec has them.
-var (
-	ownAddress = netip.MustParsePrefix("172.19.0.1/30")
-	gateway    = netip.MustParseAddr("172.19.0.2")
-)
+// ownAddress is the adapter's address with -route: sing-tun's, as
+// Browsec has it.
+var ownAddress = netip.MustParsePrefix("172.19.0.1/30")
 
 func main() {
 	up := flag.Bool("up", false, "run a session, so the adapter is connected")
@@ -62,7 +59,9 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		if err := luid.AddRoute(network.Masked(), gateway, 0); err != nil {
+		// On-link, as Xray and WireGuard add theirs: unlike a gateway, it
+		// does not wait for the address to be usable.
+		if err := luid.AddRoute(network.Masked(), netip.IPv4Unspecified(), 0); err != nil {
 			log.Fatal(err)
 		}
 	}

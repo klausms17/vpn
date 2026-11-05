@@ -27,10 +27,14 @@ type conflictDeps struct {
 	// report gets the window's notice, "" when it is over.
 	report func(notice string)
 	log    func(string)
-	// settle lets a burst of changes end before the routes are read, at
-	// most once per settle; every is how often they are read without one.
+	// settle is how long the changes must pause before the routes are
+	// read; every is how often they are read without a change.
 	settle, every time.Duration
 }
+
+// A burst of changes that goes on is read every burstSettles settles all
+// the same.
+const burstSettles = 5
 
 func newConflictWatch(d conflictDeps) *conflictWatch {
 	return &conflictWatch{conflictDeps: d, wake: make(chan struct{}, 1)}
@@ -60,15 +64,13 @@ func (w *conflictWatch) run(ctx context.Context) {
 	var (
 		watching    bool
 		unsubscribe func()
-		due         time.Time
-		shown       string
+		// burst is when the changes not read yet began.
+		burst time.Time
+		shown string
 	)
-	schedule := func(d time.Duration) {
-		check.Reset(d)
-		due = time.Now().Add(d)
-	}
 	stop := func() {
 		check.Stop()
+		burst = time.Time{}
 		if unsubscribe != nil {
 			unsubscribe()
 			unsubscribe = nil
@@ -97,13 +99,21 @@ func (w *conflictWatch) run(ctx context.Context) {
 			if unsubscribe, err = w.subscribe(changed); err != nil {
 				w.log("route changes cannot be watched, only checked now and then: " + err.Error())
 			}
-			schedule(0)
+			check.Reset(0)
 		case <-changes:
-			// One read per settle, however many changes come.
-			if watching && time.Until(due) > w.settle {
-				schedule(w.settle)
+			if !watching {
+				continue
 			}
+			// Read once the changes pause: amid them, as when the tunnel
+			// restarts and Xray sets its routes again, it may have only
+			// some of them.
+			now := time.Now()
+			if burst.IsZero() {
+				burst = now
+			}
+			check.Reset(min(w.settle, burst.Add(burstSettles*w.settle).Sub(now)))
 		case <-check.C:
+			burst = time.Time{}
 			// Unknown while the tunnel restarts: what was shown stays.
 			if found, ok := findConflicts(w.read()); ok {
 				if notice := found.notice(); notice != shown {
@@ -112,7 +122,7 @@ func (w *conflictWatch) run(ctx context.Context) {
 					w.report(notice)
 				}
 			}
-			schedule(w.every)
+			check.Reset(w.every)
 		}
 	}
 }
