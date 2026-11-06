@@ -16,6 +16,15 @@ val accountUrl: String = System.getenv("ACCOUNT_URL").orEmpty().trim().also {
     }
 }
 
+// A personal build for one person: the subscription the app adds by itself
+// on first start (secret PRESET_SUB_URL, only in a "preset" run of
+// android.yml, which publishes nothing). Empty in every other build.
+val presetSubUrl: String = System.getenv("PRESET_SUB_URL").orEmpty().trim().also {
+    require(it.isEmpty() || Regex("https://[^\\s\"\\\\@]+").matches(it)) {
+        "PRESET_SUB_URL must be an https:// link"
+    }
+}
+
 android {
     namespace = "com.klausms.vpn"
     compileSdk = 37
@@ -27,6 +36,7 @@ android {
         versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()
         versionName = System.getenv("VERSION_NAME") ?: "1.0.0-dev"
         buildConfigField("String", "ACCOUNT_URL", "\"$accountUrl\"")
+        buildConfigField("String", "PRESET_SUB_URL", "\"$presetSubUrl\"")
 
         // One APK for every phone (Android 8+, 64- and 32-bit ARM).
         ndk {

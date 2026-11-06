@@ -15,6 +15,7 @@ import com.klausms.vpn.data.GeoFiles
 import com.klausms.vpn.data.ProfilesState
 import com.klausms.vpn.data.StoredProfile
 import com.klausms.vpn.data.SubscriptionUpdater
+import com.klausms.vpn.data.httpsUrl
 import com.klausms.vpn.data.pinWhereNeeded
 import com.klausms.vpn.data.renamed
 import com.klausms.vpn.data.withNewKeys
@@ -187,6 +188,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             ui.checkWhitelist(profiles.value.profiles)
             if (staleJob?.isActive == true) return@launch
             staleJob = viewModelScope.launch {
+                addPresetSubscription()
                 // First: access granted meanwhile brings the account's servers.
                 account { checkIfDue() }.join()
                 refreshStaleSubscriptions()
@@ -194,6 +196,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 checkForUpdate()
             }
         }
+    }
+
+    /**
+     * A personal build (BuildConfig.PRESET_SUB_URL) adds its subscription by
+     * itself, so its owner has servers without copying anything. Once: a
+     * subscription the user deletes stays deleted. A failed download (no
+     * network yet) is tried again at the next opening.
+     */
+    private suspend fun addPresetSubscription() {
+        val url = httpsUrl(BuildConfig.PRESET_SUB_URL) ?: return
+        val done = withContext(Dispatchers.IO) { uiPrefs.getBoolean(KEY_PRESET_ADDED, false) }
+        if (done) return
+        if (profiles.value.subscriptions.none { it.url == url }) {
+            val op = ui.busy.start("Подключаем сервер…")
+            try {
+                addSubscription(url)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                AppLog.w("preset subscription", e)
+                message("Не удалось загрузить сервер: ${e.userMessage()}. Проверьте интернет и откройте приложение ещё раз")
+                return
+            } finally {
+                op.end()
+            }
+        }
+        withContext(Dispatchers.IO) { uiPrefs.edit { putBoolean(KEY_PRESET_ADDED, true) } }
     }
 
     /**
@@ -546,6 +574,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         const val KEY_UPDATE_CHECKED = "update_checked_at"
         const val KEY_UPDATE_ATTEMPT = "update_attempt_at"
         const val KEY_BACKGROUND_TIP = "background_tip_shown"
+        const val KEY_PRESET_ADDED = "preset_subscription_added"
         const val KEY_UPDATE_DISMISSED = "update_dismissed"
         const val UPDATE_TIMEOUT_MS = 15_000
     }
