@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"sync"
 
@@ -31,6 +32,11 @@ type subscriptions struct {
 	after func(left map[string]bool, restart bool)
 	now   func() int64
 	log   func(string)
+
+	// preset is this build's own subscription (a personal build, see
+	// presetSubURL), added once; presetDone is the file that says it was.
+	preset     string
+	presetDone string
 
 	// busy holds a token while a download runs.
 	busy chan struct{}
@@ -132,6 +138,7 @@ func (s *subscriptions) refresh(ctx context.Context, id string) (string, error) 
 // subscriptions without a fresh list for an hour. Android does it when the
 // app is opened; the service also does it at start and every hour.
 func (s *subscriptions) refreshStale(ctx context.Context) {
+	s.addPreset(ctx)
 	now := s.now()
 	for _, sub := range s.saved().Subscriptions {
 		if ctx.Err() != nil {
@@ -143,6 +150,27 @@ func (s *subscriptions) refreshStale(ctx context.Context) {
 		if _, err := s.refreshOne(ctx, sub.ID, false); err != nil && !errors.Is(err, errNoSubscription) {
 			s.log("subscription not refreshed: " + err.Error())
 		}
+	}
+}
+
+// addPreset adds this build's own subscription, so its owner has servers
+// without copying anything. Once: a subscription the user deletes stays
+// deleted. A failed download is tried again at the next refresh.
+func (s *subscriptions) addPreset(ctx context.Context) {
+	if s.preset == "" {
+		return
+	}
+	if _, err := os.Stat(s.presetDone); err == nil {
+		return
+	}
+	if !slices.ContainsFunc(s.saved().Subscriptions, func(sub model.Subscription) bool { return sub.URL == s.preset }) {
+		if _, err := s.add(ctx, s.preset); err != nil {
+			s.log("preset subscription not added: " + err.Error())
+			return
+		}
+	}
+	if err := os.WriteFile(s.presetDone, nil, 0o600); err != nil {
+		s.log("preset subscription mark not saved: " + err.Error())
 	}
 }
 

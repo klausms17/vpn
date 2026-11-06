@@ -71,6 +71,11 @@ const (
 // ACCOUNT_URL, through -ldflags -X); empty: the build has none.
 var accountURL string
 
+// presetSubURL is a personal build's own subscription (the secret
+// PRESET_SUB_URL of a "preset" run of windows.yml, through -ldflags -X),
+// added by itself; empty in every other build.
+var presetSubURL string
+
 // accountsBase is the accounts service: this build's, or one an
 // administrator set for a test (HKLM\SOFTWARE\Kirov VPN, AccountURL; only
 // administrators can write there). "" when there is none.
@@ -255,6 +260,8 @@ func start(version string) (*app, error) {
 		}
 		return core.c.FetchThroughTunnel(url, userAgent, headers, tunnelFetchMs)
 	}, func() int64 { return time.Now().UnixMilli() })
+	h.subs.preset = subscription.HTTPSURL(presetSubURL)
+	h.subs.presetDone = filepath.Join(dataDir, "preset-added")
 	var accountClient *account.Client
 	if base := accountsBase(); base != "" {
 		directAccount := account.Direct(userAgent, directAccountMs)

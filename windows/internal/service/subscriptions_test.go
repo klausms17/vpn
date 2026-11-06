@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -320,5 +322,34 @@ func TestServersThatCannotBeUsedAreCounted(t *testing.T) {
 	r := env.importText(t, subLink)
 	if r.Added != 1 || !strings.HasPrefix(r.Message, "Подписка «Kirov VPN»: серверов 1. Пропущено: 1 (self: не удалось получить сертификат сервера") {
 		t.Errorf("result %+v", r)
+	}
+}
+
+func TestAPersonalBuildAddsItsSubscriptionOnce(t *testing.T) {
+	env := newEnv(t)
+	env.h.subs.preset = subLink
+	env.h.subs.presetDone = filepath.Join(t.TempDir(), "preset-added")
+	env.panel = func(string) (*libxray.FetchResult, error) { return nil, errors.New("HTTP 502 Bad Gateway") }
+	// No network yet: nothing saved, tried again later.
+	env.h.subs.refreshStale(context.Background())
+	if subs := env.h.profiles.Read().Subscriptions; len(subs) != 0 {
+		t.Fatalf("saved after a failure: %+v", subs)
+	}
+	if _, err := os.Stat(env.h.subs.presetDone); err == nil {
+		t.Fatal("marked as added after a failure")
+	}
+	env.serves("Kirov VPN", keyDE)
+	env.h.subs.refreshStale(context.Background())
+	p := env.h.profiles.Read()
+	if len(p.Subscriptions) != 1 || p.Subscriptions[0].URL != subLink || len(p.Profiles) != 1 || p.SelectedID != p.Profiles[0].ID {
+		t.Fatalf("after the first refresh: %+v", p)
+	}
+	// Deleted by the user: it stays deleted.
+	if _, err := env.call(ipc.OpDeleteSubscription, ipc.IDArgs{ID: p.Subscriptions[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+	env.h.subs.refreshStale(context.Background())
+	if subs := env.h.profiles.Read().Subscriptions; len(subs) != 0 {
+		t.Errorf("added again after deleting: %+v", subs)
 	}
 }
